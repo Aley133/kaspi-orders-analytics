@@ -1,0 +1,10 @@
+version: "3.8"
+services:
+  kaspi-orders:
+    build: .
+    container_name: kaspi-orders
+    ports:
+      - "${PORT:-8899}:8899"
+    env_file:
+      - .env
+    restart: unless-stopped

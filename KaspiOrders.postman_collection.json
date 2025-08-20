@@ -1,0 +1,53 @@
+{
+  "info": {
+    "name": "Kaspi Orders Daily Count (LeoXpress) v0.2.1",
+    "_postman_id": "v021-demo",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Health",
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/health"
+      }
+    },
+    {
+      "name": "Meta",
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/meta"
+      }
+    },
+    {
+      "name": "Ping Kaspi",
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/diagnostics/ping-kaspi"
+      }
+    },
+    {
+      "name": "Daily Count",
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/orders/daily-count",
+        "urlencode": [
+          {
+            "key": "start",
+            "value": "2025-08-01"
+          },
+          {
+            "key": "end",
+            "value": "2025-08-19"
+          }
+        ]
+      }
+    }
+  ],
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8899"
+    }
+  ]
+}
