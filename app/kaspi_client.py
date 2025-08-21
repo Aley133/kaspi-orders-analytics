@@ -13,7 +13,7 @@ class KaspiClient:
             "Accept": "application/vnd.api+json",
             "Content-Type": "application/vnd.api+json",
             "X-Auth-Token": token,
-            "User-Agent": "kaspi-orders-service/0.4.3",
+            "User-Agent": "kaspi-orders-service/0.4.4",
         }
         self.timeout = httpx.Timeout(connect=timeout_connect, read=timeout_read, write=timeout_read, pool=timeout_read)
 

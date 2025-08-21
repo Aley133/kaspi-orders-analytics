@@ -1,7 +1,7 @@
 from __future__ import annotations
 import os, re
 from datetime import datetime, timedelta
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 import pytz
 from dotenv import load_dotenv
 from fastapi import FastAPI, Query, HTTPException
@@ -14,8 +14,7 @@ from httpx import HTTPStatusError, RequestError
 from .kaspi_client import KaspiClient
 
 load_dotenv()
-
-app = FastAPI(title="Kaspi Orders — Analytics (LeoXpress)", version="0.4.3")
+app = FastAPI(title="Kaspi Orders — Analytics (LeoXpress)", version="0.4.4")
 
 KASPI_TOKEN = os.getenv("KASPI_TOKEN")
 DEFAULT_TZ = os.getenv("TZ", "Asia/Almaty")
@@ -27,7 +26,7 @@ AMOUNT_DIVISOR = float(os.getenv("AMOUNT_DIVISOR", "1"))
 CURRENCY = os.getenv("CURRENCY", "KZT")
 CHUNK_DAYS = int(os.getenv("CHUNK_DAYS", "7"))
 DATE_FIELD_DEFAULT = os.getenv("DATE_FIELD_DEFAULT", "creationDate")
-DATE_FIELD_OPTIONS = [s.strip() for s in os.getenv("DATE_FIELD_OPTIONS","creationDate").split(",") if s.strip()]
+DATE_FIELD_OPTIONS = [s.strip() for s in os.getenv("DATE_FIELD_OPTIONS","creationDate,plannedDeliveryDate,plannedShipmentDate,shipmentDate,deliveryDate").split(",") if s.strip()]
 API_DATE_FILTER_FIELD_ENV = os.getenv("API_DATE_FILTER_FIELD","").strip() or "creationDate"
 CITY_KEYS = [s.strip() for s in os.getenv("CITY_KEYS","city").split(",") if s.strip()]
 
@@ -42,6 +41,14 @@ def parse_date_local(d: str, tz_name: str) -> datetime:
     try: base = datetime.strptime(d, "%Y-%m-%d")
     except ValueError as e: raise HTTPException(status_code=400, detail=f"Неверный формат даты: {d}. Ожидается YYYY-MM-DD") from e
     return tz.localize(base)
+
+def apply_hhmm(dt: datetime, hhmm: Optional[str]) -> datetime:
+    if not hhmm: return dt
+    try:
+        hh, mm = hhmm.split(":")
+        return dt.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
+    except Exception:
+        raise HTTPException(status_code=400, detail=f"Неверный формат времени: {hhmm}. Ожидается HH:MM")
 
 def extract_amount(attrs: Dict) -> float:
     for key in AMOUNT_FIELDS:
@@ -80,9 +87,13 @@ def extract_city(attrs: Dict) -> str:
             m = CITY_REGEX.search(val); return (m.group(1).strip() if m else val.split(',')[0].strip()) or "—"
     return "—"
 
-STATE_MAP = {"CANCELED":"CANCELED","CANCELLED":"CANCELED","CANCEL":"CANCELED",
-             "CANCELED_BY_SELLER":"CANCELED","CANCELED_BY_CUSTOMER":"CANCELED",
-             "COMPLETED":"COMPLETED","DELIVERED":"COMPLETED"}
+STATE_MAP = {
+    "CANCELED":"CANCELED","CANCELLED":"CANCELED","CANCEL":"CANCELED",
+    "CANCELED_BY_SELLER":"CANCELED","CANCELED_BY_CUSTOMER":"CANCELED",
+    "COMPLETED":"COMPLETED","DELIVERED":"COMPLETED",
+    "KASPI_DELIVERY":"KASPI_DELIVERY","ARCHIVE":"ARCHIVE",
+    "APPROVED":"APPROVED","NEW":"NEW","READY_FOR_SHIPMENT":"READY_FOR_SHIPMENT",
+}
 def norm_state(s: str) -> str: return STATE_MAP.get(s.strip().upper(), s.strip().upper())
 
 def parse_states_csv(csv: Optional[str]) -> Optional[set]:
@@ -91,8 +102,7 @@ def parse_states_csv(csv: Optional[str]) -> Optional[set]:
     return set(norm_state(x) for x in arr) if arr else None
 
 def iter_chunks(start_dt: datetime, end_dt: datetime, days: int):
-    cur = start_dt; from datetime import timedelta
-    delta = timedelta(days=days)
+    cur = start_dt; delta = timedelta(days=days)
     while cur <= end_dt:
         chunk_end = min(cur + delta - timedelta(milliseconds=1), end_dt)
         yield cur, chunk_end
@@ -105,8 +115,8 @@ class CityRow(BaseModel):
 class AnalyticsResponse(BaseModel):
     range: Dict[str,str]; timezone: str; currency: str; date_field: str
     total_orders: int; total_amount: float
-    days: list[SeriesRow]; prev_days: list[SeriesRow]
-    cities: list[CityRow]; state_breakdown: Dict[str,int]
+    days: List[SeriesRow]; prev_days: List[SeriesRow]
+    cities: List[CityRow]; state_breakdown: Dict[str,int]
 
 @app.get("/meta")
 async def meta():
@@ -116,7 +126,6 @@ async def meta():
             "api_date_filter_field": API_DATE_FILTER_FIELD_ENV, "city_keys": CITY_KEYS}
 
 def _collect_range(start_dt: datetime, end_dt: datetime, tz: str, date_field: str, api_field: str, states_inc: Optional[set], states_ex: set):
-    from datetime import timedelta
     tzinfo = pytz.timezone(tz)
     seen_ids = set()
     day_counts: Dict[str,int] = {}; day_amounts: Dict[str,float] = {}
@@ -164,8 +173,7 @@ def _collect_range(start_dt: datetime, end_dt: datetime, tz: str, date_field: st
         except RequestError as e:
             raise HTTPException(status_code=502, detail=f"Network error: {e}")
 
-    curd = start_dt.date(); last = end_dt.date(); from datetime import timedelta
-    series = []
+    curd = start_dt.date(); last = end_dt.date(); series = []
     while curd <= last:
         k = curd.isoformat()
         series.append({"x": k, "count": day_counts.get(k,0), "amount": round(day_amounts.get(k,0.0),2)})
@@ -180,10 +188,18 @@ def _collect_range(start_dt: datetime, end_dt: datetime, tz: str, date_field: st
 async def analytics(start: str = Query(...), end: str = Query(...), tz: str = Query(DEFAULT_TZ),
                     date_field: str = Query(DATE_FIELD_DEFAULT), api_filter_field: Optional[str] = Query(None),
                     states: Optional[str] = Query(None), exclude_states: Optional[str] = Query(None),
-                    with_prev: bool = Query(True), exclude_canceled: bool = Query(True)):
-    from datetime import timedelta
+                    with_prev: bool = Query(True), exclude_canceled: bool = Query(True),
+                    start_time: Optional[str] = Query(None), end_time: Optional[str] = Query(None)):
     tzinfo = pytz.timezone(tz)
-    start_dt = parse_date_local(start, tz); end_dt = parse_date_local(end, tz) + timedelta(days=1) - timedelta(milliseconds=1)
+    start_dt = parse_date_local(start, tz)
+    end_dt = parse_date_local(end, tz) + timedelta(days=1) - timedelta(milliseconds=1)
+
+    if start_time: start_dt = apply_hhmm(start_dt, start_time)
+    if end_time:
+        e0 = parse_date_local(end, tz)
+        end_dt = apply_hhmm(e0, end_time)
+        end_dt = end_dt.replace(tzinfo=tzinfo)
+
     if end_dt < start_dt: raise HTTPException(status_code=400, detail="end < start")
 
     api_field = api_filter_field or API_DATE_FILTER_FIELD_ENV or "creationDate"
@@ -204,8 +220,40 @@ async def analytics(start: str = Query(...), end: str = Query(...), tz: str = Qu
             "timezone": tz, "currency": CURRENCY, "date_field": date_field,
             "total_orders": tot, "total_amount": tot_amt, "days": days, "prev_days": prev_days, "cities": cities, "state_breakdown": st_counts}
 
+@app.get("/orders/debug")
+async def debug_list(start: str, end: str, tz: str = DEFAULT_TZ, date_field: str = DATE_FIELD_DEFAULT,
+                     states: Optional[str] = None, limit: int = 50, api_filter_field: Optional[str] = None):
+    tzinfo = pytz.timezone(tz)
+    start_dt = parse_date_local(start, tz)
+    end_dt = parse_date_local(end, tz) + timedelta(days=1) - timedelta(milliseconds=1)
+    api_field = api_filter_field or API_DATE_FILTER_FIELD_ENV or "creationDate"
+    inc = parse_states_csv(states)
+    out = []
+    for s,e in iter_chunks(start_dt, end_dt, CHUNK_DAYS):
+        try:
+            try_field = api_field
+            while True:
+                try:
+                    for order in client.iter_orders(start=s,end=e,filter_field=try_field):
+                        attrs = order.get("attributes", {})
+                        st = norm_state(str(attrs.get("state","")))
+                        if inc and st not in inc: continue
+                        ms = (extract_ms(attrs, date_field) or extract_ms(attrs, api_field))
+                        xdate = None
+                        if ms is not None:
+                            xdate = datetime.fromtimestamp(ms/1000.0, tz=tzinfo).isoformat()
+                        out.append({"id": order.get("id"), "state": st, "date": xdate, "amount": extract_amount(attrs)})
+                        if len(out)>=limit: return {"count": len(out), "sample": out}
+                    break
+                except HTTPStatusError as ee:
+                    if ee.response.status_code in (400,422) and try_field != "creationDate":
+                        try_field = "creationDate"; continue
+                    raise
+        except RequestError as e:
+            raise HTTPException(status_code=502, detail=f"Network: {e}")
+    return {"count": len(out), "sample": out}
+
 @app.get("/", include_in_schema=False)
-async def root():
-    return RedirectResponse(url="/ui/")
+async def root(): return RedirectResponse(url="/ui/")
 
 app.mount("/ui", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static"), html=True), name="static")
