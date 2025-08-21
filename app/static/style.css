@@ -22,4 +22,6 @@ input{background:transparent;color:var(--fg);border:none;outline:none}
 table{width:100%;border-collapse:collapse}
 th,td{padding:10px;border-bottom:1px solid #263043}
 td.r,th.r{text-align:right}
+.flexrow{display:flex;justify-content:space-between;align-items:center}
+.actions .btn{margin-left:8px}
 @media(max-width:980px){.grid2{grid-template-columns:1fr}.kpis{grid-template-columns:1fr 1fr}}
