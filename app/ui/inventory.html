@@ -1,45 +1,46 @@
 <!doctype html>
-<html lang=\"ru\">
+<html lang="ru">
 <head>
-  <meta charset=\"utf-8\"/>
-  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>Склад · Kaspi Orders</title>
-  <link rel=\"stylesheet\" href=\"/ui/assets/css/theme.css\"/>
+  <link rel="stylesheet" href="/ui/assets/css/theme.css"/>
 </head>
 <body>
-  <div class=\"container\">
+  <div class="container">
     <header>
       <h1>Склад</h1>
       <div>
-        <a class=\"btn\" href=\"/ui/\">Главная</a>
-        <a class=\"btn\" href=\"/ui/profit.html\">Профит</a>
-        <button class=\"btn\" id=\"themeBtn\">Тема</button>
+        <a class="btn" href="/ui/">Главная</a>
+        <a class="btn" href="/ui/profit.html">Профит</a>
+        <a class="btn" href="/ui/catalog.html">Каталог</a>
+        <button class="btn" id="themeBtn">Тема</button>
       </div>
     </header>
 
-    <section class=\"panel\">
+    <section class="panel">
       <h2>Приход партии</h2>
-      <form id=\"batchForm\" class=\"controls\">
-        <input type=\"text\" id=\"product_code\" placeholder=\"Код товара (из Kaspi)\" required/>
-        <input type=\"text\" id=\"product_name\" placeholder=\"Название (опционально)\"/>
-        <input type=\"date\" id=\"received_at\" required/>
-        <input type=\"number\" step=\"0.01\" id=\"unit_cost\" placeholder=\"Себестоимость за ед.\" required/>
-        <input type=\"number\" id=\"qty_in\" placeholder=\"Кол-во\" required/>
-        <input type=\"text\" id=\"note\" placeholder=\"Заметка\"/>
-        <button class=\"btn primary\" type=\"submit\">Добавить партию</button>
+      <form id="batchForm" class="controls">
+        <input type="text" id="product_code" placeholder="Код товара (из Kaspi)" required/>
+        <input type="text" id="product_name" placeholder="Название (опционально)"/>
+        <input type="date" id="received_at" required/>
+        <input type="number" step="0.01" id="unit_cost" placeholder="Себестоимость за ед." required/>
+        <input type="number" id="qty_in" placeholder="Кол-во" required/>
+        <input type="text" id="note" placeholder="Заметка"/>
+        <button class="btn primary" type="submit">Добавить партию</button>
       </form>
     </section>
 
-    <section class=\"panel\">
-      <div class=\"flexrow\">
+    <section class="panel">
+      <div class="flexrow">
         <h2>Остатки</h2>
-        <button id=\"recalcSales\" class=\"btn\">♻ Пересчитать продажи (FIFO)</button>
+        <button id="recalcSales" class="btn">♻ Пересчитать продажи (FIFO)</button>
       </div>
-      <div id=\"stockTable\"></div>
-      <p class=\"muted\">Строки ниже порога подсвечиваются <b style=\"color:#d22\">красным</b>.</p>
+      <div id="stockTable"></div>
+      <p class="muted">Строки ниже порога подсвечиваются <b style="color:#d22">красным</b>.</p>
     </section>
   </div>
-  <script type=\"module\" src=\"/ui/assets/js/inventory.js\"></script>
-  <script type=\"module\" src=\"/ui/assets/js/state.js\"></script>
+  <script type="module" src="/ui/assets/js/inventory.js"></script>
+  <script type="module" src="/ui/assets/js/state.js"></script>
 </body>
 </html>
