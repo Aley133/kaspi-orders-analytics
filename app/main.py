@@ -14,7 +14,7 @@ from httpx import HTTPStatusError, RequestError
 from .kaspi_client import KaspiClient
 
 load_dotenv()
-app = FastAPI(title="Kaspi Orders — Analytics (LeoXpress)", version="0.4.4")
+app = FastAPI(title="Kaspi Orders — Analytics (LeoXpress)", version="0.4.5")
 
 KASPI_TOKEN = os.getenv("KASPI_TOKEN")
 DEFAULT_TZ = os.getenv("TZ", "Asia/Almaty")
@@ -27,7 +27,6 @@ CURRENCY = os.getenv("CURRENCY", "KZT")
 CHUNK_DAYS = int(os.getenv("CHUNK_DAYS", "7"))
 DATE_FIELD_DEFAULT = os.getenv("DATE_FIELD_DEFAULT", "creationDate")
 DATE_FIELD_OPTIONS = [s.strip() for s in os.getenv("DATE_FIELD_OPTIONS","creationDate,plannedDeliveryDate,plannedShipmentDate,shipmentDate,deliveryDate").split(",") if s.strip()]
-API_DATE_FILTER_FIELD_ENV = os.getenv("API_DATE_FILTER_FIELD","").strip() or "creationDate"
 CITY_KEYS = [s.strip() for s in os.getenv("CITY_KEYS","city").split(",") if s.strip()]
 
 if not KASPI_TOKEN: raise RuntimeError("KASPI_TOKEN не задан в окружении (.env)")
@@ -75,7 +74,6 @@ def dict_get_path(d: Dict, path: str):
     return cur
 
 CITY_REGEX = re.compile(r"(?:г\.?|город)\s*([A-Za-zА-Яа-яЁё\-\s]+)")
-
 def extract_city(attrs: Dict) -> str:
     for key in CITY_KEYS:
         val = dict_get_path(attrs, key)
@@ -123,9 +121,9 @@ async def meta():
     return {"shop": SHOP_NAME, "partner_id": PARTNER_ID, "timezone": DEFAULT_TZ, "currency": CURRENCY,
             "amount_fields": AMOUNT_FIELDS, "divisor": AMOUNT_DIVISOR, "chunk_days": CHUNK_DAYS,
             "date_field_default": DATE_FIELD_DEFAULT, "date_field_options": DATE_FIELD_OPTIONS,
-            "api_date_filter_field": API_DATE_FILTER_FIELD_ENV, "city_keys": CITY_KEYS}
+            "city_keys": CITY_KEYS}
 
-def _collect_range(start_dt: datetime, end_dt: datetime, tz: str, date_field: str, api_field: str, states_inc: Optional[set], states_ex: set):
+def _collect_range(start_dt: datetime, end_dt: datetime, tz: str, date_field: str, states_inc: Optional[set], states_ex: set):
     tzinfo = pytz.timezone(tz)
     seen_ids = set()
     day_counts: Dict[str,int] = {}; day_amounts: Dict[str,float] = {}
@@ -135,7 +133,8 @@ def _collect_range(start_dt: datetime, end_dt: datetime, tz: str, date_field: st
 
     for s,e in iter_chunks(start_dt, end_dt, CHUNK_DAYS):
         try:
-            try_field = api_field
+            # KEY FIX: we filter AT THE API by the SELECTED date_field (not creationDate).
+            try_field = date_field
             while True:
                 try:
                     for order in client.iter_orders(start=s, end=e, filter_field=try_field):
@@ -146,10 +145,10 @@ def _collect_range(start_dt: datetime, end_dt: datetime, tz: str, date_field: st
                         if states_inc and st not in states_inc: continue
                         if st in states_ex: continue
 
-                        ms = extract_ms(attrs, date_field) or extract_ms(attrs, api_field)
+                        ms = extract_ms(attrs, date_field) or extract_ms(attrs, try_field)
                         if ms is None: continue
                         dtt = datetime.fromtimestamp(ms/1000.0, tz=tzinfo)
-                        if dtt < start_dt.astimezone(tzinfo) or dtt > end_dt.astimezone(tzinfo): 
+                        if dtt < start_dt.astimezone(tzinfo) or dtt > end_dt.astimezone(tzinfo):
                             continue
 
                         day_key = dtt.date().isoformat()
@@ -166,6 +165,7 @@ def _collect_range(start_dt: datetime, end_dt: datetime, tz: str, date_field: st
                         total_orders += 1; total_amount += amt
                     break
                 except HTTPStatusError as ee:
+                    # If API does not support this date_field filtering, gracefully fallback.
                     if ee.response.status_code in (400, 422) and try_field != "creationDate":
                         try_field = "creationDate"
                         continue
@@ -186,7 +186,7 @@ def _collect_range(start_dt: datetime, end_dt: datetime, tz: str, date_field: st
 
 @app.get("/orders/analytics", response_model=AnalyticsResponse)
 async def analytics(start: str = Query(...), end: str = Query(...), tz: str = Query(DEFAULT_TZ),
-                    date_field: str = Query(DATE_FIELD_DEFAULT), api_filter_field: Optional[str] = Query(None),
+                    date_field: str = Query(DATE_FIELD_DEFAULT),
                     states: Optional[str] = Query(None), exclude_states: Optional[str] = Query(None),
                     with_prev: bool = Query(True), exclude_canceled: bool = Query(True),
                     start_time: Optional[str] = Query(None), end_time: Optional[str] = Query(None)):
@@ -202,19 +202,18 @@ async def analytics(start: str = Query(...), end: str = Query(...), tz: str = Qu
 
     if end_dt < start_dt: raise HTTPException(status_code=400, detail="end < start")
 
-    api_field = api_filter_field or API_DATE_FILTER_FIELD_ENV or "creationDate"
     inc = parse_states_csv(states)
     exc = parse_states_csv(exclude_states) or set()
     if exclude_canceled: exc |= {"CANCELED"}
 
-    days, cities, tot, tot_amt, st_counts = _collect_range(start_dt, end_dt, tz, date_field, api_field, inc, exc)
+    days, cities, tot, tot_amt, st_counts = _collect_range(start_dt, end_dt, tz, date_field, inc, exc)
 
     prev_days = []
     if with_prev:
         span_days = (end_dt.date() - start_dt.date()).days + 1
         prev_end = start_dt - timedelta(milliseconds=1)
         prev_start = prev_end - timedelta(days=span_days) + timedelta(milliseconds=1)
-        prev_days, _, _, _, _ = _collect_range(prev_start, prev_end, tz, date_field, api_field, inc, exc)
+        prev_days, _, _, _, _ = _collect_range(prev_start, prev_end, tz, date_field, inc, exc)
 
     return {"range":{"start":start_dt.astimezone(tzinfo).date().isoformat(),"end":end_dt.astimezone(tzinfo).date().isoformat()},
             "timezone": tz, "currency": CURRENCY, "date_field": date_field,
@@ -222,27 +221,26 @@ async def analytics(start: str = Query(...), end: str = Query(...), tz: str = Qu
 
 @app.get("/orders/debug")
 async def debug_list(start: str, end: str, tz: str = DEFAULT_TZ, date_field: str = DATE_FIELD_DEFAULT,
-                     states: Optional[str] = None, limit: int = 50, api_filter_field: Optional[str] = None):
+                     states: Optional[str] = None, limit: int = 100):
     tzinfo = pytz.timezone(tz)
     start_dt = parse_date_local(start, tz)
     end_dt = parse_date_local(end, tz) + timedelta(days=1) - timedelta(milliseconds=1)
-    api_field = api_filter_field or API_DATE_FILTER_FIELD_ENV or "creationDate"
     inc = parse_states_csv(states)
     out = []
     for s,e in iter_chunks(start_dt, end_dt, CHUNK_DAYS):
         try:
-            try_field = api_field
+            try_field = date_field
             while True:
                 try:
                     for order in client.iter_orders(start=s,end=e,filter_field=try_field):
                         attrs = order.get("attributes", {})
                         st = norm_state(str(attrs.get("state","")))
                         if inc and st not in inc: continue
-                        ms = (extract_ms(attrs, date_field) or extract_ms(attrs, api_field))
+                        ms = (extract_ms(attrs, date_field) or extract_ms(attrs, try_field))
                         xdate = None
                         if ms is not None:
                             xdate = datetime.fromtimestamp(ms/1000.0, tz=tzinfo).isoformat()
-                        out.append({"id": order.get("id"), "state": st, "date": xdate, "amount": extract_amount(attrs)})
+                        out.append({"id": order.get("id"), "state": st, "date": xdate})
                         if len(out)>=limit: return {"count": len(out), "sample": out}
                     break
                 except HTTPStatusError as ee:
