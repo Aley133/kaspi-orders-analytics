@@ -1,5 +1,4 @@
 import {initTheme} from './state.js';
-
 initTheme();
 
 const $ = (s, el=document)=>el.querySelector(s);
@@ -34,24 +33,22 @@ $('#recalcSales').addEventListener('click', async ()=>{
 async function loadStock(){
   const data = await api('/inventory/stock');
   const rows = data.map(r=>`
-    <tr class="\${r.low ? 'low' : ''}">
-      <td><code>\${r.product_code}</code></td>
-      <td>\${r.product_name || ''}</td>
-      <td class="r">\${r.qty_in}</td>
-      <td class="r">\${r.qty_sold}</td>
-      <td class="r">\${r.qty_left}</td>
+    <tr class="${r.low ? 'low' : ''}">
+      <td><code>${r.product_code}</code></td>
+      <td>${r.product_name || ''}</td>
+      <td class="r">${r.qty_in}</td>
+      <td class="r">${r.qty_sold}</td>
+      <td class="r">${r.qty_left}</td>
       <td class="r">
-        <input type="number" min="0" value="\${r.threshold||0}" data-code="\${r.product_code}" class="th-input"/>
+        <input type="number" min="0" value="${r.threshold||0}" data-code="${r.product_code}" class="th-input"/>
       </td>
     </tr>
   `).join('');
-  $('#stockTable').innerHTML = \`
+  document.getElementById('stockTable').innerHTML = `
     <table>
-      <thead><tr>
-        <th>Код</th><th>Название</th><th class="r">Приход</th><th class="r">Продано</th><th class="r">Остаток</th><th class="r">Порог</th>
-      </tr></thead>
-      <tbody>\${rows}</tbody>
-    </table>\`;
+      <thead><tr><th>Код</th><th>Название</th><th class="r">Приход</th><th class="r">Продано</th><th class="r">Остаток</th><th class="r">Порог</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
   $$('.th-input').forEach(inp=>{
     inp.addEventListener('change', async ()=>{
       const code = inp.dataset.code;
