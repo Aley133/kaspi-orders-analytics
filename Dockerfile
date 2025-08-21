@@ -1,9 +1,16 @@
 FROM python:3.11-slim
-ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
 WORKDIR /app
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
 COPY app ./app
-COPY .env ./.env
-ENV TZ=${TZ:-Asia/Almaty}
+# В проде переменные окружения приходят из Render => .env не копируем
+# COPY .env ./.env
+
+# Render сам подставляет PORT
 CMD uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8899}
