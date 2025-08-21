@@ -15,12 +15,14 @@
         <button class="btn preset" data-mode="created">Пришло сегодня</button>
         <button class="btn preset" data-mode="planned">План на сегодня</button>
         <button class="btn preset" data-mode="delivered">Доставлено сегодня</button>
+        <button class="btn preset" data-mode="kaspi_pack">Kaspi: Упаковка (до 20:00)</button>
       </div>
     </header>
 
     <form id="f" class="controls">
       <label>Начало <input id="start" type="date" required></label>
       <label>Конец <input id="end" type="date" required></label>
+      <label>до времени <input id="end_time" placeholder="например 20:00"></label>
       <label>State(ы) <input id="states" placeholder="например NEW,DELIVERY"></label>
       <label><input type="checkbox" id="excCanceled" checked> Исключить отменённые</label>
       <label>Дата по полю 
@@ -98,9 +100,18 @@ function applyPreset(mode){
   const todayStr = `${yyyy}-${mm}-${dd}`;
   document.getElementById('start').value = todayStr;
   document.getElementById('end').value = todayStr;
-  if (mode === 'created'){ document.getElementById('date_field').value = 'creationDate'; document.getElementById('excCanceled').checked = true; document.getElementById('states').value = ''; }
+  document.getElementById('end_time').value = '';
+  document.getElementById('states').value = '';
+  document.getElementById('excCanceled').checked = true;
+
+  if (mode === 'created'){ document.getElementById('date_field').value = 'creationDate'; }
   if (mode === 'planned'){ document.getElementById('date_field').value = 'plannedDeliveryDate'; }
   if (mode === 'delivered'){ document.getElementById('date_field').value = 'deliveryDate'; }
+  if (mode === 'kaspi_pack'){ 
+    document.getElementById('date_field').value = 'plannedShipmentDate'; 
+    document.getElementById('states').value = 'KASPI_DELIVERY,ARCHIVE';
+    document.getElementById('end_time').value = '20:00';
+  }
   run();
 }
 document.querySelectorAll('.preset').forEach(b=> b.addEventListener('click', e=> applyPreset(e.target.dataset.mode)));
@@ -109,15 +120,16 @@ async function run(e){
   if (e) e.preventDefault();
   const start = document.getElementById('start').value;
   const end = document.getElementById('end').value;
+  const end_time = document.getElementById('end_time').value.trim();
   const states = document.getElementById('states').value.trim();
   const excCanceled = document.getElementById('excCanceled').checked;
   const date_field = document.getElementById('date_field').value.trim() || (META.date_field_default||'creationDate');
-  const q = `start=${start}&end=${end}&tz=${encodeURIComponent(tz)}&date_field=${encodeURIComponent(date_field)}${states?`&states=${encodeURIComponent(states)}`:''}&exclude_canceled=${excCanceled}&with_prev=true`;
+  const q = `start=${start}&end=${end}&tz=${encodeURIComponent(tz)}&date_field=${encodeURIComponent(date_field)}${states?`&states=${encodeURIComponent(states)}`:''}&exclude_canceled=${excCanceled}&with_prev=true${end_time?`&end_time=${encodeURIComponent(end_time)}`:''}`;
   const r = await fetch('/orders/analytics?'+q); const t = await r.text(); let data;
   try{ data = JSON.parse(t);} catch{ alert(t); return; }
 
   document.getElementById('kpis').innerHTML = `
-    <div class="card"><div class="k">Период</div><div class="v">${data.range.start} → ${data.range.end}</div></div>
+    <div class="card"><div class="k">Период</div><div class="v">${data.range.start} → ${data.range.end}${end_time?` до ${end_time}`:''}</div></div>
     <div class="card"><div class="k">Всего заказов</div><div class="v">${fmt(data.total_orders)}</div></div>
     <div class="card"><div class="k">Оборот</div><div class="v">${fmt(data.total_amount)} ${data.currency}</div></div>
     <div class="card"><div class="k">Дата по полю</div><div class="v">${data.date_field}</div></div>`;
