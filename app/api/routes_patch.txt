@@ -1,6 +1,6 @@
 # Вставьте эти блоки в ваш app/api/routes.py
 
-# 1) Импорты рядом с остальными:
+# 1) Импорты:
 from typing import Optional
 from fastapi import Body, Query
 from ..core.config import settings
@@ -10,10 +10,12 @@ from ..services.profit_store import (
     set_cost as profit_set_cost,
     compute_profit_for_range,
 )
-from ..services.inventory import add_batch, Batch, get_stock, set_threshold, reset_sales_cache, apply_sales_agg
+from ..services.inventory import (
+    add_batch, Batch, get_stock, set_threshold, reset_sales_cache, apply_sales_agg
+)
 from ..services.catalog import sync_products, list_catalog, overview
 
-# 2) PROFIT endpoints:
+# 2) PROFIT:
 @router.get("/profit/config")
 def profit_config_get():
     return profit_get_config()
@@ -45,7 +47,7 @@ def profit_orders(start: str, end: str, tz: str = settings.TZ,
         cutoff_mode=cutoff_mode, cutoff=cutoff, lookback_days=lookback_days
     )
 
-# 3) INVENTORY endpoints:
+# 3) INVENTORY:
 @router.post("/inventory/batch")
 def inventory_add_batch(payload: dict = Body(...)):
     b = Batch(
@@ -68,14 +70,13 @@ def inventory_threshold(payload: dict = Body(...)):
     set_threshold(payload["product_code"], int(payload.get("threshold") or 0), payload.get("preferred_name"))
     return {"ok": True}
 
-# (опционально подключим пересчёт продаж, когда готов будет метод получения entries->product_code)
-# @router.post("/inventory/recalc")
-# def inventory_recalc(lookback_days: int = Query(35, ge=1, le=365)):
-#     reset_sales_cache()
-#     apply_sales_agg({})  # подключим позже
-#     return {"ok": True}
+@router.post("/inventory/recalc")
+def inventory_recalc(lookback_days: int = Query(35, ge=1, le=365)):
+    reset_sales_cache()
+    apply_sales_agg({})  # TODO: заменить на агрегат продаж по product_code
+    return {"ok": True}
 
-# 4) CATALOG (управление товарами):
+# 4) CATALOG:
 @router.post("/catalog/sync")
 def catalog_sync():
     return sync_products()
