@@ -6,7 +6,7 @@ async function jpost(url, body){ const r=await fetch(url,{method:'POST',headers:
 
 $('#syncBtn').addEventListener('click', async ()=>{
   const btn = $('#syncBtn');
-  btn.disabled = True; btn.textContent = 'Синхронизация...';
+  btn.disabled = true; btn.textContent = 'Синхронизация...';
   try { await jpost('/catalog/sync'); } catch(e){ alert(e.message); }
   btn.disabled = false; btn.textContent = '⇅ Выгрузить из «Управление товарами»';
   await loadOverview();
