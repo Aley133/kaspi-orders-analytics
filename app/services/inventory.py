@@ -3,7 +3,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import List, Dict, Optional, Tuple
 from pathlib import Path
-from datetime import datetime, date
+from datetime import datetime
 
 DB_PATH = Path(__file__).resolve().parent.parent / "data" / "app.db"
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -32,14 +32,14 @@ def init_db():
             threshold INTEGER NOT NULL DEFAULT 0,
             preferred_name TEXT
         )
-        """ )
+        """)
         c.execute("""
         CREATE TABLE IF NOT EXISTS inventory_sales_cache (
             product_code TEXT PRIMARY KEY,
             qty_sold INTEGER NOT NULL DEFAULT 0,
             updated_at TEXT NOT NULL
         )
-        """ )
+        """)
 
 init_db()
 
@@ -102,7 +102,6 @@ def reset_sales_cache() -> None:
         c.execute("DELETE FROM inventory_sales_cache")
 
 def apply_sales_agg(sales_agg: Dict[str, int]) -> None:
-    from datetime import datetime
     now = datetime.utcnow().isoformat()
     with _conn() as c:
         for code, qty in sales_agg.items():
