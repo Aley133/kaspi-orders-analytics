@@ -12,18 +12,19 @@
     <header class="top">
       <h1>Добрый день, LeoXpress</h1>
       <div class="tabs">
-        <button class="btn" data-span="7">Неделя</button>
-        <button class="btn active" data-span="30">Месяц</button>
+        <button class="btn preset" data-mode="created">Пришло сегодня</button>
+        <button class="btn preset" data-mode="planned">План на сегодня</button>
+        <button class="btn preset" data-mode="delivered">Доставлено сегодня</button>
       </div>
     </header>
 
     <form id="f" class="controls">
       <label>Начало <input id="start" type="date" required></label>
       <label>Конец <input id="end" type="date" required></label>
-      <label>State(ы) <input id="states" placeholder="NEW,DELIVERY"></label>
-      <label>Исключить <input id="exclude_states" placeholder="CANCELED"></label>
+      <label>State(ы) <input id="states" placeholder="например NEW,DELIVERY"></label>
+      <label><input type="checkbox" id="excCanceled" checked> Исключить отменённые</label>
       <label>Дата по полю 
-        <input id="date_field" list="fields" placeholder="plannedDeliveryDate">
+        <input id="date_field" list="fields" placeholder="creationDate">
         <datalist id="fields"></datalist>
       </label>
       <button class="btn primary" type="submit">Показать</button>
@@ -49,6 +50,11 @@
     </section>
 
     <section class="panel">
+      <h2>Состояния (диагностика)</h2>
+      <div id="tbl-states"></div>
+    </section>
+
+    <section class="panel">
       <h2>Таблица: Дни</h2>
       <div id="tbl-days"></div>
     </section>
@@ -59,7 +65,7 @@ const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Almaty";
 const today = new Date();
 const yyyy = today.getFullYear(), mm = String(today.getMonth()+1).padStart(2,'0'), dd = String(today.getDate()).padStart(2,'0');
 const endDefault = `${yyyy}-${mm}-${dd}`;
-const startDate = new Date(today.getTime() - 29*24*3600*1000);
+const startDate = new Date(today.getTime() - 6*24*3600*1000);
 const sy = startDate.getFullYear(), sm = String(startDate.getMonth()+1).padStart(2,'0'), sd = String(startDate.getDate()).padStart(2,'0');
 const startDefault = `${sy}-${sm}-${sd}`;
 document.getElementById('start').value = startDefault;
@@ -69,19 +75,15 @@ let META = {};
 fetch('/meta').then(r=>r.json()).then(m=>{
   META = m;
   (m.date_field_options||[]).forEach(v=>{ const o=document.createElement('option'); o.value=v; document.getElementById('fields').appendChild(o); });
-  document.getElementById('date_field').value = m.date_field_default || 'plannedDeliveryDate';
+  document.getElementById('date_field').value = m.date_field_default || 'creationDate';
 });
 
 function fmt(n){ return Number(n).toLocaleString(undefined,{maximumFractionDigits:2}); }
 let charts = {};
-function draw(id, type, labels, series, label, extra={}){
+function draw(id, type, labels, series, extra={}){
   if (charts[id]) charts[id].destroy();
   const ctx = document.getElementById(id).getContext('2d');
-  charts[id] = new Chart(ctx, {
-    type,
-    data: { labels, datasets: series },
-    options: { responsive:true, maintainAspectRatio:false, plugins:{legend:{display:true}}, ...extra }
-  });
+  charts[id] = new Chart(ctx, { type, data:{ labels, datasets:series }, options:{ responsive:true, maintainAspectRatio:false, plugins:{legend:{display:true}}, ...extra } });
 }
 
 function table(id, headers, rows){
@@ -90,18 +92,30 @@ function table(id, headers, rows){
   document.getElementById(id).innerHTML = `<table>${thead}${tbody}</table>`;
 }
 
+function applyPreset(mode){
+  const start = new Date();
+  const yyyy = start.getFullYear(), mm = String(start.getMonth()+1).padStart(2,'0'), dd = String(start.getDate()).padStart(2,'0');
+  const todayStr = `${yyyy}-${mm}-${dd}`;
+  document.getElementById('start').value = todayStr;
+  document.getElementById('end').value = todayStr;
+  if (mode === 'created'){ document.getElementById('date_field').value = 'creationDate'; document.getElementById('excCanceled').checked = true; document.getElementById('states').value = ''; }
+  if (mode === 'planned'){ document.getElementById('date_field').value = 'plannedDeliveryDate'; }
+  if (mode === 'delivered'){ document.getElementById('date_field').value = 'deliveryDate'; }
+  run();
+}
+document.querySelectorAll('.preset').forEach(b=> b.addEventListener('click', e=> applyPreset(e.target.dataset.mode)));
+
 async function run(e){
   if (e) e.preventDefault();
   const start = document.getElementById('start').value;
   const end = document.getElementById('end').value;
   const states = document.getElementById('states').value.trim();
-  const exclude_states = document.getElementById('exclude_states').value.trim();
-  const date_field = document.getElementById('date_field').value.trim() || (META.date_field_default||'plannedDeliveryDate');
-  const q = `start=${start}&end=${end}&tz=${encodeURIComponent(tz)}&date_field=${encodeURIComponent(date_field)}${states?`&states=${encodeURIComponent(states)}`:''}${exclude_states?`&exclude_states=${encodeURIComponent(exclude_states)}`:''}&with_prev=true`;
+  const excCanceled = document.getElementById('excCanceled').checked;
+  const date_field = document.getElementById('date_field').value.trim() || (META.date_field_default||'creationDate');
+  const q = `start=${start}&end=${end}&tz=${encodeURIComponent(tz)}&date_field=${encodeURIComponent(date_field)}${states?`&states=${encodeURIComponent(states)}`:''}&exclude_canceled=${excCanceled}&with_prev=true`;
   const r = await fetch('/orders/analytics?'+q); const t = await r.text(); let data;
   try{ data = JSON.parse(t);} catch{ alert(t); return; }
 
-  // KPIs
   document.getElementById('kpis').innerHTML = `
     <div class="card"><div class="k">Период</div><div class="v">${data.range.start} → ${data.range.end}</div></div>
     <div class="card"><div class="k">Всего заказов</div><div class="v">${fmt(data.total_orders)}</div></div>
@@ -111,16 +125,15 @@ async function run(e){
   const labels = data.days.map(d=>d.x);
   const curCounts = data.days.map(d=>d.count);
   const prevCounts = data.prev_days.map(d=>d.count);
-  draw('trend','line',labels,[
-    {label:'Текущий', data:curCounts, tension:.35},
-    {label:'Предыдущий', data:prevCounts, borderDash:[4,4], tension:.35}
-  ], 'Динамика');
-
-  draw('count','bar',labels,[{label:'Заказы', data:curCounts}], 'Заказы по дням', {plugins:{legend:{display:false}}});
+  draw('trend','line',labels,[{label:'Текущий', data:curCounts, tension:.35},{label:'Предыдущий', data:prevCounts, borderDash:[4,4], tension:.35}], {plugins:{legend:{display:true}}});
+  draw('count','bar',labels,[{label:'Заказы', data:curCounts}], {plugins:{legend:{display:false}}});
 
   const cityLabels = data.cities.map(c=>c.city);
   const cityCounts = data.cities.map(c=>c.count);
-  draw('cities','bar',cityLabels,[{label:'Заказы', data:cityCounts}], 'Топ городов', {plugins:{legend:{display:false}}, scales:{x:{ticks:{autoSkip:true,maxTicksLimit:12}}}});
+  draw('cities','bar',cityLabels,[{label:'Заказы', data:cityCounts}], {plugins:{legend:{display:false}}, scales:{x:{ticks:{autoSkip:true,maxTicksLimit:12}}}});
+
+  const stRows = Object.entries(data.state_breakdown).sort((a,b)=>b[1]-a[1]).map(([s,c])=>[s,c]);
+  table('tbl-states', ['State','Кол-во'], stRows);
 
   table('tbl-days', ['Дата','Кол-во','Оборот'], data.days.map(d=>[d.x, d.count, fmt(d.amount)+' '+data.currency]));
 }
