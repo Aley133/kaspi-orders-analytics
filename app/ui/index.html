@@ -3,8 +3,23 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Kaspi Orders — Главная</title>
+  <title>Kaspi Orders — Дашборд</title>
   <link rel="stylesheet" href="/ui/assets/css/theme.css"/>
+  <style>
+    .grid { display:grid; grid-template-columns: repeat(12, 1fr); gap: 16px; }
+    .col-12 { grid-column: span 12; }
+    .col-6  { grid-column: span 6; }
+    @media (max-width: 900px){ .col-6{ grid-column: span 12; } }
+    .card { background: var(--panel-bg, #fff); padding: 12px; border-radius: 12px; box-shadow: var(--shadow); }
+    .kpis { display:grid; grid-template-columns: repeat(4, minmax(160px,1fr)); gap: 12px; }
+    .kpi .k { font-size: 12px; opacity:.7; }
+    .kpi .v { font-size: 20px; font-weight: 700; margin-top: 2px; }
+    form.controls { display:flex; flex-wrap:wrap; gap: 8px; align-items: end; }
+    form.controls label { display:flex; flex-direction:column; gap:4px; font-size:13px; }
+    form.controls .btn { margin-left: 8px; }
+    canvas { width: 100%; height: 320px; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 </head>
 <body>
   <div class="container">
@@ -18,13 +33,150 @@
       </div>
     </header>
 
-    <section class="panel">
-      <h2>Аналитика заказов</h2>
-      <p>Используйте верхнее меню для перехода на «Профит», «Склад» и «Каталог». Здесь разместите ваши текущие графики/виджеты.</p>
-    </section>
+    <form id="f" class="controls">
+      <label>Начало
+        <input type="date" id="start" required>
+      </label>
+      <label>Конец
+        <input type="date" id="end" required>
+      </label>
+      <label>Дата по полю
+        <select id="date_field">
+          <option value="creationDate">creationDate</option>
+          <option value="plannedShipmentDate">plannedShipmentDate</option>
+          <option value="plannedDeliveryDate">plannedDeliveryDate</option>
+          <option value="shipmentDate">shipmentDate</option>
+          <option value="deliveryDate">deliveryDate</option>
+        </select>
+      </label>
+      <label>Состояния (comma)
+        <input type="text" id="states" placeholder="KASPI_DELIVERY">
+      </label>
+      <label class="chk"><input type="checkbox" id="exclude_canceled" checked> Искл. отменённые</label>
+      <label class="chk"><input type="checkbox" id="use_cutoff"> Cut-off</label>
+      <label>Cut-off
+        <input type="text" id="cutoff" placeholder="20:00">
+      </label>
+      <label>Lookback (дней)
+        <input type="number" id="lookback" min="1" value="3" style="width:90px">
+      </label>
+      <button class="btn primary" type="submit">Показать</button>
+    </form>
+
+    <div class="grid">
+      <div class="col-12 card">
+        <div class="kpis" id="kpis"></div>
+      </div>
+      <div class="col-6 card">
+        <h3>Заказы по дням</h3>
+        <canvas id="ordersChart"></canvas>
+      </div>
+      <div class="col-6 card">
+        <h3>Оборот по дням</h3>
+        <canvas id="turnoverChart"></canvas>
+      </div>
+      <div class="col-12 card">
+        <h3>Номера заказов (последние 100)</h3>
+        <div id="numbers" style="font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace; font-size:12px; line-height:1.6;"></div>
+      </div>
+    </div>
   </div>
 
-  <script type="module" src="/ui/assets/js/state.js"></script>
-  <script type="module" src="/ui/assets/js/app.js"></script>
+  <script type="module">
+    import {initTheme} from '/ui/assets/js/state.js';
+    initTheme();
+
+    const $ = (s, el=document)=>el.querySelector(s);
+    const api = async (url)=>{
+      const r = await fetch(url);
+      const t = await r.text();
+      try { return JSON.parse(t); } catch { throw new Error(t); }
+    };
+    const fmt = (n)=> Number(n||0).toLocaleString(undefined, {maximumFractionDigits:2});
+
+    function todayIso(d=new Date()){ return d.toISOString().slice(0,10); }
+    function shiftDays(n){
+      const d=new Date(); d.setDate(d.getDate()+n); return todayIso(d);
+    }
+
+    // defaults
+    $('#end').value = todayIso();
+    $('#start').value = shiftDays(-6);
+    $('#cutoff').value = '20:00';
+
+    let ordersChart, turnoverChart;
+
+    function makeChart(ctxId, label, labels, data){
+      const ctx = document.getElementById(ctxId);
+      const ds = {
+        label,
+        data,
+        borderWidth: 2,
+        tension: 0.3
+      };
+      const cfg = {
+        type: 'line',
+        data: { labels, datasets: [ds] },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: { legend: { display: false } },
+          scales: { x: { grid: { display:false } }, y: { beginAtZero: true } }
+        }
+      };
+      return new Chart(ctx, cfg);
+    }
+
+    async function load(){
+      const params = new URLSearchParams();
+      params.set('start', $('#start').value);
+      params.set('end', $('#end').value);
+      params.set('tz', 'Asia/Almaty');
+      params.set('date_field', $('#date_field').value || 'creationDate');
+      const states = $('#states').value.trim();
+      if (states) params.set('states', states);
+      if ($('#exclude_canceled').checked) params.set('exclude_canceled', 'true');
+      if ($('#use_cutoff').checked){
+        params.set('cutoff_mode', 'true');
+        params.set('cutoff', $('#cutoff').value || '20:00');
+        params.set('lookback_days', $('#lookback').value || '3');
+      }
+
+      // получаем агрегаты
+      const data = await api('/analytics?' + params.toString());
+
+      // KPI
+      const daily = data.daily || [];
+      const totalOrders = daily.reduce((s,d)=> s + (d.count||0), 0);
+      const totalTurnover = daily.reduce((s,d)=> s + (d.amount||0), 0);
+      const avg = totalOrders ? (totalTurnover/totalOrders) : 0;
+      $('#kpis').innerHTML = `
+        <div class="kpi"><div class="k">Всего заказов</div><div class="v">${fmt(totalOrders)}</div></div>
+        <div class="kpi"><div class="k">Оборот, ₸</div><div class="v">${fmt(totalTurnover)}</div></div>
+        <div class="kpi"><div class="k">Средний чек, ₸</div><div class="v">${fmt(avg)}</div></div>
+        <div class="kpi"><div class="k">Дней в выборке</div><div class="v">${daily.length}</div></div>
+      `;
+
+      // Чарты
+      const labels = daily.map(d=>d.date);
+      const orders = daily.map(d=>d.count||0);
+      const amounts = daily.map(d=>d.amount||0);
+
+      if (ordersChart) ordersChart.destroy();
+      if (turnoverChart) turnoverChart.destroy();
+      ordersChart = makeChart('ordersChart', 'Заказы', labels, orders);
+      turnoverChart = makeChart('turnoverChart', 'Оборот', labels, amounts);
+
+      // Номера
+      const nums = (data.orders_sample || []).slice(0,100).map(x=>x.number).filter(Boolean);
+      $('#numbers').textContent = nums.join(', ');
+    }
+
+    document.getElementById('f').addEventListener('submit', (e)=>{
+      e.preventDefault(); load();
+    });
+
+    load();
+  </script>
 </body>
 </html>
