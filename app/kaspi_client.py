@@ -13,7 +13,7 @@ class KaspiClient:
             "Accept": "application/vnd.api+json",
             "Content-Type": "application/vnd.api+json",
             "X-Auth-Token": token,
-            "User-Agent": "kaspi-orders-service/0.4.4",
+            "User-Agent": "kaspi-orders-service/0.4.6",
         }
         self.timeout = httpx.Timeout(connect=timeout_connect, read=timeout_read, write=timeout_read, pool=timeout_read)
 
@@ -34,7 +34,7 @@ class KaspiClient:
             return int(time.mktime(dt.timetuple()) * 1000)
         return int(dt.timestamp() * 1000)
 
-    def iter_orders(self, start: datetime, end: datetime, state: Optional[str] = None, page_size: int = 50, filter_field: str = "creationDate") -> Generator[Dict, None, None]:
+    def iter_orders(self, start: datetime, end: datetime, page_size: int = 50, filter_field: str = "creationDate", state: Optional[str]=None) -> Generator[Dict, None, None]:
         if page_size > 100: page_size = 100
         params: Dict[str, object] = {
             "page[number]": 0,
@@ -42,11 +42,13 @@ class KaspiClient:
             f"filter[orders][{filter_field}][$ge]": self._to_ms(start),
             f"filter[orders][{filter_field}][$le]": self._to_ms(end),
         }
-        if state: params["filter[orders][state]"] = state
+        if state:
+            params["filter[orders][state]"] = state
         while True:
             data = self._get("orders", params)
             items = data.get("data", [])
-            for it in items: yield it
+            for it in items: 
+                yield it
             meta = data.get("meta", {})
             page_count = meta.get("pageCount")
             current = int(params["page[number]"])
