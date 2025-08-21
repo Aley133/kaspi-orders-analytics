@@ -1,20 +1,12 @@
 from __future__ import annotations
-from fastapi import APIRouter, Query
-from fastapi.responses import PlainTextResponse
+
 from typing import Optional
-import csv, io
+
+from fastapi import APIRouter, Body, Query
+from fastapi.responses import PlainTextResponse
 
 from ..core.config import settings
 from ..services.analytics import analytics_payload, list_numbers
-
-router = APIRouter()
-
-# Вставьте эти блоки в ваш app/api/routes.py
-
-# 1) Импорты:
-from typing import Optional
-from fastapi import Body, Query
-from ..core.config import settings
 from ..services.profit_store import (
     get_config as profit_get_config,
     set_config as profit_set_config,
@@ -26,7 +18,10 @@ from ..services.inventory import (
 )
 from ..services.catalog import sync_products, list_catalog, overview
 
-# 2) PROFIT:
+router = APIRouter()
+
+
+# -------------------- PROFIT --------------------
 @router.get("/profit/config")
 def profit_config_get():
     return profit_get_config()
@@ -58,7 +53,8 @@ def profit_orders(start: str, end: str, tz: str = settings.TZ,
         cutoff_mode=cutoff_mode, cutoff=cutoff, lookback_days=lookback_days
     )
 
-# 3) INVENTORY:
+
+# -------------------- INVENTORY --------------------
 @router.post("/inventory/batch")
 def inventory_add_batch(payload: dict = Body(...)):
     b = Batch(
@@ -83,11 +79,13 @@ def inventory_threshold(payload: dict = Body(...)):
 
 @router.post("/inventory/recalc")
 def inventory_recalc(lookback_days: int = Query(35, ge=1, le=365)):
+    # Временная заглушка пересчёта продаж (FIFO). Позже подставим реальный агрегат.
     reset_sales_cache()
-    apply_sales_agg({})  # TODO: заменить на агрегат продаж по product_code
+    apply_sales_agg({})
     return {"ok": True}
 
-# 4) CATALOG:
+
+# -------------------- CATALOG --------------------
 @router.post("/catalog/sync")
 def catalog_sync():
     return sync_products()
@@ -100,6 +98,8 @@ def catalog_list():
 def catalog_overview():
     return overview()
 
+
+# -------------------- BASE --------------------
 @router.get("/meta")
 def meta():
     return {
