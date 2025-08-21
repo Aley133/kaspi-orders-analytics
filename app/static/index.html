@@ -57,6 +57,17 @@
     </section>
 
     <section class="panel">
+      <div class="flexrow">
+        <h2>Номера заказов (для сверки)</h2>
+        <div class="actions">
+          <button class="btn" id="copyIds">Скопировать номера</button>
+          <a class="btn" id="csvLink" download>Скачать CSV</a>
+        </div>
+      </div>
+      <div id="idsTable"></div>
+    </section>
+
+    <section class="panel">
       <h2>Таблица: Дни</h2>
       <div id="tbl-days"></div>
     </section>
@@ -116,20 +127,39 @@ function applyPreset(mode){
 }
 document.querySelectorAll('.preset').forEach(b=> b.addEventListener('click', e=> applyPreset(e.target.dataset.mode)));
 
-async function run(e){
-  if (e) e.preventDefault();
+function buildQuery(base){
   const start = document.getElementById('start').value;
   const end = document.getElementById('end').value;
   const end_time = document.getElementById('end_time').value.trim();
   const states = document.getElementById('states').value.trim();
   const excCanceled = document.getElementById('excCanceled').checked;
   const date_field = document.getElementById('date_field').value.trim() || (META.date_field_default||'creationDate');
-  const q = `start=${start}&end=${end}&tz=${encodeURIComponent(tz)}&date_field=${encodeURIComponent(date_field)}${states?`&states=${encodeURIComponent(states)}`:''}&exclude_canceled=${excCanceled}&with_prev=true${end_time?`&end_time=${encodeURIComponent(end_time)}`:''}`;
-  const r = await fetch('/orders/analytics?'+q); const t = await r.text(); let data;
+  const q = `start=${start}&end=${end}&tz=${encodeURIComponent(tz)}&date_field=${encodeURIComponent(date_field)}${states?`&states=${encodeURIComponent(states)}`:''}&exclude_canceled=${excCanceled}${end_time?`&end_time=${encodeURIComponent(end_time)}`:''}`;
+  return base + q;
+}
+
+async function loadIds(){
+  const url = buildQuery('/orders/ids?');
+  const r = await fetch(url); const t = await r.text(); let data;
+  try{ data = JSON.parse(t);} catch{ alert(t); return; }
+  const rows = data.items.map(it => [it.number, it.state, it.date.replace('T',' ').slice(0,16), it.amount, it.city]);
+  table('idsTable', ['Номер','State','Дата','Сумма','Город'], rows);
+  const csvHref = buildQuery('/orders/ids.csv?');
+  document.getElementById('csvLink').href = csvHref;
+  document.getElementById('copyIds').onclick = () => {
+    const all = data.items.map(it=>it.number).join('\n');
+    navigator.clipboard.writeText(all);
+  };
+}
+
+async function run(e){
+  if (e) e.preventDefault();
+  const url = buildQuery('/orders/analytics?') + '&with_prev=true';
+  const r = await fetch(url); const t = await r.text(); let data;
   try{ data = JSON.parse(t);} catch{ alert(t); return; }
 
   document.getElementById('kpis').innerHTML = `
-    <div class="card"><div class="k">Период</div><div class="v">${data.range.start} → ${data.range.end}${end_time?` до ${end_time}`:''}</div></div>
+    <div class="card"><div class="k">Период</div><div class="v">${data.range.start} → ${data.range.end}${document.getElementById('end_time').value?` до ${document.getElementById('end_time').value}`:''}</div></div>
     <div class="card"><div class="k">Всего заказов</div><div class="v">${fmt(data.total_orders)}</div></div>
     <div class="card"><div class="k">Оборот</div><div class="v">${fmt(data.total_amount)} ${data.currency}</div></div>
     <div class="card"><div class="k">Дата по полю</div><div class="v">${data.date_field}</div></div>`;
@@ -148,6 +178,8 @@ async function run(e){
   table('tbl-states', ['State','Кол-во'], stRows);
 
   table('tbl-days', ['Дата','Кол-во','Оборот'], data.days.map(d=>[d.x, d.count, fmt(d.amount)+' '+data.currency]));
+
+  await loadIds();
 }
 
 document.getElementById('f').addEventListener('submit', run);
