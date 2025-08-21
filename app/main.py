@@ -7,14 +7,14 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, PlainTextResponse
 from pydantic import BaseModel
 from cachetools import TTLCache
 from httpx import HTTPStatusError, RequestError
 from .kaspi_client import KaspiClient
 
 load_dotenv()
-app = FastAPI(title="Kaspi Orders — Analytics (LeoXpress)", version="0.4.5")
+app = FastAPI(title="Kaspi Orders — Analytics (LeoXpress)", version="0.4.6")
 
 KASPI_TOKEN = os.getenv("KASPI_TOKEN")
 DEFAULT_TZ = os.getenv("TZ", "Asia/Almaty")
@@ -133,7 +133,6 @@ def _collect_range(start_dt: datetime, end_dt: datetime, tz: str, date_field: st
 
     for s,e in iter_chunks(start_dt, end_dt, CHUNK_DAYS):
         try:
-            # KEY FIX: we filter AT THE API by the SELECTED date_field (not creationDate).
             try_field = date_field
             while True:
                 try:
@@ -165,7 +164,6 @@ def _collect_range(start_dt: datetime, end_dt: datetime, tz: str, date_field: st
                         total_orders += 1; total_amount += amt
                     break
                 except HTTPStatusError as ee:
-                    # If API does not support this date_field filtering, gracefully fallback.
                     if ee.response.status_code in (400, 422) and try_field != "creationDate":
                         try_field = "creationDate"
                         continue
@@ -219,6 +217,80 @@ async def analytics(start: str = Query(...), end: str = Query(...), tz: str = Qu
             "timezone": tz, "currency": CURRENCY, "date_field": date_field,
             "total_orders": tot, "total_amount": tot_amt, "days": days, "prev_days": prev_days, "cities": cities, "state_breakdown": st_counts}
 
+def _guess_number(attrs: Dict, oid: str) -> str:
+    for key in ("code","orderNumber","displayOrderCode","merchantOrderId","kaspiId","idForCustomer"):
+        v = attrs.get(key)
+        if v: return str(v)
+    return str(oid)
+
+@app.get("/orders/ids")
+async def list_ids(start: str, end: str, tz: str = DEFAULT_TZ, date_field: str = DATE_FIELD_DEFAULT,
+                   states: Optional[str] = None, exclude_canceled: bool = True,
+                   end_time: Optional[str] = None):
+    tzinfo = pytz.timezone(tz)
+    start_dt = parse_date_local(start, tz)
+    end_dt = parse_date_local(end, tz) + timedelta(days=1) - timedelta(milliseconds=1)
+    if end_time:
+        e0 = parse_date_local(end, tz)
+        end_dt = apply_hhmm(e0, end_time).replace(tzinfo=tzinfo)
+
+    inc = parse_states_csv(states)
+    exc = set()
+    if exclude_canceled: exc.add("CANCELED")
+
+    seen = set(); items = []
+    for s,e in iter_chunks(start_dt, end_dt, CHUNK_DAYS):
+        try_field = date_field
+        while True:
+            try:
+                for order in client.iter_orders(start=s, end=e, filter_field=try_field):
+                    oid = order.get("id")
+                    if oid in seen: continue
+                    attrs = order.get("attributes",{})
+                    st = norm_state(str(attrs.get("state","")))
+                    if inc and st not in inc: continue
+                    if st in exc: continue
+
+                    ms = (attrs.get(date_field) if date_field in attrs else attrs.get(try_field))
+                    if ms is None:
+                        continue
+                    ms = int(ms) if isinstance(ms, (int,float,str)) else None
+                    if ms and ms < 10_000_000_000: ms *= 1000
+                    if not ms: continue
+                    dtt = datetime.fromtimestamp(ms/1000.0, tz=tzinfo)
+                    if dtt < start_dt.astimezone(tzinfo) or dtt > end_dt.astimezone(tzinfo):
+                        continue
+
+                    num = _guess_number(attrs, oid)
+                    items.append({
+                        "id": str(oid),
+                        "number": num,
+                        "state": st,
+                        "date": dtt.isoformat(),
+                        "amount": extract_amount(attrs),
+                        "city": extract_city(attrs),
+                    })
+                    seen.add(oid)
+                break
+            except HTTPStatusError as ee:
+                if ee.response.status_code in (400,422) and try_field != "creationDate":
+                    try_field = "creationDate"; continue
+                raise
+    items.sort(key=lambda x: x["number"])
+    return {"count": len(items), "items": items}
+
+@app.get("/orders/ids.csv")
+async def list_ids_csv(start: str, end: str, tz: str = DEFAULT_TZ, date_field: str = DATE_FIELD_DEFAULT,
+                       states: Optional[str] = None, exclude_canceled: bool = True,
+                       end_time: Optional[str] = None):
+    data = await list_ids(start, end, tz, date_field, states, exclude_canceled, end_time)  # type: ignore
+    output = io.StringIO()
+    w = csv.writer(output, lineterminator="\n")
+    w.writerow(["number","state","date","amount","city","id"])
+    for it in data["items"]:
+        w.writerow([it["number"], it["state"], it["date"], it["amount"], it["city"], it["id"]])
+    return PlainTextResponse(content=output.getvalue(), media_type="text/csv; charset=utf-8")
+
 @app.get("/orders/debug")
 async def debug_list(start: str, end: str, tz: str = DEFAULT_TZ, date_field: str = DATE_FIELD_DEFAULT,
                      states: Optional[str] = None, limit: int = 100):
@@ -236,11 +308,13 @@ async def debug_list(start: str, end: str, tz: str = DEFAULT_TZ, date_field: str
                         attrs = order.get("attributes", {})
                         st = norm_state(str(attrs.get("state","")))
                         if inc and st not in inc: continue
-                        ms = (extract_ms(attrs, date_field) or extract_ms(attrs, try_field))
+                        ms = (attrs.get(date_field) if date_field in attrs else attrs.get(try_field))
                         xdate = None
                         if ms is not None:
-                            xdate = datetime.fromtimestamp(ms/1000.0, tz=tzinfo).isoformat()
-                        out.append({"id": order.get("id"), "state": st, "date": xdate})
+                            ms = int(ms) if isinstance(ms, (int,float,str)) else None
+                            if ms and ms < 10_000_000_000: ms *= 1000
+                            if ms: xdate = datetime.fromtimestamp(ms/1000.0, tz=tzinfo).isoformat()
+                        out.append({"id": order.get("id"), "state": st, "date": xdate, "number": _guess_number(attrs, order.get("id"))})
                         if len(out)>=limit: return {"count": len(out), "sample": out}
                     break
                 except HTTPStatusError as ee:
