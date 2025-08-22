@@ -1,79 +1,85 @@
 <!doctype html>
 <html lang="ru">
 <head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>Kaspi Orders — Dashboard</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Kaspi Orders Analytics</title>
   <link rel="stylesheet" href="/ui/assets/css/theme.css"/>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
-<body>
-  <div class="container">
-    <header>
-      <h1>Kaspi Orders — Dashboard</h1>
-      <div>
-        <button class="btn" id="themeBtn">Тема</button>
-      </div>
-    </header>
-
-    <div class="controls">
-      <button class="btn preset" data-mode="created">Пришло сегодня</button>
-      <button class="btn preset" data-mode="planned">План на сегодня</button>
-      <button class="btn preset" data-mode="delivered">Доставлено</button>
-      <button class="btn preset" data-mode="kaspi_pack">Kaspi: Упаковка (до cut-off)</button>
+<body class="theme-light">
+  <header class="container">
+    <h1>Kaspi Analytics</h1>
+    <div class="actions">
+      <button id="theme-toggle" class="btn">Тема</button>
     </div>
+  </header>
 
-    <form id="form" class="controls">
-      <label>Начало <input id="start" type="date" required></label>
-      <label>Конец <input id="end" type="date" required></label>
-      <label>до времени <input id="end_time" placeholder="например 20:00"></label>
-      <label>State(ы) <input id="states" placeholder="например KASPI_DELIVERY"></label>
-      <label><input type="checkbox" id="excCanceled" checked> Исключить отменённые</label>
-      <label>Дата по полю <input id="date_field" placeholder="creationDate"></label>
-      <label><input type="checkbox" id="useCutoff"> Режим cut-off</label>
-      <label>Cut-off <input id="cutoff" placeholder="20:00"></label>
-      <label>Lookback (дней) <input id="lookback" type="number" min="1" value="3" style="width:70px"></label>
-      <button class="btn primary" type="submit">Показать</button>
-    </form>
-
-    <div id="kpis" class="kpis"></div>
-
-    <section class="panel">
-      <h2>Динамика</h2>
-      <div class="chartbox"><canvas id="trend"></canvas></div>
-    </section>
-
-    <section class="grid2">
-      <div class="panel">
-        <h2>Заказы по дням</h2>
-        <div class="chartbox"><canvas id="count"></canvas></div>
+  <main class="container grid">
+    <section class="card">
+      <h2>Фильтры</h2>
+      <div class="form-row">
+        <label>Начало:</label>
+        <input type="date" id="start"/>
+        <label>Конец:</label>
+        <input type="date" id="end"/>
+        <label>Поле даты:</label>
+        <select id="date_field"></select>
       </div>
-      <div class="panel">
-        <h2>Топ городов</h2>
-        <div class="chartbox"><canvas id="cities"></canvas></div>
+      <div class="form-row">
+        <label>Состояния (CSV):</label>
+        <input type="text" id="states" placeholder="например: NEW,DELIVERY"/>
+        <label>Искл. состояния (CSV):</label>
+        <input type="text" id="exclude_states" placeholder="например: COMPLETED,CANCELLED"/>
+        <label><input type="checkbox" id="exclude_canceled" checked/> Исключать отменённые</label>
+      </div>
+      <div class="form-row">
+        <label><input type="checkbox" id="use_cutoff_window"/> Режим cut-off</label>
+        <label><input type="checkbox" id="lte_cutoff_only"/> Только ≤ cut-off</label>
+        <label>Lookback (дн.):</label>
+        <input type="number" id="lookback_days" min="0" value="3" style="width:80px;"/>
+      </div>
+      <div class="form-row">
+        <button id="btn-run" class="btn primary">Построить</button>
+        <button id="btn-preset-today" class="btn">Пришло сегодня</button>
+        <button id="btn-preset-plan-today" class="btn">План на сегодня</button>
+        <button id="btn-preset-delivered" class="btn">Доставлено</button>
+        <button id="btn-preset-pack" class="btn">Kaspi: Упаковка (до cut-off)</button>
       </div>
     </section>
 
-    <section class="panel">
-      <h2>Состояния (диагностика)</h2>
-      <div id="tbl-states"></div>
-    </section>
-
-    <section class="panel">
-      <div class="flexrow">
-        <h2>Номера заказов (для сверки)</h2>
-        <div class="actions">
-          <a class="btn" id="csvLink" download>Скачать CSV</a>
-        </div>
+    <section class="card">
+      <h2>Итоги</h2>
+      <div class="stats">
+        <div><b>Всего заказов:</b> <span id="stat-count">–</span></div>
+        <div><b>Сумма:</b> <span id="stat-amount">–</span> <span id="stat-currency"></span></div>
       </div>
-      <div id="idsTable"></div>
+      <div style="height: 240px;"><canvas id="chart-trend"></canvas></div>
     </section>
 
-    <section class="panel">
-      <h2>Таблица: Дни</h2>
-      <div id="tbl-days"></div>
+    <section class="card">
+      <h2>Топ городов</h2>
+      <div style="height: 320px;"><canvas id="chart-cities"></canvas></div>
     </section>
-  </div>
-  <script type="module" src="/ui/assets/js/app.js"></script>
+
+    <section class="card">
+      <h2>Разбивка по состояниям</h2>
+      <div id="state-breakdown"></div>
+    </section>
+
+    <section class="card">
+      <h2>Номера заказов (для сверки)</h2>
+      <div class="form-row">
+        <button id="btn-copy" class="btn">Копировать номера</button>
+        <a id="btn-csv" class="btn" href="#" download>Скачать CSV</a>
+      </div>
+      <div id="order-ids" class="table-scroll"></div>
+    </section>
+  </main>
+
+  <script src="/ui/assets/js/state.js"></script>
+  <script src="/ui/assets/js/api.js"></script>
+  <script src="/ui/assets/js/charts.js"></script>
+  <script src="/ui/assets/js/app.js"></script>
 </body>
 </html>
