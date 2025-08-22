@@ -1,0 +1,54 @@
+
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Мой склад — Kaspi</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body data-theme="light">
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="brand">⚡ LeoXpress</div>
+      <nav class="nav">
+        <a class="nav-item" href="index.html">Главная</a>
+        <a class="nav-item" href="stock.html">Мой склад</a>
+        <a class="nav-item" href="#">Предзаказ</a>
+        <a class="nav-item" href="#">Демпинг</a>
+        <a class="nav-item" href="#">WhatsApp Рассылка</a>
+      </nav>
+      <div class="theme-switch">
+        <label class="switch">
+          <input type="checkbox" id="themeToggle">
+          <span class="slider"></span>
+        </label>
+        <span>Тёмная тема</span>
+      </div>
+    </aside>
+
+    <div class="content">
+      <h1>Мой склад</h1>
+
+      <section class="shell">
+        <p class="muted">Здесь соберём инструменты для работы с товарами. Начнём с выгрузки активных.</p>
+        <div class="ids-actions" style="justify-content:flex-start">
+          <a class="btn" href="/products/export.csv?active=1" download="products-active.csv">Выгрузить активные (CSV)</a>
+          <a class="btn" href="/products/export.csv?active=0" download="products-all.csv">Выгрузить все (CSV)</a>
+        </div>
+        <div class="muted" style="margin-top:8px">
+          Если кнопка скачивания не работает — нужно реализовать метод <code>iter_products</code> (или <code>iter_offers</code>) в <code>kaspi_client.py</code>.
+        </div>
+      </section>
+    </div>
+  </div>
+  <script>
+    document.addEventListener('DOMContentLoaded', () => {
+      const t = document.getElementById('themeToggle');
+      if(t){ t.addEventListener('change', (e)=>{
+        document.body.setAttribute('data-theme', e.target.checked ? 'dark' : 'light');
+      });}
+    });
+  </script>
+</body>
+</html>
