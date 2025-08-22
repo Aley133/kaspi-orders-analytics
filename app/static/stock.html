@@ -31,24 +31,159 @@
       <h1>Мой склад</h1>
 
       <section class="shell">
-        <p class="muted">Здесь соберём инструменты для работы с товарами. Начнём с выгрузки активных.</p>
-        <div class="ids-actions" style="justify-content:flex-start">
-          <a class="btn" href="/products/export.csv?active=1" download="products-active.csv">Выгрузить активные (CSV)</a>
-          <a class="btn" href="/products/export.csv?active=0" download="products-all.csv">Выгрузить все (CSV)</a>
+        <div class="filters">
+          <div class="row">
+            <label class="chk"><input type="checkbox" id="onlyActive" checked> Только активные</label>
+            <label>Поиск</label>
+            <input type="text" id="search" placeholder="Название или код...">
+            <button class="btn" id="btnLoad">Загрузить</button>
+            <button class="btn" id="btnExport">Экспорт CSV (из таблицы)</button>
+          </div>
         </div>
-        <div class="muted" style="margin-top:8px">
-          Если кнопка скачивания не работает — нужно реализовать метод <code>iter_products</code> (или <code>iter_offers</code>) в <code>kaspi_client.py</code>.
+
+        <div class="muted" style="margin:6px 0 10px">
+          Для расчёта прибыли укажи закупочную цену (KZT). Значения сохраняются локально в браузере и подтянутся позже в БД.
+        </div>
+
+        <div class="shell" style="padding:0">
+          <div style="overflow:auto; max-height:70vh">
+            <table class="table" id="tbl">
+              <thead>
+                <tr>
+                  <th style="min-width:110px">Код</th>
+                  <th style="min-width:260px">Название</th>
+                  <th>Бренд</th>
+                  <th>Категория</th>
+                  <th>ШТ</th>
+                  <th>Цена, KZT</th>
+                  <th>Активен</th>
+                  <th>ШК</th>
+                  <th>Закупочная, KZT</th>
+                  <th>Маржа, %</th>
+                  <th>Прибыль, KZT</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+              <tfoot>
+                <tr>
+                  <td colspan="10" style="text-align:right;font-weight:700">Итого прибыль:</td>
+                  <td id="sumProfit" style="font-weight:800">0</td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
         </div>
       </section>
     </div>
   </div>
-  <script>
-    document.addEventListener('DOMContentLoaded', () => {
-      const t = document.getElementById('themeToggle');
-      if(t){ t.addEventListener('change', (e)=>{
-        document.body.setAttribute('data-theme', e.target.checked ? 'dark' : 'light');
-      });}
+
+<script>
+const nf = new Intl.NumberFormat('ru-RU');
+function fmt(n){ return nf.format(Math.round((Number(n)||0) * 100) / 100); }
+
+function getCost(id){
+  const m = JSON.parse(localStorage.getItem('purchase_costs') || '{}');
+  return Number(m[id] || 0);
+}
+function setCost(id, v){
+  const m = JSON.parse(localStorage.getItem('purchase_costs') || '{}');
+  m[id] = Number(v)||0;
+  localStorage.setItem('purchase_costs', JSON.stringify(m));
+}
+
+async function loadProducts(){
+  const onlyActive = document.getElementById('onlyActive').checked;
+  const q = document.getElementById('search').value.trim();
+  const p = new URLSearchParams();
+  p.set('active', onlyActive ? '1' : '0');
+  if(q) p.set('q', q);
+  p.set('page', '1'); p.set('page_size', '2000');
+  const r = await fetch(`/products/list?${p.toString()}`);
+  if(!r.ok){ throw new Error('Не удалось загрузить товары'); }
+  const data = await r.json();
+  renderTable(data.items || []);
+}
+
+function renderTable(items){
+  const tb = document.querySelector('#tbl tbody');
+  tb.innerHTML = '';
+  let sumProfit = 0;
+
+  for(const it of items){
+    const tr = document.createElement('tr');
+
+    const profit = (Number(it.price)||0) - getCost(it.id);
+    const totalProfit = (Number(it.qty)||0) * profit;
+    sumProfit += totalProfit;
+
+    tr.innerHTML = `
+      <td>${it.code||''}</td>
+      <td>${it.name||''}</td>
+      <td>${it.brand||''}</td>
+      <td>${it.category||''}</td>
+      <td>${fmt(it.qty||0)}</td>
+      <td>${fmt(it.price||0)}</td>
+      <td>${it.active===true ? 'Да' : it.active===false ? 'Нет' : ''}</td>
+      <td>${it.barcode||''}</td>
+      <td><input data-id="${it.id}" class="cost-input" type="number" min="0" step="1" value="${getCost(it.id)}" style="width:120px"></td>
+      <td>${fmt(profit && it.price ? (profit/it.price*100) : 0)}</td>
+      <td>${fmt(totalProfit)}</td>
+    `;
+    tb.appendChild(tr);
+  }
+
+  document.getElementById('sumProfit').textContent = fmt(sumProfit);
+
+  // навесим обработчики на поля закупки
+  tb.querySelectorAll('input.cost-input').forEach(inp => {
+    inp.addEventListener('change', () => {
+      const id = inp.getAttribute('data-id');
+      setCost(id, Number(inp.value)||0);
+      // пересчитать строку
+      loadProducts();
     });
-  </script>
+  });
+}
+
+function exportCsvFromTable(){
+  const rows = [];
+  const header = ["code","name","brand","category","qty","price","active","barcode","cost","margin_percent","profit_total"];
+  rows.push(header);
+  const tb = document.querySelector('#tbl tbody');
+  tb.querySelectorAll('tr').forEach(tr => {
+    const tds = Array.from(tr.children).map(td => td.textContent);
+    // extract cost from input
+    const input = tr.querySelector('input.cost-input');
+    const cost = input ? Number(input.value || 0) : 0;
+    const price = Number((tds[5]||'0').replace(/\s/g,''));
+    const qty = Number((tds[4]||'0').replace(/\s/g,''));
+    const margin = price ? ((price - cost)/price*100) : 0;
+    const profit = (price - cost) * qty;
+    rows.push([tds[0],tds[1],tds[2],tds[3],qty,price,tds[6],tds[7],cost,margin,profit]);
+  });
+  const esc = s => {
+    s = (s===null||s===undefined) ? '' : String(s);
+    if (/[",\n,]/.test(s)) return '"' + s.replace(/"/g,'""') + '"';
+    return s;
+  };
+  const csv = rows.map(r => r.map(esc).join(',')).join('\n');
+  const blob = new Blob([csv], {type: 'text/csv;charset=utf-8;'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'products-table.csv';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('btnLoad').addEventListener('click', loadProducts);
+  document.getElementById('btnExport').addEventListener('click', exportCsvFromTable);
+  const t = document.getElementById('themeToggle');
+  if(t){ t.addEventListener('change', (e)=>{
+    document.body.setAttribute('data-theme', e.target.checked ? 'dark' : 'light');
+  });}
+  loadProducts();
+});
+</script>
 </body>
 </html>
