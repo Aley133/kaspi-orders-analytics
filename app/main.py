@@ -31,6 +31,7 @@ load_dotenv()
 # -------------------- ENV --------------------
 KASPI_TOKEN = os.getenv("KASPI_TOKEN", "").strip()
 DEFAULT_TZ = os.getenv("TZ", "Asia/Almaty")
+KASPI_BASE_URL = os.getenv("KASPI_BASE_URL", "https://kaspi.kz/shop/api/v2")
 CURRENCY = os.getenv("CURRENCY", "KZT")
 
 AMOUNT_FIELDS = [s.strip() for s in os.getenv("AMOUNT_FIELDS", "totalPrice").split(",") if s.strip()]
@@ -65,7 +66,7 @@ _EFF_BDS: str = BUSINESS_DAY_START
 app = FastAPI(title="Kaspi Orders Analytics")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-client = KaspiClient(token=KASPI_TOKEN) if KASPI_TOKEN else None
+client = KaspiClient(token=KASPI_TOKEN, base_url=KASPI_BASE_URL) if KASPI_TOKEN else None
 orders_cache = TTLCache(maxsize=128, ttl=CACHE_TTL)
 
 app.include_router(get_products_router(client), prefix="/products")
