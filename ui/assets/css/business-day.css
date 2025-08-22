@@ -1,1 +1,5 @@
 
+.bd-filter.card { border: 1px solid #e5e7eb; padding: 12px; border-radius: 12px; margin: 10px 0; }
+.bd-row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+.bd-row label { width: 180px; font-weight: 600; }
+.bd-actions { display: flex; gap: 8px; }
