@@ -1,178 +1,149 @@
 <!doctype html>
 <html lang="ru">
 <head>
-  <meta charset="utf-8" />
+  <meta charset="utf-8">
+  <title>Мой склад — загрузка прайса</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Мой склад — Kaspi</title>
-  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="/ui/style.css">
+  <style>
+    .toolbar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    .btn { cursor:pointer; padding:8px 12px; border:1px solid #ddd; border-radius:6px; background:#fff; }
+    .btn:hover { background:#f5f5f5; }
+    table { width:100%; border-collapse:collapse; margin-top:12px; }
+    th, td { border-bottom:1px solid #eee; padding:8px; text-align:left; }
+    th { background:#fafafa; position:sticky; top:0; z-index:1; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+    .right { text-align:right; }
+    .status { font-size: 12px; color:#666; }
+    .input-price { width:120px; padding:6px 8px; border:1px solid #ddd; border-radius:6px; }
+    .pill { font-size:12px; padding:2px 6px; border-radius:999px; background:#f0f0f0; }
+  </style>
 </head>
-<body data-theme="light">
-  <div class="layout">
-    <aside class="sidebar">
-      <div class="brand">⚡ LeoXpress</div>
-      <nav class="nav">
-        <a class="nav-item" href="index.html">Главная</a>
-        <a class="nav-item" href="stock.html">Мой склад</a>
-        <a class="nav-item" href="#">Предзаказ</a>
-        <a class="nav-item" href="#">Демпинг</a>
-        <a class="nav-item" href="#">WhatsApp Рассылка</a>
-      </nav>
-      <div class="theme-switch">
-        <label class="switch">
-          <input type="checkbox" id="themeToggle">
-          <span class="slider"></span>
-        </label>
-        <span>Тёмная тема</span>
-      </div>
-    </aside>
+<body>
+  <div class="container">
+    <h1>Мой склад</h1>
 
-    <div class="content">
-      <h1>Мой склад</h1>
+    <div class="toolbar">
+      <label class="btn">
+        Загрузить Excel/XML
+        <input id="fileInput" type="file" accept=".xlsx,.xls,.xml" style="display:none">
+      </label>
+      <span class="status" id="status"></span>
+    </div>
 
-      <section class="shell">
-        <div class="filters">
-          <div class="row">
-            <label class="chk"><input type="checkbox" id="onlyActive" checked> Только активные</label>
-            <label>Поиск</label>
-            <input type="text" id="search" placeholder="Название или код...">
-            <button class="btn" id="btnLoad">Загрузить</button>
-            <button class="btn" id="btnExport">Экспорт CSV (из таблицы)</button>
-          </div>
-        </div>
-
-        <div id="note" class="muted" style="margin:6px 0 10px"></div>
-
-        <div class="muted" style="margin:6px 0 10px">
-          Для расчёта прибыли укажи закупочную цену (KZT). Значения сохраняются локально (позже перенесём в БД).
-        </div>
-
-        <div class="shell" style="padding:0">
-          <div style="overflow:auto; max-height:70vh">
-            <table class="table" id="tbl">
-              <thead>
-                <tr>
-                  <th style="min-width:110px">Код</th>
-                  <th style="min-width:260px">Название</th>
-                  <th>Бренд</th>
-                  <th>Категория</th>
-                  <th>ШТ</th>
-                  <th>Цена, KZT</th>
-                  <th>Активен</th>
-                  <th>ШК</th>
-                  <th>Закупочная, KZT</th>
-                  <th>Маржа, %</th>
-                  <th>Прибыль, KZT</th>
-                </tr>
-              </thead>
-              <tbody></tbody>
-              <tfoot>
-                <tr>
-                  <td colspan="10" style="text-align:right;font-weight:700">Итого прибыль:</td>
-                  <td id="sumProfit" style="font-weight:800">0</td>
-                </tr>
-              </tfoot>
-            </table>
-          </div>
-        </div>
-      </section>
+    <div id="tableWrap">
+      <table id="stocks">
+        <thead>
+          <tr>
+            <th>Артикул</th>
+            <th>Наименование</th>
+            <th class="right">Цена продажи</th>
+            <th class="right">Закупка</th>
+            <th class="right">Чистый доход</th>
+            <th>Валюта</th>
+            <th>Штрихкод</th>
+          </tr>
+        </thead>
+        <tbody id="stocksBody"></tbody>
+      </table>
     </div>
   </div>
 
 <script>
-const nf = new Intl.NumberFormat('ru-RU');
-function fmt(n){ return nf.format(Math.round((Number(n)||0)*100)/100); }
+const $$ = sel => document.querySelector(sel);
+const $all = sel => Array.from(document.querySelectorAll(sel));
+const fmt = n => n === null || n === undefined || isNaN(n) ? "" : (+n).toFixed(2);
 
-function getCost(id){
-  const m = JSON.parse(localStorage.getItem('purchase_costs') || '{}');
-  return Number(m[id] || 0);
-}
-function setCost(id, v){
-  const m = JSON.parse(localStorage.getItem('purchase_costs') || '{}');
-  m[id] = Number(v)||0;
-  localStorage.setItem('purchase_costs', JSON.stringify(m));
-}
+function setStatus(text) { $$('#status').textContent = text || ''; }
 
-async function loadProducts(){
-  const onlyActive = document.getElementById('onlyActive').checked;
-  const q = document.getElementById('search').value.trim();
-  const p = new URLSearchParams();
-  p.set('active', onlyActive ? '1' : '0');
-  if(q) p.set('q', q);
-  p.set('page', '1'); p.set('page_size', '2000');
-  const r = await fetch(`/products/list?${p.toString()}`);
-  const data = await r.json();
-  if(data.note){ document.getElementById('note').textContent = data.note; }
+async function fetchList() {
+  const res = await fetch('/products/list');
+  const data = await res.json();
   renderTable(data.items || []);
+  setStatus(`Всего позиций: ${data.total}`);
 }
 
-function renderTable(items){
-  const tb = document.querySelector('#tbl tbody');
-  tb.innerHTML = '';
-  let sumProfit = 0;
-
-  for(const it of items){
+function renderTable(items) {
+  const tbody = $$('#stocksBody');
+  tbody.innerHTML = '';
+  for (const it of items) {
     const tr = document.createElement('tr');
-    const profit = (Number(it.price)||0) - getCost(it.id);
-    const totalProfit = (Number(it.qty)||0) * profit;
-    sumProfit += totalProfit;
-
     tr.innerHTML = `
-      <td>${it.code||''}</td>
-      <td>${it.name||''}</td>
-      <td>${it.brand||''}</td>
-      <td>${it.category||''}</td>
-      <td>${fmt(it.qty||0)}</td>
-      <td>${fmt(it.price||0)}</td>
-      <td>${it.active===true ? 'Да' : it.active===false ? 'Нет' : ''}</td>
-      <td>${it.barcode||''}</td>
-      <td><input data-id="${it.id}" class="cost-input" type="number" min="0" step="1" value="${getCost(it.id)}" style="width:120px"></td>
-      <td>${fmt((it.price ? ((it.price - getCost(it.id))/it.price*100) : 0))}</td>
-      <td>${fmt(totalProfit)}</td>
+      <td class="mono">${it.sku || ''}</td>
+      <td>${it.name || ''}</td>
+      <td class="right">${fmt(it.price)}</td>
+      <td class="right">
+        <input class="input-price" type="number" step="0.01" inputmode="decimal"
+               value="${it.purchase_price ?? ''}" data-sku="${it.sku || ''}">
+      </td>
+      <td class="right"><span class="pill">${fmt(it.net)}</span></td>
+      <td>${it.currency || ''}</td>
+      <td class="mono">${it.barcode || ''}</td>
     `;
-    tb.appendChild(tr);
+    tbody.appendChild(tr);
   }
+  bindEditors();
+}
 
-  document.getElementById('sumProfit').textContent = fmt(sumProfit);
-
-  tb.querySelectorAll('input.cost-input').forEach(inp => {
-    inp.addEventListener('change', () => {
-      const id = inp.getAttribute('data-id');
-      setCost(id, Number(inp.value)||0);
-      loadProducts(); // пересчитать строку и итог
+let debounceTimer = null;
+function bindEditors() {
+  $all('input.input-price').forEach(inp => {
+    inp.addEventListener('input', () => {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(pushUpdates, 400);
+      // update net in-place
+      const tr = inp.closest('tr');
+      const price = parseFloat(tr.children[2].textContent.replace(',', '.')) || 0;
+      const pp = parseFloat(inp.value.replace(',', '.'));
+      const net = (isNaN(pp) ? '' : (price - pp).toFixed(2));
+      tr.children[4].firstElementChild.textContent = net;
     });
   });
 }
 
-function exportCsvFromTable(){
-  const rows = [];
-  const header = ["code","name","brand","category","qty","price","active","barcode","cost","margin_percent","profit_total"];
-  rows.push(header);
-  const tb = document.querySelector('#tbl tbody');
-  tb.querySelectorAll('tr').forEach(tr => {
-    const td = Array.from(tr.children).map(x => x.textContent);
-    const input = tr.querySelector('input.cost-input');
-    const cost = input ? Number(input.value||0) : 0;
-    const price = Number((td[5]||'0').replace(/\s/g,''));
-    const qty   = Number((td[4]||'0').replace(/\s/g,''));
-    const margin = price ? ((price - cost)/price*100) : 0;
-    const profit = (price - cost) * qty;
-    rows.push([td[0],td[1],td[2],td[3],qty,price,td[6],td[7],cost,margin,profit]);
+async function pushUpdates() {
+  const updates = $all('input.input-price').map(inp => ({
+    sku: inp.getAttribute('data-sku'),
+    purchase_price: inp.value === '' ? null : parseFloat(inp.value.replace(',', '.'))
+  })).filter(u => u.sku);
+  if (!updates.length) return;
+  setStatus('Сохраняем...');
+  const res = await fetch('/products/purchase-price', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ updates })
   });
-  const esc = s => { s=(s??'').toString(); return /[",\n,]/.test(s) ? '"' + s.replace(/"/g,'""') + '"' : s; };
-  const csv = rows.map(r => r.map(esc).join(',')).join('\n');
-  const blob = new Blob([csv], {type: 'text/csv;charset=utf-8;'});
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a'); a.href = url; a.download = 'products-table.csv';
-  document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
+  if (!res.ok) {
+    setStatus('Ошибка сохранения');
+    return;
+  }
+  const data = await res.json();
+  setStatus(`Сохранено: ${data.changed}`);
 }
 
-document.addEventListener('DOMContentLoaded', () => {
-  document.getElementById('btnLoad').addEventListener('click', loadProducts);
-  document.getElementById('btnExport').addEventListener('click', exportCsvFromTable);
-  const t = document.getElementById('themeToggle');
-  if(t){ t.addEventListener('change', (e)=> document.body.setAttribute('data-theme', e.target.checked ? 'dark' : 'light')); }
-  loadProducts();
+async function importFile(file) {
+  const form = new FormData();
+  form.append('file', file);
+  setStatus('Импортируем...');
+  const res = await fetch('/products/import', { method: 'POST', body: form });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    setStatus('Ошибка: ' + (err.detail || res.statusText));
+    return;
+  }
+  const data = await res.json();
+  renderTable(data.items || []);
+  setStatus(`Импортировано: ${data.count}`);
+}
+
+$('#fileInput').addEventListener('change', async (e) => {
+  const f = e.target.files && e.target.files[0];
+  if (f) await importFile(f);
+  e.target.value = '';
 });
+
+// init
+fetchList();
 </script>
 </body>
 </html>
