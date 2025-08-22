@@ -1,6 +1,6 @@
 from __future__ import annotations
-from datetime import datetime
-from typing import Dict, Generator, Optional, Any, List
+from datetime import datetime, timedelta
+from typing import Dict, Generator, Optional, Any, List, Iterable
 import os
 import httpx
 from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
@@ -16,7 +16,8 @@ class KaspiClient:
         timeout_connect: float = 10.0,
         timeout_read: float = 20.0,
     ):
-        self.base_url = (base_url or DEFAULT_BASE_URL).rstrip("/")
+        self._token = token
+        self._preferred_base = (base_url or DEFAULT_BASE_URL).rstrip("/")
         self.headers = {
             "Accept": "application/vnd.api+json",
             "Content-Type": "application/vnd.api+json",
@@ -27,6 +28,33 @@ class KaspiClient:
             connect=timeout_connect, read=timeout_read, write=timeout_read, pool=timeout_read
         )
 
+    # ---------- base urls ----------
+    def _base_urls(self) -> List[str]:
+        # 1) явный список из .env (KASPI_BASE_URLS, через запятую)
+        env_list = [x.strip().rstrip("/") for x in os.getenv("KASPI_BASE_URLS", "").split(",") if x.strip()]
+        if env_list:
+            return env_list
+
+        # 2) одиночное из .env (KASPI_BASE_URL)
+        single = os.getenv("KASPI_BASE_URL", "") or self._preferred_base
+        single = single.rstrip("/")
+        # 3) распространённые альтернативы
+        common = [
+            single,
+            "https://kaspi.kz/merchantcabinet/api/v2",
+            "https://kaspi.kz/merchantcabinet/api/v1",
+            "https://kaspi.kz/mc/api/v2",
+            "https://kaspi.kz/mc/api/v1",
+            "https://kaspi.kz/shop/api/v1",
+            "https://seller-api.kaspi.kz/shop/api/v2",
+        ]
+        seen, out = set(), []
+        for u in common:
+            if u and u not in seen:
+                seen.add(u)
+                out.append(u)
+        return out
+
     # ---------- low-level ----------
     @retry(
         wait=wait_exponential(multiplier=1, min=1, max=8),
@@ -34,8 +62,8 @@ class KaspiClient:
         reraise=True,
         retry=retry_if_exception_type((httpx.RequestError, httpx.HTTPStatusError)),
     )
-    def _get(self, path: str, params: Dict[str, object]) -> Dict:
-        url = f"{self.base_url}/{path.lstrip('/')}"
+    def _get(self, base_url: str, path: str, params: Dict[str, object]) -> Dict:
+        url = f"{base_url}/{path.lstrip('/')}"
         with httpx.Client(headers=self.headers, timeout=self.timeout) as client:
             resp = client.get(url, params=params)
             resp.raise_for_status()
@@ -67,8 +95,9 @@ class KaspiClient:
         }
         if state:
             params["filter[orders][state]"] = state
+        base = self._base_urls()[0]  # orders у нас уже работают на shop/api/v2, берём первый
         while True:
-            data = self._get("orders", params)
+            data = self._get(base, "orders", params)
             items = data.get("data", [])
             for it in items:
                 yield it
@@ -82,8 +111,8 @@ class KaspiClient:
             params["page[number]"] = current + 1
 
     # ---------- json:api iterator ----------
-    def _iter_jsonapi(self, rel_url: str, params: Optional[Dict[str, Any]] = None) -> Generator[Dict, None, None]:
-        url = f"{self.base_url}/{rel_url.lstrip('/')}"
+    def _iter_jsonapi(self, base_url: str, rel_url: str, params: Optional[Dict[str, Any]] = None) -> Generator[Dict, None, None]:
+        url = f"{base_url}/{rel_url.lstrip('/')}"
         with httpx.Client(headers=self.headers, timeout=self.timeout) as client:
             while True:
                 resp = client.get(url, params=params)
@@ -161,26 +190,28 @@ class KaspiClient:
 
         last_err: Optional[Exception] = None
 
-        for rel in self._paths_for_probe():
-            for a in active_opts:
-                for c in city_opts:
-                    for m in merch_opts:
-                        q = {**base_q, **a, **c, **m}
-                        try:
-                            any_yielded = False
-                            for raw in self._iter_jsonapi(rel, params=q):
-                                any_yielded = True
-                                yield self._wrap_product_item(raw)
-                            if any_yielded:
-                                return
-                        except httpx.HTTPStatusError as e:
-                            if e.response.status_code in (404, 403):
+        for base in self._base_urls():
+            for rel in self._paths_for_probe():
+                for a in active_opts:
+                    for c in city_opts:
+                        for m in merch_opts:
+                            q = {**base_q, **a, **c, **m}
+                            try:
+                                any_yielded = False
+                                for raw in self._iter_jsonapi(base, rel, params=q):
+                                    any_yielded = True
+                                    yield self._wrap_product_item(raw)
+                                if any_yielded:
+                                    return
+                            except httpx.HTTPStatusError as e:
+                                # 404/403 — пробуем дальше
+                                if e.response.status_code in (404, 403):
+                                    last_err = e
+                                    continue
+                                raise
+                            except Exception as e:
                                 last_err = e
                                 continue
-                            raise
-                        except Exception as e:
-                            last_err = e
-                            continue
 
         if last_err:
             raise last_err
@@ -193,9 +224,47 @@ class KaspiClient:
     def iter_catalog(self, active_only: bool = True, page_size: int = 100) -> Generator[Dict, None, None]:
         yield from self.iter_products(active_only=active_only, page_size=page_size)
 
-    # ---------- PROBE (диагностика) ----------
+    # ---------- fallback: build products from orders ----------
+    def iter_products_from_orders(self, days: int = 60) -> Generator[Dict, None, None]:
+        """Резервный режим: собираем «каталог» из последних заказов."""
+        end = datetime.utcnow()
+        start = end - timedelta(days=days)
+        seen = set()
+        for order in self.iter_orders(start=start, end=end, filter_field="creationDate", page_size=100):
+            attrs = order.get("attributes", {}) or {}
+            items = attrs.get("items") or attrs.get("positions") or []
+            # поддержим два популярных формата: list[dict] или dict с 'data'
+            if isinstance(items, dict) and "data" in items:
+                items = items["data"]
+            if not isinstance(items, list):
+                continue
+            for it in items:
+                if isinstance(it, dict):
+                    a = it.get("attributes", {}) or it
+                else:
+                    a = {}
+                code = a.get("code") or a.get("sku") or a.get("barcode") or a.get("offerId")
+                name = a.get("name") or a.get("title") or a.get("productName")
+                price = a.get("price") or a.get("salePrice") or a.get("currentPrice") or a.get("totalPrice")
+                if not name and not code:
+                    continue
+                key = f"{code or ''}|{name or ''}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                yield {
+                    "id": code or name,
+                    "attributes": {
+                        "code": code,
+                        "name": name,
+                        "price": price,
+                        "active": True,
+                        "source": "from_orders"
+                    }
+                }
+
+    # ---------- PROBE (diagnostics) ----------
     def probe_catalog(self, sample_size: int = 2, active_only: bool = True) -> List[Dict[str, Any]]:
-        """Перебирает пути и наборы параметров и возвращает статусы (не кидает исключения)."""
         results: List[Dict[str, Any]] = []
         city_id = os.getenv("KASPI_CITY_ID")
         merchant_id = os.getenv("MERCHANT_ID") or os.getenv("PARTNER_ID")
@@ -215,38 +284,40 @@ class KaspiClient:
         merch_opts = [{"merchantId": merchant_id}] if merchant_id else [{}]
 
         with httpx.Client(headers=self.headers, timeout=self.timeout) as client:
-            for rel in self._paths_for_probe():
-                for a in active_opts:
-                    for c in city_opts:
-                        for m in merch_opts:
-                            q = {**base_q, **a, **c, **m}
-                            url = f"{self.base_url}/{rel.lstrip('/')}"
-                            try:
-                                r = client.get(url, params=q)
-                                ok = r.status_code == 200
-                                count = 0
-                                if ok:
-                                    js = r.json()
-                                    data = js.get("data") if isinstance(js, dict) else js
-                                    if isinstance(data, list):
-                                        count = len(data)
-                                    elif data:
-                                        count = 1
-                                results.append({
-                                    "url": url,
-                                    "params": q,
-                                    "status": r.status_code,
-                                    "ok": ok,
-                                    "count": count
-                                })
-                            except Exception as e:
-                                results.append({
-                                    "url": url,
-                                    "params": q,
-                                    "status": None,
-                                    "ok": False,
-                                    "error": str(e),
-                                })
-        # сначала успешные
+            for base in self._base_urls():
+                for rel in self._paths_for_probe():
+                    for a in active_opts:
+                        for c in city_opts:
+                            for m in merch_opts:
+                                q = {**base_q, **a, **c, **m}
+                                url = f"{base}/{rel.lstrip('/')}"
+                                try:
+                                    r = client.get(url, params=q)
+                                    ok = r.status_code == 200
+                                    count = 0
+                                    if ok:
+                                        js = r.json()
+                                        data = js.get("data") if isinstance(js, dict) else js
+                                        if isinstance(data, list):
+                                            count = len(data)
+                                        elif data:
+                                            count = 1
+                                    results.append({
+                                        "base": base,
+                                        "url": url,
+                                        "params": q,
+                                        "status": r.status_code,
+                                        "ok": ok,
+                                        "count": count
+                                    })
+                                except Exception as e:
+                                    results.append({
+                                        "base": base,
+                                        "url": url,
+                                        "params": q,
+                                        "status": None,
+                                        "ok": False,
+                                        "error": str(e),
+                                    })
         results.sort(key=lambda x: (not x["ok"], -(x.get("count") or 0)))
         return results
