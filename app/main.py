@@ -108,12 +108,48 @@ def parse_states_csv(s: Optional[str]) -> Optional[set[str]]:
         return None
     return {norm_state(x) for x in re.split(r"[\s,;]+", s) if x.strip()}
 
+# ----- robust city extraction -----
+_CITY_KEY_HINTS = {"city", "cityname", "town", "locality", "settlement"}
+
+def _normalize_city(s: str) -> str:
+    if not isinstance(s, str):
+        return ""
+    s = s.strip()
+    # убираем "г.", "город" и берём первую часть до запятой
+    s = re.sub(r"^\s*(г\.?|город)\s+", "", s, flags=re.IGNORECASE)
+    s = s.split(",")[0].strip()
+    return s
+
+def _deep_find_city(obj) -> str:
+    """Рекурсивно ищем строковое поле, ключ которого похож на 'city'."""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            kl = str(k).lower()
+            if any(h in kl for h in _CITY_KEY_HINTS) and isinstance(v, str) and v.strip():
+                return _normalize_city(v)
+            found = _deep_find_city(v)
+            if found:
+                return found
+    elif isinstance(obj, list):
+        for it in obj:
+            found = _deep_find_city(it)
+            if found:
+                return found
+    return ""
+
 def extract_city(attrs: dict) -> str:
+    # 1) явные ключи из ENV
     for k in CITY_KEYS:
         v = dict_get_path(attrs, k) if "." in k else attrs.get(k)
         if isinstance(v, str) and v.strip():
-            return v.strip()
-    return ""
+            return _normalize_city(v)
+        if isinstance(v, (dict, list)):
+            res = _deep_find_city(v)
+            if res:
+                return res
+    # 2) глобальный глубокий поиск по всем полям
+    res = _deep_find_city(attrs)
+    return res or ""
 
 def extract_amount(attrs: dict) -> float:
     total = 0.0
@@ -353,7 +389,7 @@ async def list_ids(start: str = Query(...), end: str = Query(...), tz: str = Que
 
     inc = parse_states_csv(states)
     exc = parse_states_csv(exclude_states) or set()
-    out: List[Dict[str, str]] = []
+    out: List[Dict[str, object]] = []
 
     if client is None:
         raise HTTPException(status_code=500, detail="KASPI_TOKEN is not set")
@@ -396,27 +432,45 @@ async def list_ids(start: str = Query(...), end: str = Query(...), tz: str = Que
     # strict sort by local datetime
     out.sort(key=lambda it: it["date"], reverse=(order == "desc"))
 
+    # totals for whole period
+    period_total_amount = round(sum(float(it.get("amount", 0) or 0) for it in out), 2)
+    period_total_count = len(out)
+
     # group by day if requested
     groups: List[Dict[str, object]] = []
     if grouped:
         cur_day: Optional[str] = None
         bucket: List[Dict[str, object]] = []
         for it in out:
-            d = it["date"][:10]  # YYYY-MM-DD
+            d = str(it["date"])[:10]  # YYYY-MM-DD
             if cur_day is None:
                 cur_day = d
             if d != cur_day:
-                groups.append({"day": cur_day, "items": bucket})
+                groups.append({
+                    "day": cur_day,
+                    "items": bucket,
+                    "total_amount": round(sum(float(x.get("amount", 0) or 0) for x in bucket), 2),
+                })
                 cur_day, bucket = d, []
             bucket.append(it)
         if cur_day is not None:
-            groups.append({"day": cur_day, "items": bucket})
+            groups.append({
+                "day": cur_day,
+                "items": bucket,
+                "total_amount": round(sum(float(x.get("amount", 0) or 0) for x in bucket), 2),
+            })
 
-    # slice after sorting
+    # slice after sorting (сначала сортируем/группируем, потом режем)
     if limit and limit > 0:
         out = out[:limit]
 
-    return {"items": out, "groups": groups}
+    return {
+        "items": out,
+        "groups": groups,
+        "period_total_count": period_total_count,
+        "period_total_amount": period_total_amount,
+        "currency": CURRENCY,
+    }
 
 @app.get("/orders/ids.csv", response_class=PlainTextResponse)
 async def list_ids_csv(start: str = Query(...), end: str = Query(...), tz: str = Query(DEFAULT_TZ),
@@ -428,7 +482,7 @@ async def list_ids_csv(start: str = Query(...), end: str = Query(...), tz: str =
                           states=states, exclude_states=exclude_states,
                           use_bd=use_bd, business_day_start=business_day_start,
                           limit=100000, order=order, grouped=0)
-    csv = "\n".join([it["number"] for it in data["items"]])
+    csv = "\n".join([str(it["number"]) for it in data["items"]])
     return csv
 
 @app.get("/", include_in_schema=False)
