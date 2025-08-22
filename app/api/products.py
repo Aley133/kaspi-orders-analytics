@@ -1,180 +1,270 @@
 from __future__ import annotations
-from typing import Callable, Optional, List, Dict, Any, Tuple
-from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import Response, JSONResponse
 
-try:
-    from ..kaspi_client import KaspiClient  # type: ignore
-except Exception:  # pragma: no cover
-    from kaspi_client import KaspiClient  # type: ignore
+import io
+import json
+import os
+from typing import List, Dict, Any, Optional
+from fastapi import APIRouter, UploadFile, File, HTTPException, Query
+from pydantic import BaseModel
+
+# Optional: the main app will pass an instance of KaspiClient, but we keep
+# this router self-sufficient for the local price-list workflow.
+# We intentionally do NOT import openpyxl at module import to avoid hard deps.
+
+# ---------------- Local store ----------------
+
+class LocalStore:
+    def __init__(self, path: str = None):
+        root_dir = os.path.dirname(os.path.dirname(__file__))  # project root (where main.py is)
+        default_path = os.path.join(root_dir, "data", "products_local.json")
+        self.path = path or os.getenv("LOCAL_STORE_FILE", default_path)
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        self._data: Dict[str, Dict[str, Any]] = {}
+        self._load()
+
+    def _load(self) -> None:
+        try:
+            if os.path.exists(self.path):
+                with open(self.path, "r", encoding="utf-8") as f:
+                    self._data = json.load(f)
+            else:
+                self._data = {}
+        except Exception as e:
+            # Corrupted file -> start fresh
+            self._data = {}
+
+    def _save(self) -> None:
+        tmp = self.path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(self._data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, self.path)
+
+    def list(self) -> List[Dict[str, Any]]:
+        return list(self._data.values())
+
+    def upsert_many(self, items: List[Dict[str, Any]]) -> int:
+        count = 0
+        for it in items:
+            sku = str(it.get("sku") or "").strip()
+            if not sku:
+                continue
+            prev = self._data.get(sku, {})
+            # Preserve existing purchase_price if not provided in the file
+            purchase_price = it.get("purchase_price", prev.get("purchase_price"))
+            merged = {
+                "sku": sku,
+                "name": it.get("name") or prev.get("name") or "",
+                "price": _num(it.get("price") if it.get("price") is not None else prev.get("price")),
+                "currency": it.get("currency") or prev.get("currency") or os.getenv("CURRENCY", "KZT"),
+                "barcode": it.get("barcode") or prev.get("barcode") or "",
+                "purchase_price": _num(purchase_price),
+            }
+            merged["net"] = _calc_net(merged.get("price"), merged.get("purchase_price"))
+            self._data[sku] = merged
+            count += 1
+        self._save()
+        return count
+
+    def update_purchase_prices(self, updates: List[Dict[str, Any]]) -> int:
+        changed = 0
+        for it in updates:
+            sku = str(it.get("sku") or "").strip()
+            if not sku or sku not in self._data:
+                # create if not exists (so user can add manually)
+                self._data.setdefault(sku, {"sku": sku})
+            price = _num(it.get("purchase_price"))
+            self._data[sku]["purchase_price"] = price
+            # Recompute net
+            self._data[sku]["net"] = _calc_net(self._data[sku].get("price"), price)
+            changed += 1
+        self._save()
+        return changed
 
 
-def _pick(attrs: Dict[str, Any], *keys: str) -> str:
-    for k in keys:
-        v = attrs.get(k)
-        if v not in (None, ""):
-            return str(v)
-    return ""
-
-
-def _normalize_active(val: Any) -> Optional[bool]:
-    if val is None or val == "":
+def _num(x) -> Optional[float]:
+    try:
+        if x is None or x == "":
+            return None
+        return float(str(x).replace(" ", "").replace(",", "."))
+    except Exception:
         return None
-    if isinstance(val, bool):
-        return val
-    s = str(val).strip().lower()
-    if s in ("1", "true", "yes", "on", "published", "active"):
-        return True
-    if s in ("0", "false", "no", "off", "unpublished", "inactive"):
-        return False
+
+
+def _calc_net(sale: Optional[float], purchase: Optional[float]) -> Optional[float]:
+    if sale is None or purchase is None:
+        return None
+    return round(sale - purchase, 2)
+
+
+# ---------------- Parsing helpers ----------------
+
+# Header synonyms (lowercased)
+HEADERS = {
+    "sku": {"sku", "vendorcode", "merchantsku", "article", "артикул", "код", "код товара", "merchantproductcode"},
+    "name": {"name", "название", "наименование", "productname", "title"},
+    "price": {"price", "цена", "цена продажи", "sellingprice", "saleprice"},
+    "purchase_price": {"purchase", "purchaseprice", "закуп", "закупка", "закупочная цена"},
+    "currency": {"currency", "валюта"},
+    "barcode": {"barcode", "штрихкод", "ean", "ean13"},
+}
+
+def _norm_header(h: str) -> str:
+    return "".join(ch for ch in h.strip().lower() if ch.isalnum() or ch in ("_",))
+
+def _pick_key(hdr_map: Dict[str, int], want: str) -> Optional[int]:
+    candidates = HEADERS[want]
+    for h, idx in hdr_map.items():
+        if h in candidates:
+            return idx
     return None
 
-
-def _num(x: Any) -> float:
+def parse_xlsx(content: bytes) -> List[Dict[str, Any]]:
     try:
-        return float(x)
+        import openpyxl  # type: ignore
     except Exception:
-        try:
-            return float(str(x).replace(" ", "").replace(",", "."))
-        except Exception:
-            return 0.0
+        raise HTTPException(status_code=400, detail="Для XLSX установите пакет openpyxl")
+    wb = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+    ws = wb.active
+    rows = list(ws.iter_rows(values_only=True))
+    if not rows:
+        return []
+    headers = rows[0]
+    hdr_map: Dict[str, int] = {}
+    for i, h in enumerate(headers):
+        if not h:
+            continue
+        hdr_map[_norm_header(str(h))] = i
+    idx_sku = _pick_key(hdr_map, "sku")
+    if idx_sku is None:
+        raise HTTPException(status_code=400, detail="В XLSX не найден столбец Артикул / SKU")
+    idx_name = _pick_key(hdr_map, "name")
+    idx_price = _pick_key(hdr_map, "price")
+    idx_pp = _pick_key(hdr_map, "purchase_price")
+    idx_cur = _pick_key(hdr_map, "currency")
+    idx_bar = _pick_key(hdr_map, "barcode")
+    out: List[Dict[str, Any]] = []
+    for r in rows[1:]:
+        if r is None:
+            continue
+        sku = r[idx_sku] if idx_sku is not None else None
+        if sku is None or str(sku).strip() == "":
+            continue
+        item = {
+            "sku": str(sku).strip(),
+            "name": str(r[idx_name]).strip() if idx_name is not None and r[idx_name] is not None else "",
+            "price": _num(r[idx_price]) if idx_price is not None else None,
+            "purchase_price": _num(r[idx_pp]) if idx_pp is not None else None,
+            "currency": str(r[idx_cur]).strip() if idx_cur is not None and r[idx_cur] is not None else None,
+            "barcode": str(r[idx_bar]).strip() if idx_bar is not None and r[idx_bar] is not None else None,
+        }
+        out.append(item)
+    return out
 
-
-def _find_iter_fn(client: Any) -> Optional[Callable]:
-    for name in ("iter_products", "iter_offers", "iter_catalog"):
-        if hasattr(client, name):
-            return getattr(client, name)
-    return None
-
-
-def _collect_products(client: KaspiClient, active_only: Optional[bool]) -> Tuple[List[Dict[str, Any]], int, Optional[str]]:
-    iter_fn = _find_iter_fn(client)
-    if iter_fn is None:
-        raise HTTPException(
-            status_code=501,
-            detail="В kaspi_client нет метода каталога. Ожидается iter_products/iter_offers/iter_catalog."
-        )
-
-    items: List[Dict[str, Any]] = []
-    seen = set()
-    total = 0
-    note: Optional[str] = None
-
-    def add_row(item: Dict[str, Any]):
-        nonlocal total
-        attrs = item.get("attributes", {}) or {}
-        pid = item.get("id") or _pick(attrs, "id", "sku", "code", "offerId") or _pick(attrs, "name")
-        if not pid or pid in seen:
-            return
-        seen.add(pid)
-        total += 1
-
-        code = _pick(attrs, "code", "sku", "offerId", "article", "barcode")
-        name = _pick(attrs, "name", "title", "productName", "offerName")
-        price = _num(_pick(attrs, "price", "basePrice", "salePrice", "currentPrice", "totalPrice"))
-        qty = int(_num(_pick(attrs, "quantity", "availableAmount", "stockQuantity", "qty")))
-        brand = _pick(attrs, "brand", "producer", "manufacturer")
-        category = _pick(attrs, "category", "categoryName", "group")
-        barcode = _pick(attrs, "barcode", "ean")
-        active_val = _normalize_active(_pick(attrs, "active", "isActive", "isPublished", "visible", "isVisible", "status"))
-
-        if active_only is not None and active_val is not None and active_only and active_val is False:
-            return
-
-        items.append({
-            "id": pid,
-            "code": code,
-            "name": name,
-            "price": price,
-            "qty": qty,
-            "active": True if active_val else False if active_val is False else None,
-            "brand": brand,
-            "category": category,
-            "barcode": barcode,
-        })
-
-    # 1) Пытаемся штатный каталог
+def parse_xml(content: bytes) -> List[Dict[str, Any]]:
+    # YML (Kaspi/YML) style
+    import xml.etree.ElementTree as ET
     try:
-        try:
-            for it in iter_fn(active_only=bool(active_only) if active_only is not None else True):
-                add_row(it)
-        except TypeError:
-            for it in iter_fn():
-                add_row(it)
-    except Exception:
-        items = []
-        total = 0
+        root = ET.fromstring(content)
+    except ET.ParseError:
+        raise HTTPException(status_code=400, detail="Некорректный XML")
+    offers = []
+    # possible paths: yml_catalog/shop/offers/offer OR pricelist/products/product etc.
+    # We'll search generically by tag name "offer" or "product".
+    for offer in root.iter():
+        tag = offer.tag.lower().split("}")[-1]
+        if tag not in ("offer", "product"):
+            continue
+        # prefer vendorCode/merchantSku as SKU
+        sku = None
+        for key in ("vendorCode", "merchantSku", "sku", "code", "article"):
+            el = offer.find(key) or offer.find(key.lower())
+            if el is not None and (el.text or "").strip():
+                sku = el.text.strip()
+                break
+        if sku is None:
+            # some files keep vendorCode as attribute
+            for attr in ("vendorCode", "merchantSku", "sku", "code"):
+                if offer.get(attr):
+                    sku = offer.get(attr)
+                    break
+        if not sku:
+            continue
+        name_el = offer.find("name") or offer.find("Name")
+        price_el = offer.find("price") or offer.find("Price")
+        curr_el = offer.find("currencyId") or offer.find("currency") or offer.find("Currency")
+        barcode_el = offer.find("barcode") or offer.find("Barcode") or offer.find("ean")
+        # some vendors put purchase price as custom param
+        pp = None
+        for ptag in ("purchasePrice", "purchase", "zakup", "Закупка", "закупка"):
+            el = offer.find(ptag) or offer.find(ptag.lower())
+            if el is not None and (el.text or "").strip():
+                pp = el.text.strip()
+                break
+        items = {
+            "sku": sku,
+            "name": (name_el.text if name_el is not None else "") or "",
+            "price": _num(price_el.text) if price_el is not None else None,
+            "purchase_price": _num(pp) if pp is not None else None,
+            "currency": (curr_el.text if curr_el is not None else None),
+            "barcode": (barcode_el.text if barcode_el is not None else None),
+        }
+        offers.append(items)
+    return offers
 
-    # 2) Если пусто — резерв: собираем товары из заказов
-    if not items:
-        try:
-            for it in client.iter_products_from_orders(days=60):
-                add_row(it)
-            note = "Каталог по API недоступен, показаны товары, собранные из последних заказов (60 дней)."
-        except Exception:
-            note = "Каталог по API недоступен."
-            items, total = [], 0
 
-    return items, total, note
+# ---------------- API router ----------------
+
+class PriceUpdate(BaseModel):
+    sku: str
+    purchase_price: Optional[float] = None
+
+class PriceUpdateBulk(BaseModel):
+    updates: List[PriceUpdate]
 
 
+def get_products_router(_client=None) -> APIRouter:
+    store = LocalStore()
+    router = APIRouter()
 
-def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
-    router = APIRouter(tags=["products"])
+    @router.post("/products/import")
+    async def import_pricelist(file: UploadFile = File(...)):
+        name = (file.filename or "").lower()
+        content = await file.read()
+        if not content:
+            raise HTTPException(status_code=400, detail="Пустой файл")
+        if name.endswith(".xlsx") or name.endswith(".xls"):
+            items = parse_xlsx(content)
+        elif name.endswith(".xml"):
+            items = parse_xml(content)
+        else:
+            raise HTTPException(status_code=400, detail="Поддерживаются только XLSX и XML")
+        count = store.upsert_many(items)
+        return {"ok": True, "count": count, "items": store.list()}
 
-    @router.get("/list")
+    @router.get("/products/list")
     async def list_products(
-        active: int = Query(1, description="1 — только активные, 0 — все"),
-        q: Optional[str] = Query(None, description="поиск по названию/коду"),
         page: int = Query(1, ge=1),
-        page_size: int = Query(500, ge=1, le=2000),
+        page_size: int = Query(2000, ge=1, le=10000),
+        active: int = Query(None)
     ):
-        if client is None:
-            raise HTTPException(status_code=500, detail="KASPI_TOKEN is not set")
-
-        items, total, note = _collect_products(client, active_only=bool(active))
-
-        if q:
-            ql = q.strip().lower()
-            items = [r for r in items if ql in (r["name"] or "").lower() or ql in (r["code"] or "").lower()]
-
+        items = store.list()
+        # simple paging
         start = (page - 1) * page_size
         end = start + page_size
-        page_items = items[start:end]
+        return {
+            "total": len(items),
+            "page": page,
+            "page_size": page_size,
+            "items": items[start:end],
+        }
 
-        return JSONResponse({"items": page_items, "total": len(items), "note": note})
+    @router.post("/products/purchase-price")
+    async def set_purchase_prices(body: PriceUpdateBulk):
+        changed = store.update_purchase_prices([u.dict() for u in body.updates])
+        return {"ok": True, "changed": changed, "items": store.list()}
 
-    @router.get("/export.csv")
-    async def export_products_csv(active: int = Query(1)):
-        if client is None:
-            raise HTTPException(status_code=500, detail="KASPI_TOKEN is not set")
-
-        items, _, _ = _collect_products(client, active_only=bool(active))
-
-        def esc(s: str) -> str:
-            s = "" if s is None else str(s)
-            if any(c in s for c in [",", '"', "\n"]):
-                s = '"' + s.replace('"', '""') + '"'
-            return s
-
-        header = "id,code,name,price,qty,active,brand,category,barcode\n"
-        body = "".join([",".join(esc(x) for x in [
-            r["id"], r["code"], r["name"], r["price"], r["qty"],
-            1 if r["active"] else 0 if r["active"] is False else "",
-            r["brand"], r["category"], r["barcode"]
-        ]) + "\n" for r in items])
-        csv = header + body
-        return Response(content=csv, media_type="text/csv; charset=utf-8",
-                        headers={"Content-Disposition": 'attachment; filename="products.csv"'})
-
-    @router.get("/probe")
-    async def probe_products(active: int = Query(1)):
-        if client is None:
-            raise HTTPException(status_code=500, detail="KASPI_TOKEN is not set")
-        try:
-            res = client.probe_catalog(sample_size=2, active_only=bool(active))
-            return JSONResponse({"attempts": res})
-        except Exception as e:
-            return JSONResponse({"attempts": [], "error": str(e)})
+    @router.get("/products/debug")
+    async def debug_dump():
+        return {"path": store.path, "count": len(store.list())}
 
     return router
