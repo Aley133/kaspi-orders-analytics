@@ -1,4 +1,3 @@
-# app/api/products.py
 from __future__ import annotations
 from typing import Callable, Optional, List, Dict, Any, Tuple
 from fastapi import APIRouter, HTTPException, Query
@@ -102,37 +101,14 @@ def _collect_products(client: KaspiClient, active_only: Optional[bool]) -> Tuple
             for it in iter_fn():
                 add_row(it)
     except Exception:
-        return [], 0, ("Каталог по API недоступен. Можно задать KASPI_PRODUCTS_ENDPOINTS/KASPI_CITY_ID, "
-                       "или использовать autodetect в kaspi_client.iter_products().")
+        return [], 0, ("Каталог по API недоступен. Укажи KASPI_PRODUCTS_ENDPOINTS/KASPI_CITY_ID/merchantId "
+                       "или смотри диагностику /products/probe.")
 
     return items, total, note
 
 
 def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
     router = APIRouter(tags=["products"])
-
-    @router.get("/export.csv")
-    async def export_products_csv(active: int = Query(1, description="1 — только активные, 0 — все")):
-        if client is None:
-            raise HTTPException(status_code=500, detail="KASPI_TOKEN is not set")
-
-        items, _, _ = _collect_products(client, active_only=bool(active))
-
-        def esc(s: str) -> str:
-            s = "" if s is None else str(s)
-            if any(c in s for c in [",", '"', "\n"]):
-                s = '"' + s.replace('"', '""') + '"'
-            return s
-
-        header = "id,code,name,price,qty,active,brand,category,barcode\n"
-        body = "".join([",".join(esc(x) for x in [
-            r["id"], r["code"], r["name"], r["price"], r["qty"],
-            1 if r["active"] else 0 if r["active"] is False else "",
-            r["brand"], r["category"], r["barcode"]
-        ]) + "\n" for r in items])
-        csv = header + body
-        return Response(content=csv, media_type="text/csv; charset=utf-8",
-                        headers={"Content-Disposition": 'attachment; filename=\"products.csv\"'})
 
     @router.get("/list")
     async def list_products(
@@ -156,40 +132,37 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
 
         return JSONResponse({"items": page_items, "total": len(items), "note": note})
 
-    @router.get("/debug")
-    async def debug_products_catalog(
-        active: int = Query(1, description="1 — только активные, 0 — все"),
-    ):
-        """
-        Диагностика autodetect’а: какие пути и какие наборы параметров отвечают 200 OK.
-        Ничего не ломает, просто показывает статусы.
-        """
+    @router.get("/export.csv")
+    async def export_products_csv(active: int = Query(1)):
         if client is None:
             raise HTTPException(status_code=500, detail="KASPI_TOKEN is not set")
 
-        # попытаемся выполнить первые пару элементов (не гоним весь каталог), чтобы понять где 200
-        result: List[Dict[str, Any]] = []
-        ok_found = False
+        items, _, _ = _collect_products(client, active_only=bool(active))
 
+        def esc(s: str) -> str:
+            s = "" if s is None else str(s)
+            if any(c in s for c in [",", '"', "\n"]):
+                s = '"' + s.replace('"', '""') + '"'
+            return s
+
+        header = "id,code,name,price,qty,active,brand,category,barcode\n"
+        body = "".join([",".join(esc(x) for x in [
+            r["id"], r["code"], r["name"], r["price"], r["qty"],
+            1 if r["active"] else 0 if r["active"] is False else "",
+            r["brand"], r["category"], r["barcode"]
+        ]) + "\n" for r in items])
+        csv = header + body
+        return Response(content=csv, media_type="text/csv; charset=utf-8",
+                        headers={"Content-Disposition": 'attachment; filename="products.csv"'})
+
+    @router.get("/probe")
+    async def probe_products(active: int = Query(1)):
+        if client is None:
+            raise HTTPException(status_code=500, detail="KASPI_TOKEN is not set")
         try:
-            fn = _find_iter_fn(client)
-            if fn is None:
-                raise RuntimeError("Нет функции каталога")
-            # попробуем получить 1-2 айтема
-            cnt = 0
-            try:
-                it = fn(active_only=bool(active))
-            except TypeError:
-                it = fn()
-            for row in it:
-                cnt += 1
-                ok_found = True
-                if cnt >= 2:
-                    break
-            result.append({"ok": ok_found, "hint": "Каталог отвечает"})
+            res = client.probe_catalog(sample_size=2, active_only=bool(active))
+            return JSONResponse({"attempts": res})
         except Exception as e:
-            result.append({"ok": False, "error": str(e)})
-
-        return JSONResponse({"results": result})
+            return JSONResponse({"attempts": [], "error": str(e)})
 
     return router
