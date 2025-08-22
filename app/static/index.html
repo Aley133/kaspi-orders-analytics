@@ -1,78 +1,77 @@
 <!DOCTYPE html>
+
 <html lang="ru">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Kaspi — Dashboard</title>
-  <link rel="stylesheet" href="/ui/style.css"/>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-</head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Kaspi — Dashboard</title>
+<link href="/ui/style.css" rel="stylesheet"/>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script>(function(){
+  try{
+    var saved = localStorage.getItem('theme');
+    var prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    if(saved==='dark' || (!saved && prefersDark)) document.documentElement.classList.add('dark');
+  }catch(e){}
+})();</script></head>
 <body>
-  <div class="shell">
-    <header class="top">
-      <h1>Добрый день, LeoXpress</h1>
-      <div class="tabs">
-        <button class="btn preset" data-mode="created">Пришло сегодня</button>
-        <button class="btn preset" data-mode="planned">План на сегодня</button>
-        <button class="btn preset" data-mode="delivered">Доставлено сегодня</button>
-        <button class="btn preset" data-mode="kaspi_pack">Kaspi: Упаковка (до 20:00)</button>
-      </div>
-    </header>
-
-    <form id="f" class="controls">
-      <label>Начало <input id="start" type="date" required></label>
-      <label>Конец <input id="end" type="date" required></label>
-      <label>до времени <input id="end_time" placeholder="например 20:00"></label>
-      <label>State(ы) <input id="states" placeholder="например NEW,DELIVERY"></label>
-      <label><input type="checkbox" id="excCanceled" checked> Исключить отменённые</label>
-      <label>Дата по полю 
-        <input id="date_field" list="fields" placeholder="creationDate">
-        <datalist id="fields"></datalist>
-      </label>
-      <button class="btn primary" type="submit">Показать</button>
-    </form>
-
-    <div id="kpis" class="kpis"></div>
-
-    <section class="panel">
-      <h2>Динамика</h2>
-      <div class="chartbox"><canvas id="trend"></canvas></div>
-      <div class="legend"><span class="l1">Текущий период</span><span class="l2">Пред. период</span></div>
-    </section>
-
-    <section class="grid2">
-      <div class="panel">
-        <h2>Заказы по дням</h2>
-        <div class="chartbox"><canvas id="count"></canvas></div>
-      </div>
-      <div class="panel">
-        <h2>Топ городов</h2>
-        <div class="chartbox"><canvas id="cities"></canvas></div>
-      </div>
-    </section>
-
-    <section class="panel">
-      <h2>Состояния (диагностика)</h2>
-      <div id="tbl-states"></div>
-    </section>
-
-    <section class="panel">
-      <div class="flexrow">
-        <h2>Номера заказов (для сверки)</h2>
-        <div class="actions">
-          <button class="btn" id="copyIds">Скопировать номера</button>
-          <a class="btn" id="csvLink" download>Скачать CSV</a>
-        </div>
-      </div>
-      <div id="idsTable"></div>
-    </section>
-
-    <section class="panel">
-      <h2>Таблица: Дни</h2>
-      <div id="tbl-days"></div>
-    </section>
-  </div>
-
+<div class="shell">
+<header class="top">
+<h1>Добрый день, LeoXpress</h1>
+<div class="tabs">
+<button class="btn preset" data-mode="created">Пришло сегодня</button>
+<button class="btn preset" data-mode="planned">План на сегодня</button>
+<button class="btn preset" data-mode="delivered">Доставлено сегодня</button>
+<button class="btn preset" data-mode="kaspi_pack">Kaspi: Упаковка (до 20:00)</button>
+</div>
+<button class="btn theme-toggle" id="themeToggle" type="button">🌓 Тема</button></header>
+<form class="controls" id="f">
+<label>Начало <input id="start" required="" type="date"/></label>
+<label>Конец <input id="end" required="" type="date"/></label>
+<label>до времени <input id="end_time" placeholder="например 20:00"/></label>
+<label>State(ы) <input id="states" placeholder="например NEW,DELIVERY"/></label>
+<label><input checked="" id="excCanceled" type="checkbox"/> Исключить отменённые</label>
+<label>Дата по полю 
+        <input id="date_field" list="fields" placeholder="creationDate"/>
+<datalist id="fields"></datalist>
+</label>
+<button class="btn primary" type="submit">Показать</button>
+<div class="muted" id="bdInfo">Загрузка настроек магазина…</div></form>
+<div class="kpis" id="kpis"></div>
+<section class="panel">
+<h2>Динамика</h2>
+<div class="chartbox"><canvas id="trend"></canvas></div>
+<div class="legend"><span class="l1">Текущий период</span><span class="l2">Пред. период</span></div>
+</section>
+<section class="grid2">
+<div class="panel">
+<h2>Заказы по дням</h2>
+<div class="chartbox"><canvas id="count"></canvas></div>
+</div>
+<div class="panel">
+<h2>Топ городов</h2>
+<div class="chartbox"><canvas id="cities"></canvas></div>
+</div>
+</section>
+<section class="panel">
+<h2>Состояния (диагностика)</h2>
+<div id="tbl-states"></div>
+</section>
+<section class="panel">
+<div class="flexrow">
+<h2>Номера заказов (для сверки)</h2>
+<div class="actions">
+<button class="btn" id="copyIds">Скопировать номера</button>
+<a class="btn" download="" id="csvLink">Скачать CSV</a>
+</div>
+</div>
+<div id="idsTable"></div>
+</section>
+<section class="panel">
+<h2>Таблица: Дни</h2>
+<div id="tbl-days"></div>
+</section>
+</div>
 <script>
 const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Almaty";
 const today = new Date();
@@ -185,5 +184,29 @@ async function run(e){
 document.getElementById('f').addEventListener('submit', run);
 run();
 </script>
-</body>
+<script>
+document.getElementById('themeToggle')?.addEventListener('click', ()=>{
+  const el = document.documentElement;
+  const isDark = el.classList.toggle('dark');
+  try{ localStorage.setItem('theme', isDark?'dark':'light'); }catch(e){}
+});
+
+async function showBDInfo(){
+  try{
+    const r = await fetch('/meta'); if(!r.ok) throw 0;
+    const data = await r.json();
+    const el = document.getElementById('bdInfo');
+    if(!el) return;
+    if(data.use_business_day){
+      el.textContent = `День магазина: ${data.business_day_start} → ${data.business_day_start} (по ${data.timezone})`;
+    }else{
+      el.textContent = 'День магазина: выключен (используются обычные календарные сутки)';
+    }
+  }catch(e){
+    const el = document.getElementById('bdInfo');
+    if(el) el.textContent = '';
+  }
+}
+showBDInfo();
+</script></body>
 </html>
