@@ -1,63 +1,117 @@
-from __future__ import annotations
 from fastapi import APIRouter, Query
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import StreamingResponse
 from typing import Optional
-import csv, io
-
+import io, csv
 from ..core.config import settings
-from ..services.analytics import analytics_payload, list_numbers
+from ..services.analytics import (
+    get_meta,
+    fetch_analytics,
+    fetch_order_ids
+)
 
-router = APIRouter()
+api_router = APIRouter()
 
-@router.get("/meta")
-def meta():
-    return {
-        "timezone": settings.TZ,
-        "currency": settings.CURRENCY,
-        "day_cutoff": settings.DAY_CUTOFF,
-        "pack_lookback_days": settings.PACK_LOOKBACK_DAYS,
-        "amount_fields": settings.AMOUNT_FIELDS,
-    }
+@api_router.get("/meta")
+async def meta():
+    return get_meta()
 
-@router.get("/analytics")
-def analytics(start: str = Query(...), end: str = Query(...),
-              tz: str = Query(settings.TZ),
-              date_field: str = Query("creationDate"),
-              states: Optional[str] = Query(None),
-              exclude_canceled: bool = Query(True),
-              end_time: Optional[str] = Query(None),
-              cutoff_mode: bool = Query(False),
-              cutoff: str = Query(settings.DAY_CUTOFF),
-              lookback_days: int = Query(settings.PACK_LOOKBACK_DAYS),
-              with_prev: bool = Query(True)):
-    return analytics_payload(start=start, end=end, tz=tz, date_field=date_field,
-                             states=states, exclude_canceled=exclude_canceled,
-                             end_time=end_time, cutoff_mode=cutoff_mode,
-                             cutoff=cutoff, lookback_days=lookback_days,
-                             with_prev=with_prev)
+@api_router.get("/analytics")
+async def analytics(
+    start: str = Query(..., description="YYYY-MM-DD"),
+    end: str = Query(..., description="YYYY-MM-DD"),
+    tz: str = Query(default=settings.TZ),
+    date_field: str = Query(default=settings.DATE_FIELD_DEFAULT),
+    states: Optional[str] = Query(default=None, description="CSV of states to include"),
+    exclude_states: Optional[str] = Query(default=None, description="CSV of states to exclude"),
+    exclude_canceled: bool = Query(default=True),
+    start_time: Optional[str] = Query(default=None, description="HH:MM"),
+    end_time: Optional[str] = Query(default=None, description="HH:MM"),
+    with_prev: bool = Query(default=False),
+    use_cutoff_window: bool = Query(default=False),
+    lte_cutoff_only: bool = Query(default=False),
+    lookback_days: int = Query(default=settings.PACK_LOOKBACK_DAYS),
+):
+    return await fetch_analytics(
+        start=start,
+        end=end,
+        tz=tz,
+        date_field=date_field,
+        states=states,
+        exclude_states=exclude_states,
+        exclude_canceled=exclude_canceled,
+        start_time=start_time,
+        end_time=end_time,
+        with_prev=with_prev,
+        use_cutoff_window=use_cutoff_window,
+        lte_cutoff_only=lte_cutoff_only,
+        lookback_days=lookback_days,
+    )
 
-@router.get("/orders/ids")
-def orders_ids(start: str, end: str, tz: str = settings.TZ,
-               date_field: str = "creationDate", states: Optional[str] = None,
-               exclude_canceled: bool = True, end_time: Optional[str] = None,
-               cutoff_mode: bool = False, cutoff: str = settings.DAY_CUTOFF,
-               lookback_days: int = settings.PACK_LOOKBACK_DAYS):
-    items = list_numbers(start=start, end=end, tz=tz, date_field=date_field,
-                         states=states, exclude_canceled=exclude_canceled,
-                         end_time=end_time, cutoff_mode=cutoff_mode,
-                         cutoff=cutoff, lookback_days=lookback_days)
+@api_router.get("/orders/ids")
+async def order_ids(
+    start: str = Query(..., description="YYYY-MM-DD"),
+    end: str = Query(..., description="YYYY-MM-DD"),
+    tz: str = Query(default=settings.TZ),
+    date_field: str = Query(default=settings.DATE_FIELD_DEFAULT),
+    states: Optional[str] = Query(default=None),
+    exclude_states: Optional[str] = Query(default=None),
+    exclude_canceled: bool = Query(default=True),
+    use_cutoff_window: bool = Query(default=False),
+    lte_cutoff_only: bool = Query(default=False),
+    lookback_days: int = Query(default=settings.PACK_LOOKBACK_DAYS),
+    limit: int = Query(default=10000),
+):
+    items = await fetch_order_ids(
+        start=start,
+        end=end,
+        tz=tz,
+        date_field=date_field,
+        states=states,
+        exclude_states=exclude_states,
+        exclude_canceled=exclude_canceled,
+        use_cutoff_window=use_cutoff_window,
+        lte_cutoff_only=lte_cutoff_only,
+        lookback_days=lookback_days,
+        limit=limit,
+    )
     return {"count": len(items), "items": items}
 
-@router.get("/orders/ids.csv")
-def orders_ids_csv(start: str, end: str, tz: str = settings.TZ,
-                   date_field: str = "creationDate", states: Optional[str] = None,
-                   exclude_canceled: bool = True, end_time: Optional[str] = None,
-                   cutoff_mode: bool = False, cutoff: str = settings.DAY_CUTOFF,
-                   lookback_days: int = settings.PACK_LOOKBACK_DAYS):
-    data = orders_ids(start, end, tz, date_field, states, exclude_canceled, end_time, cutoff_mode, cutoff, lookback_days)  # type: ignore
-    output = io.StringIO()
-    w = csv.writer(output, lineterminator="\n")
-    w.writerow(["number","state","date","amount","city","id"])
-    for it in data["items"]:
-        w.writerow([it["number"], it["state"], it["date"], it["amount"], it["city"], it["id"]])
-    return PlainTextResponse(content=output.getvalue(), media_type="text/csv; charset=utf-8")
+@api_router.get("/orders/ids.csv")
+async def order_ids_csv(
+    start: str = Query(..., description="YYYY-MM-DD"),
+    end: str = Query(..., description="YYYY-MM-DD"),
+    tz: str = Query(default=settings.TZ),
+    date_field: str = Query(default=settings.DATE_FIELD_DEFAULT),
+    states: Optional[str] = Query(default=None),
+    exclude_states: Optional[str] = Query(default=None),
+    exclude_canceled: bool = Query(default=True),
+    use_cutoff_window: bool = Query(default=False),
+    lte_cutoff_only: bool = Query(default=False),
+    lookback_days: int = Query(default=settings.PACK_LOOKBACK_DAYS),
+    limit: int = Query(default=10000),
+):
+    items = await fetch_order_ids(
+        start=start,
+        end=end,
+        tz=tz,
+        date_field=date_field,
+        states=states,
+        exclude_states=exclude_states,
+        exclude_canceled=exclude_canceled,
+        use_cutoff_window=use_cutoff_window,
+        lte_cutoff_only=lte_cutoff_only,
+        lookback_days=lookback_days,
+        limit=limit,
+    )
+
+    # Build CSV
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=["id", "number", "state", "date", "amount", "city"])
+    writer.writeheader()
+    for it in items:
+        writer.writerow(it)
+    data = buf.getvalue().encode("utf-8-sig")
+
+    return StreamingResponse(io.BytesIO(data), media_type="text/csv", headers={
+        "Content-Disposition": "attachment; filename=order_ids.csv"
+    })
