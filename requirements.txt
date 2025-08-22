@@ -6,3 +6,7 @@ python-dotenv==1.0.1
 pydantic==2.9.0
 pytz==2024.1
 cachetools==5.4.0
+fastapi
+uvicorn
+python-multipart
+openpyxl
