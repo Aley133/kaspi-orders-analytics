@@ -1,16 +1,20 @@
-export function save(key, val){ localStorage.setItem(key, JSON.stringify(val)); }
-export function load(key, def){ const v = localStorage.getItem(key); return v?JSON.parse(v):def; }
+(function(){
+  const key = "theme";
+  const root = document.body;
+  const btn = document.getElementById("theme-toggle");
 
-export function initTheme(){
-  const saved = load('theme','dark');
-  document.documentElement.setAttribute('data-theme', saved);
-  const btn = document.getElementById('themeBtn');
-  btn.textContent = saved==='dark' ? 'Светлая тема' : 'Тёмная тема';
-  btn.onclick = ()=>{
-    const cur = document.documentElement.getAttribute('data-theme');
-    const next = cur==='dark' ? 'light' : 'dark';
-    document.documentElement.setAttribute('data-theme', next);
-    btn.textContent = next==='dark' ? 'Светлая тема' : 'Тёмная тема';
-    save('theme', next);
-  };
-}
+  function setTheme(v){
+    root.classList.remove("theme-light","theme-dark");
+    root.classList.add(v);
+    localStorage.setItem(key,v);
+  }
+
+  const saved = localStorage.getItem(key) || "theme-light";
+  setTheme(saved);
+
+  btn.addEventListener("click", (e)=>{
+    e.preventDefault();
+    const now = root.classList.contains("theme-dark") ? "theme-light" : "theme-dark";
+    setTheme(now);
+  });
+})();
