@@ -1,153 +1,215 @@
-<!DOCTYPE html>
 
+<!doctype html>
 <html lang="ru">
 <head>
-<meta charset="utf-8"/>
-<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
-<title>Kaspi — Dashboard</title>
-<link href="/ui/style.css" rel="stylesheet"/>
-<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-<script>(function(){
-  try{
-    var saved = localStorage.getItem('theme');
-    var prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-    if(saved==='dark' || (!saved && prefersDark)) document.documentElement.classList.add('dark');
-  }catch(e){}
-})();</script></head>
-<body>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Kaspi Orders Analytics</title>
+  <link rel="stylesheet" href="style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body data-theme="light">
   <div class="layout">
     <aside class="sidebar">
       <div class="brand">⚡ LeoXpress</div>
-      <nav>
+      <nav class="nav">
         <a class="nav-item" href="#">Мой склад</a>
         <a class="nav-item" href="#">Предзаказ</a>
         <a class="nav-item" href="#">Демпинг</a>
         <a class="nav-item" href="#">WhatsApp Рассылка</a>
       </nav>
+      <div class="theme-switch">
+        <label class="switch">
+          <input type="checkbox" id="themeToggle">
+          <span class="slider"></span>
+        </label>
+        <span>Тёмная тема</span>
+      </div>
     </aside>
+
     <div class="content">
-<div class="shell">
-<header class="top">
-<h1>Добрый день, LeoXpress</h1>
-<div class="tabs">
-<button class="btn preset" data-mode="created">Пришло сегодня</button>
-<button class="btn preset" data-mode="planned">План на сегодня</button>
-<button class="btn preset" data-mode="delivered">Доставлено сегодня</button>
-<button class="btn preset" data-mode="kaspi_pack">Kaspi: Упаковка (до <span id="periodCutoff">—:—</span>)</button>
-</div>
-<button class="btn theme-toggle" id="themeToggle" type="button">🌓 Тема</button></header>
-<form class="controls" id="f">
-<label>Начало <input id="start" required="" type="date"/></label>
-<label>Конец <input id="end" required="" type="date"/></label>
-<label>до времени <input id="end_time" placeholder="например 20:00"/></label>
-<label>State(ы) <input id="states" placeholder="например NEW,DELIVERY"/></label>
-<label><input checked="" id="excCanceled" type="checkbox"/> Исключить отменённые</label>
-<label>Дата по полю 
-        <input id="date_field" list="fields" placeholder="creationDate"/>
-<datalist id="fields"></datalist>
-</label>
-<button class="btn primary" type="submit">Показать</button>
-<div class="muted" id="bdInfo">Загрузка настроек магазина…</div></form>
-<div class="kpis" id="kpis"></div>
-<section class="panel">
-<h2>Динамика</h2>
-<div class="chartbox"><canvas id="trend"></canvas></div>
-<div class="legend"><span class="l1">Текущий период</span><span class="l2">Пред. период</span></div>
-</section>
-<section class="grid2">
-<div class="panel">
-<h2>Заказы по дням</h2>
-<div class="chartbox"><canvas id="count"></canvas></div>
-</div>
-<div class="panel">
-<h2>Топ городов</h2>
-<div class="chartbox"><canvas id="cities"></canvas></div>
-</div>
-</section>
-<section class="panel">
-<h2>Состояния (диагностика)</h2>
-<div id="tbl-states"></div>
-</section>
-<section class="panel">
-<div class="flexrow">
-<h2>Номера заказов (для сверки)</h2>
-<div class="actions">
-<button class="btn" id="copyIds">Скопировать номера</button>
-<a class="btn" download="" id="csvLink">Скачать CSV</a>
-</div>
-</div>
-<div id="idsTable"></div>
-</section>
-<section class="panel">
-<h2>Таблица: Дни</h2>
-<div id="tbl-days"></div>
-</section>
-</div>
+      <h1>Аналитика заказов Kaspi</h1>
+
+      <form id="f" class="filters">
+        <div class="row">
+          <label>Начало</label>
+          <input type="date" id="start" required>
+          <label>Конец</label>
+          <input type="date" id="end" required>
+          <label>Часовой пояс</label>
+          <input type="text" id="tz" value="Asia/Almaty">
+          <label>Поле даты</label>
+          <select id="date_field"></select>
+        </div>
+        <div class="row">
+          <label>Статусы (включить)</label>
+          <input type="text" id="states" placeholder="через запятую, напр. NEW,DELIVERED">
+          <label class="chk">
+            <input type="checkbox" id="exclude_states" checked>
+            Исключить CANCELED
+          </label>
+        </div>
+        <div class="row">
+          <label class="chk">
+            <input type="checkbox" id="use_bd" checked>
+            День магазина
+          </label>
+          <label>Начало дня</label>
+          <input type="time" id="bd_start" value="20:00" step="60">
+          <button type="submit" class="btn" id="btn-run">Показать</button>
+        </div>
+        <div id="bdInfo" class="muted"></div>
+      </form>
+
+      <section class="kpi">
+        <div class="kpi-item"><div class="kpi-label">Период</div>
+          <div class="kpi-value" id="periodLabel">—</div>
+          <div class="kpi-sub">до <span id="periodCutoff">—:—</span></div>
+        </div>
+        <div class="kpi-item"><div class="kpi-label">Заказы</div>
+          <div class="kpi-value" id="kpiOrders">0</div>
+        </div>
+        <div class="kpi-item"><div class="kpi-label">Оборот</div>
+          <div class="kpi-value" id="kpiAmount">0</div>
+        </div>
+      </section>
+
+      <section class="shell">
+        <h2>Топ города</h2>
+        <div id="chart-cities"><canvas id="cities"></canvas></div>
+      </section>
+
+      <section class="shell">
+        <h2>Состояния (диагностика)</h2>
+        <div id="statesBox" class="pillbox"></div>
+      </section>
+
+      <section class="shell">
+        <h2>Таблица: Дни</h2>
+        <table id="tbl-days" class="table">
+          <thead><tr><th>Дата</th><th>Кол-во</th><th>Оборот</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </section>
+
+      <section class="shell">
+        <h2>Номера заказов (для сверки)</h2>
+        <div id="ids"></div>
+      </section>
+    </div>
+  </div>
+
 <script>
-const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Almaty";
-const today = new Date();
-const yyyy = today.getFullYear(), mm = String(today.getMonth()+1).padStart(2,'0'), dd = String(today.getDate()).padStart(2,'0');
-const endDefault = `${yyyy}-${mm}-${dd}`;
-const startDate = new Date(today.getTime() - 6*24*3600*1000);
-const sy = startDate.getFullYear(), sm = String(startDate.getMonth()+1).padStart(2,'0'), sd = String(startDate.getDate()).padStart(2,'0');
-const startDefault = `${sy}-${sm}-${sd}`;
-document.getElementById('start').value = startDefault;
-document.getElementById('end').value = endDefault;
+const nf = new Intl.NumberFormat('ru-RU');
 
-let META = {};
-fetch('/meta').then(r=>r.json()).then(m=>{
-  META = m;
-  (m.date_field_options||[]).forEach(v=>{ const o=document.createElement('option'); o.value=v; document.getElementById('fields').appendChild(o); });
-  document.getElementById('date_field').value = m.date_field_default || 'creationDate';
-});
+function fmt(n){ return nf.format(Math.round((n + Number.EPSILON) * 100) / 100); }
 
-function fmt(n){ return Number(n).toLocaleString(undefined,{maximumFractionDigits:2}); }
-let charts = {};
-function draw(id, type, labels, series, extra={}){
-  if (charts[id]) charts[id].destroy();
-  const ctx = document.getElementById(id).getContext('2d');
-  charts[id] = new Chart(ctx, { type, data:{ labels, datasets:series }, options:{ responsive:true, maintainAspectRatio:false, plugins:{legend:{display:true}}, ...extra } });
-}
-
-function table(id, headers, rows){
-  const thead = `<thead><tr>${headers.map(h=>`<th>${h}</th>`).join('')}</tr></thead>`;
-  const tbody = `<tbody>${rows.map(r=>`<tr>${r.map((c,i)=>`<td class="${i===r.length-1?'r':''}">${c}</td>`).join('')}</tr>`).join('')}</tbody>`;
-  document.getElementById(id).innerHTML = `<table>${thead}${tbody}</table>`;
-}
-
-function applyPreset(mode){
-  const start = new Date();
-  const yyyy = start.getFullYear(), mm = String(start.getMonth()+1).padStart(2,'0'), dd = String(start.getDate()).padStart(2,'0');
-  const todayStr = `${yyyy}-${mm}-${dd}`;
-  document.getElementById('start').value = todayStr;
-  document.getElementById('end').value = todayStr;
-  document.getElementById('end_time').value = '';
-  document.getElementById('states').value = '';
-  document.getElementById('excCanceled').checked = true;
-
-  if (mode === 'created'){ document.getElementById('date_field').value = 'creationDate'; }
-  if (mode === 'planned'){ document.getElementById('date_field').value = 'plannedDeliveryDate'; }
-  if (mode === 'delivered'){ document.getElementById('date_field').value = 'deliveryDate'; }
-  if (mode === 'kaspi_pack'){ 
-    document.getElementById('date_field').value = 'plannedShipmentDate'; 
-    document.getElementById('states').value = 'KASPI_DELIVERY,ARCHIVE';
-    document.getElementById('end_time').value = '20:00';
+function table(id, rows){
+  const tb = document.querySelector(`#${id} tbody`);
+  tb.innerHTML = '';
+  for(const r of rows){
+    const tr = document.createElement('tr');
+    for(const c of r){
+      const td = document.createElement('td'); td.textContent = c; tr.appendChild(td);
+    }
+    tb.appendChild(tr);
   }
-  run();
 }
-document.querySelectorAll('.preset').forEach(b=> b.addEventListener('click', e=> applyPreset(e.target.dataset.mode)));
 
-function buildQuery(base){
+async function loadMeta(){
+  try {
+    const r = await fetch('/meta');
+    if(!r.ok) throw new Error();
+    const meta = await r.json();
+    // date_field options
+    const sel = document.getElementById('date_field');
+    sel.innerHTML = '';
+    (meta.date_field_options || ['creationDate']).forEach(v=>{
+      const o = document.createElement('option'); o.value=v; o.textContent=v; sel.appendChild(o);
+    });
+    sel.value = meta.date_field_default || 'creationDate';
+    document.getElementById('tz').value = meta.timezone || 'Asia/Almaty';
+    document.getElementById('bd_start').value = meta.business_day_start || '20:00';
+  } catch(e){ /* ignore meta errors */ }
+  // defaults: today
+  const today = new Date(); const iso = d=>d.toISOString().slice(0,10);
+  document.getElementById('start').value = iso(today);
+  document.getElementById('end').value = iso(today);
+}
+
+let citiesChart = null;
+
+async function run(e){
+  if(e) e.preventDefault();
+
   const start = document.getElementById('start').value;
   const end = document.getElementById('end').value;
-  const end_time = document.getElementById('end_time').value.trim();
-  const states = document.getElementById('states').value.trim();
-  const excCanceled = document.getElementById('excCanceled').checked;
-  const date_field = document.getElementById('date_field').value.trim() || (META.date_field_default||'creationDate');
-  const q = `start=${start}&end=${end}&tz=${encodeURIComponent(tz)}&date_field=${encodeURIComponent(date_field)}${states?`&states=${encodeURIComponent(states)}`:''}&exclude_canceled=${excCanceled}${end_time?`&end_time=${encodeURIComponent(end_time)}`:''}`;
-  return base + q;
-}
+  const tz = document.getElementById('tz').value || 'Asia/Almaty';
+  const date_field = document.getElementById('date_field').value;
+  const states = document.getElementById('states').value;
+  const exc = document.getElementById('exclude_states').checked ? 'CANCELED' : '';
+  const use_bd = document.getElementById('use_bd')?.checked ? '1' : '0';
+  const bd_start = document.getElementById('bd_start')?.value || '';
 
+  const p = new URLSearchParams();
+  p.set('start', start); p.set('end', end); p.set('tz', tz);
+  p.set('date_field', date_field); if(states) p.set('states', states);
+  if(exc) p.set('exclude_states', exc);
+  p.set('use_bd', use_bd); if(bd_start) p.set('business_day_start', bd_start);
+
+  const r = await fetch(`/orders/analytics?${p.toString()}`);
+  if(!r.ok) throw new Error('analytics failed');
+  const data = await r.json();
+
+  // KPI
+  document.getElementById('kpiOrders').textContent = fmt(data.total_orders);
+  document.getElementById('kpiAmount').textContent = `${fmt(data.total_amount)} ${data.currency||'KZT'}`;
+  document.getElementById('periodLabel').textContent = `${data.range.start} → ${data.range.end}`;
+
+  const cutoffEl = document.getElementById('periodCutoff');
+  if(cutoffEl){
+    cutoffEl.textContent = (use_bd==='1' ? (bd_start || '20:00') : '24:00');
+  }
+  const bdInfo = document.getElementById('bdInfo');
+  if(bdInfo){
+    bdInfo.textContent = (use_bd==='1' ? `День магазина: ${bd_start||'20:00'} → ${bd_start||'20:00'}` : 'День магазина: выключен');
+  }
+
+  // Состояния
+  const sb = document.getElementById('statesBox');
+  sb.innerHTML = '';
+  const entries = Object.entries(data.state_breakdown||{}).sort((a,b)=>b[1]-a[1]);
+  for(const [k,v] of entries){
+    const span = document.createElement('span');
+    span.className='pill';
+    span.textContent=`${k}: ${v}`;
+    sb.appendChild(span);
+  }
+  if(entries.length===0){ sb.innerHTML = '<div class="muted">Нет данных</div>'; }
+
+  // Таблица дней
+  table('tbl-days', (data.days||[]).map(d=>[d.x, d.count, `${fmt(d.amount)} ${data.currency||'KZT'}`]));
+
+  // Топ города (Chart.js)
+  const labels = (data.cities||[]).map(c=>c.city);
+  const counts = (data.cities||[]).map(c=>c.count);
+  const holder = document.getElementById('chart-cities');
+  holder.innerHTML = '<canvas id="cities"></canvas>';
+  if(labels.length===0){
+    holder.innerHTML = '<div class="muted" style="padding:12px">Нет данных по городам</div>';
+  } else {
+    const ctx = document.getElementById('cities').getContext('2d');
+    if(citiesChart) citiesChart.destroy();
+    citiesChart = new Chart(ctx, {
+      type: 'bar',
+      data: { labels, datasets: [{ label: 'Заказы', data: counts }] },
+      options: { responsive:true, plugins: { legend: { display:false } } }
+    });
+  }
+
+  // Обновить список номеров
+  await loadIds();
+}
 
 async function loadIds(){
   const start = document.getElementById('start').value;
@@ -159,26 +221,27 @@ async function loadIds(){
   const use_bd = document.getElementById('use_bd')?.checked ? '1' : '0';
   const bd_start = document.getElementById('bd_start')?.value || '';
   const order = 'asc';
+
   const params = new URLSearchParams();
   params.set('start', start); params.set('end', end); params.set('tz', tz);
   params.set('date_field', date_field); if(states) params.set('states', states);
   if(exc) params.set('exclude_states', exc);
   params.set('use_bd', use_bd); if(bd_start) params.set('business_day_start', bd_start);
   params.set('order', order); params.set('grouped', '1'); params.set('limit', '100000');
+
   const r = await fetch(`/orders/ids?${params.toString()}`);
   if(!r.ok) throw new Error('ids failed');
   const data = await r.json();
 
   const container = document.getElementById('ids');
   container.innerHTML = '';
-  // controls
-  const bar = document.createElement('div');
-  bar.style.display='flex'; bar.style.gap='8px'; bar.style.justifyContent='flex-end'; bar.style.marginBottom='8px';
 
+  // Панель действий
+  const bar = document.createElement('div');
+  bar.className='ids-actions';
   const btnCopy = document.createElement('button'); btnCopy.className='btn'; btnCopy.textContent='Скопировать номера';
   btnCopy.onclick = () => {
-    const all = data.items.map(it=>it.number).join('
-');
+    const all = (data.items||[]).map(it=>it.number).join('\n');
     navigator.clipboard.writeText(all);
   };
   const btnCsv = document.createElement('a'); btnCsv.className='btn'; btnCsv.textContent='Скачать CSV';
@@ -191,6 +254,7 @@ async function loadIds(){
   bar.appendChild(btnCopy); bar.appendChild(btnCsv); bar.appendChild(btnExpand); bar.appendChild(btnCollapse);
   container.appendChild(bar);
 
+  // Группы по датам
   const wrapper = document.createElement('div');
   wrapper.className='ids-groups';
   container.appendChild(wrapper);
@@ -205,8 +269,7 @@ async function loadIds(){
 
     const pre = document.createElement('pre');
     pre.style.whiteSpace='pre-wrap';
-    pre.textContent = group.items.map(it=>`${it.number}	${it.state}	${it.date.slice(0,16).replace('T',' ')}	${it.amount}`).join('
-');
+    pre.textContent = group.items.map(it=>`${it.number}\t${it.state}\t${it.date.slice(0,16).replace('T',' ')}\t${it.amount}`).join('\n');
     det.appendChild(pre);
 
     detailsList.push(det);
@@ -216,80 +279,16 @@ async function loadIds(){
   btnExpand.onclick = ()=> detailsList.forEach(d=>d.open=true);
   btnCollapse.onclick = ()=> detailsList.forEach(d=>d.open=false);
 }
-  const rows = data.items.map(it => [it.number, it.state, it.date.replace('T',' ').slice(0,16), it.amount, it.city]);
-  table('idsTable', ['Номер','State','Дата','Сумма','Город'], rows);
-  const csvHref = buildQuery('/orders/ids.csv?');
-  document.getElementById('csvLink').href = csvHref;
-  document.getElementById('copyIds').onclick = () => {
-    const all = data.items.map(it=>it.number).join('\n');
-    navigator.clipboard.writeText(all);
-  };
-}
 
-async function run(e){
-  if (e) e.preventDefault();
-  const url = buildQuery('/orders/analytics?') + '&with_prev=true';
-  const r = await fetch(url); const t = await r.text(); let data;
-  try{ data = JSON.parse(t);} catch{ alert(t); return; }
-
-  document.getElementById('kpis').innerHTML = `
-    <div class="card"><div class="k">Период</div><div class="v">${data.range.start} → ${data.range.end}${document.getElementById('end_time').value?` до ${document.getElementById('end_time').value}`:''}</div></div>
-    <div class="card"><div class="k">Всего заказов</div><div class="v">${fmt(data.total_orders)}</div></div>
-    <div class="card"><div class="k">Оборот</div><div class="v">${fmt(data.total_amount)} ${data.currency}</div></div>
-    <div class="card"><div class="k">Дата по полю</div><div class="v">${data.date_field}</div></div>`;
-
-  const labels = data.days.map(d=>d.x);
-  const curCounts = data.days.map(d=>d.count);
-  const prevCounts = data.prev_days.map(d=>d.count);
-  draw('trend','line',labels,[{label:'Текущий', data:curCounts, tension:.35},{label:'Предыдущий', data:prevCounts, borderDash:[4,4], tension:.35}], {plugins:{legend:{display:true}}});
-  draw('count','bar',labels,[{label:'Заказы', data:curCounts}], {plugins:{legend:{display:false}}});
-
-  const cityLabels = (data.cities||[]).map(c=>c.city);
-  const cityCounts = (data.cities||[]).map(c=>c.count);
-  draw('cities','bar',cityLabels,[{label:'Заказы', data:cityCounts}], {plugins:{legend:{display:false}}, scales:{x:{ticks:{autoSkip:true,maxTicksLimit:12}}}});
-
-  const stRows = Object.entries(data.state_breakdown).sort((a,b)=>b[1]-a[1]).map(([s,c])=>[s,c]);
-  table('tbl-states', ['State','Кол-во'], stRows);
-
-  table('tbl-days', ['Дата','Кол-во','Оборот'], data.days.map(d=>[d.x, d.count, fmt(d.amount)+' '+data.currency]));
-  const cutoffEl = document.getElementById('periodCutoff');
-  if(cutoffEl){ const use_bd = document.getElementById('use_bd')?.checked; const bd_start = document.getElementById('bd_start')?.value || '20:00'; cutoffEl.textContent = use_bd?bd_start:(document.getElementById('end_time').value||'24:00'); }
-
-  await loadIds();
-  const use_bd = document.getElementById('use_bd')?.checked;
-  const bd_start = document.getElementById('bd_start')?.value||'20:00';
-  const el = document.getElementById('bdInfo');
-  if(el){ el.textContent = use_bd?(`День магазина: ${bd_start} → ${bd_start}`):'День магазина: выключен'; }
-}
-
-document.getElementById('f').addEventListener('submit', run);
-run();
-</script>
-<script>
-document.getElementById('themeToggle')?.addEventListener('click', ()=>{
-  const el = document.documentElement;
-  const isDark = el.classList.toggle('dark');
-  try{ localStorage.setItem('theme', isDark?'dark':'light'); }catch(e){}
+// Theme toggle
+document.addEventListener('DOMContentLoaded', async () => {
+  await loadMeta();
+  document.getElementById('f').addEventListener('submit', run);
+  document.getElementById('themeToggle').addEventListener('change', (e)=>{
+    document.body.setAttribute('data-theme', e.target.checked ? 'dark' : 'light');
+  });
+  run(); // initial
 });
-
-async function showBDInfo(){
-  try{
-    const r = await fetch('/meta'); if(!r.ok) throw 0;
-    const data = await r.json();
-    const el = document.getElementById('bdInfo');
-    if(!el) return;
-    if(data.use_business_day){
-      el.textContent = `День магазина: ${data.business_day_start} → ${data.business_day_start} (по ${data.timezone})`;
-    }else{
-      el.textContent = 'День магазина: выключен (используются обычные календарные сутки)';
-    }
-  }catch(e){
-    const el = document.getElementById('bdInfo');
-    if(el) el.textContent = '';
-  }
-}
-showBDInfo();
-</script></body>
-    </div>
-  </div>
+</script>
+</body>
 </html>
