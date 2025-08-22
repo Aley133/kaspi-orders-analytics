@@ -1,145 +1,188 @@
-from typing import Optional, Dict, Any, List, Tuple
-from collections import defaultdict, Counter
+from __future__ import annotations
+from typing import Dict, List, Tuple, Optional
 from datetime import datetime, timedelta
+import pytz
+from cachetools import TTLCache
+from fastapi import HTTPException
+from httpx import HTTPStatusError, RequestError
+
 from ..core.config import settings
+from ..core.kaspi import KaspiClient
 from ..core.utils import (
-    date_range_with_cutoff,
-    ms, normalize_amount, pick_city, pick_date, get_tz
+    norm_state, parse_states_csv, extract_amount, extract_ms, extract_city,
+    tz_localize, apply_hhmm, cutoff_range, guess_order_number
 )
-from ..core.kaspi import list_orders
 
-def get_meta():
-    return {
-        "tz": settings.TZ,
-        "currency": "KZT",
-        "amount_fields": settings.amount_fields,
-        "amount_divisor": settings.AMOUNT_DIVISOR,
-        "date_field_default": settings.DATE_FIELD_DEFAULT,
-        "date_field_options": settings.date_field_options,
-        "cutoff": settings.DAY_CUTOFF,
-        "pack_lookback_days": settings.PACK_LOOKBACK_DAYS,
-    }
+client = KaspiClient(token=settings.KASPI_TOKEN)
+_cache = TTLCache(maxsize=256, ttl=settings.CACHE_TTL)
 
-def _parse_csv(s: Optional[str]) -> List[str]:
-    if not s:
-        return []
-    return [x.strip() for x in s.split(",") if x.strip()]
+def iter_chunks(start_dt: datetime, end_dt: datetime, days: int=7):
+    cur = start_dt
+    delta = timedelta(days=days)
+    while cur <= end_dt:
+        chunk_end = min(cur + delta - timedelta(milliseconds=1), end_dt)
+        yield cur, chunk_end
+        cur = chunk_end + timedelta(milliseconds=1)
 
-def _include_order(order: Dict[str, Any], include_states: List[str], exclude_states: List[str], exclude_canceled: bool) -> bool:
-    st = (order.get("state") or order.get("status") or "").upper()
-    if exclude_canceled and st in {"CANCELLED", "CANCELED", "CANCEL"}:
-        return False
-    if include_states and st not in include_states:
-        return False
-    if exclude_states and st in exclude_states:
-        return False
-    return True
+def collect_range(*, start_dt: datetime, end_dt: datetime, tz: str, date_field: str,
+                  states_inc: Optional[set], states_exc: set,
+                  cutoff_mode: bool=False) -> Tuple[List[Dict], List[Dict], int, float, Dict[str,int]]:
+    tzinfo = pytz.timezone(tz)
+    seen = set()
+    days: Dict[str,int] = {}
+    amounts: Dict[str,float] = {}
+    city_counts: Dict[str,int] = {}
+    city_amounts: Dict[str,float] = {}
+    state_counts: Dict[str,int] = {}
+    total_orders=0
+    total_amount=0.0
 
-def _within_cutoff_local(order_dt: datetime, cutoff_hhmm) -> bool:
-    cutoff_dt = order_dt.replace(hour=cutoff_hhmm.hour, minute=cutoff_hhmm.minute, second=0, microsecond=0)
-    return order_dt <= cutoff_dt
+    for s,e in iter_chunks(start_dt, end_dt, 7):
+        try_field = date_field
+        while True:
+            try:
+                for order in client.iter_orders(start=s, end=e, filter_field=try_field):
+                    oid = order.get("id")
+                    if oid in seen: continue
+                    attrs = order.get("attributes", {})
+                    st = norm_state(str(attrs.get("state","")))
+                    if states_inc and st not in states_inc: continue
+                    if st in states_exc: continue
+                    ms = extract_ms(attrs, date_field) or extract_ms(attrs, try_field)
+                    if ms is None: continue
+                    dtt = datetime.fromtimestamp(ms/1000.0, tz=tzinfo)
+                    # bounds
+                    if cutoff_mode:
+                        if dtt > end_dt: continue
+                    else:
+                        if dtt < start_dt or dtt > end_dt: continue
 
-async def _fetch_orders_window(start: str, end: str, tz_name: str, date_field: str, use_cutoff_window: bool, lte_cutoff_only: bool, lookback_days: int):
-    start_dt, end_dt, cutoff_t = date_range_with_cutoff(
-        start, end, tz_name, settings.DAY_CUTOFF, use_cutoff_window, lte_cutoff_only, lookback_days
+                    key = dtt.date().isoformat()
+                    amt = extract_amount(attrs)
+                    city = extract_city(attrs)
+
+                    days[key] = days.get(key,0)+1
+                    amounts[key] = amounts.get(key,0.0)+amt
+                    city_counts[city] = city_counts.get(city,0)+1
+                    city_amounts[city] = city_amounts.get(city,0.0)+amt
+                    state_counts[st] = state_counts.get(st,0)+1
+
+                    seen.add(oid)
+                    total_orders += 1
+                    total_amount += amt
+                break
+            except HTTPStatusError as ee:
+                if ee.response.status_code in (400,422) and try_field != "creationDate":
+                    try_field = "creationDate"; continue
+                raise
+            except RequestError as e:
+                raise HTTPException(status_code=502, detail=f"Kaspi network error: {e}")
+
+    series = [{"x": k, "count": days.get(k,0), "amount": round(amounts.get(k,0.0),2)} for k in sorted(days.keys())]
+    cities = [{"city": c, "count": city_counts[c], "amount": round(city_amounts[c],2)} for c in city_counts]
+    cities.sort(key=lambda x:(-x["count"], -x["amount"], x["city"]))
+    return series, cities, total_orders, round(total_amount,2), state_counts
+
+def analytics_payload(*, start: str, end: str, tz: str, date_field: str,
+                      states: Optional[str], exclude_canceled: bool,
+                      end_time: Optional[str], cutoff_mode: bool, cutoff: str,
+                      lookback_days: int, with_prev: bool):
+    tzinfo = pytz.timezone(tz)
+    states_inc = parse_states_csv(states)
+    states_exc = set()
+    if exclude_canceled:
+        states_exc.add("CANCELED")
+
+    if cutoff_mode:
+        start_dt, end_dt = cutoff_range(end, tz, cutoff, lookback_days)
+    else:
+        start_dt = tz_localize(start, tz)
+        end_dt = tz_localize(end, tz) + timedelta(days=1) - timedelta(milliseconds=1)
+        if end_time:
+            end_dt = apply_hhmm(tz_localize(end, tz), end_time)
+        if end_dt < start_dt:
+            raise HTTPException(status_code=400, detail="end < start")
+
+    days, cities, tot, tot_amt, st_break = collect_range(
+        start_dt=start_dt, end_dt=end_dt, tz=tz, date_field=date_field,
+        states_inc=states_inc, states_exc=states_exc, cutoff_mode=cutoff_mode
     )
-    all_orders = await list_orders(date_field, ms(start_dt), ms(end_dt))
-    return all_orders, start_dt, end_dt, cutoff_t
 
-def _aggregate(orders: List[Dict[str, Any]], date_field: str, tz_name: str, include_states: List[str], exclude_states: List[str], exclude_canceled: bool, lte_cutoff_only: bool, cutoff_t):
-    tzinfo = get_tz(tz_name)
-
-    days = defaultdict(lambda: {"x": None, "count": 0, "amount": 0.0})
-    cities = defaultdict(lambda: {"city": None, "count": 0, "amount": 0.0})
-    state_counter = Counter()
-    order_ids: List[Dict[str, Any]] = []
-
-    for o in orders:
-        if not _include_order(o, include_states, exclude_states, exclude_canceled):
-            continue
-        dt = pick_date(o, date_field)
-        if not dt:
-            continue
-        dt = dt.astimezone(tzinfo)
-        if lte_cutoff_only and not _within_cutoff_local(dt, cutoff_t):
-            continue
-
-        key_day = dt.date().isoformat()
-        amt = normalize_amount(o)
-        city = pick_city(o)
-        st = (o.get("state") or o.get("status") or "").upper()
-        days[key_day]["x"] = key_day
-        days[key_day]["count"] += 1
-        days[key_day]["amount"] += amt
-
-        if city:
-            cities[city]["city"] = city
-            cities[city]["count"] += 1
-            cities[city]["amount"] += amt
-
-        state_counter[st] += 1
-
-        order_ids.append({
-            "id": o.get("id") or o.get("orderId") or "",
-            "number": o.get("number") or "",
-            "state": st,
-            "date": dt.isoformat(),
-            "amount": amt,
-            "city": city,
-        })
-
-    days_list = sorted(list(days.values()), key=lambda r: r["x"])
-    cities_list = sorted(list(cities.values()), key=lambda r: (-r["amount"], r["city"]))
-
-    total_orders = sum(d["count"] for d in days_list)
-    total_amount = sum(d["amount"] for d in days_list)
-
-    return {
-        "days": days_list,
-        "cities": cities_list[:50],
-        "state_breakdown": [{"state": k, "count": v} for k, v in state_counter.most_common()],
-        "total_orders": total_orders,
-        "total_amount": total_amount,
-        "order_ids": order_ids,
-    }
-
-async def fetch_analytics(start: str, end: str, tz: str, date_field: str, states: Optional[str], exclude_states: Optional[str], exclude_canceled: bool, start_time: Optional[str], end_time: Optional[str], with_prev: bool, use_cutoff_window: bool, lte_cutoff_only: bool, lookback_days: int):
-    include_states = [s.upper() for s in _parse_csv(states)]
-    excl_states = [s.upper() for s in _parse_csv(exclude_states)]
-
-    orders, start_dt, end_dt, cutoff_t = await _fetch_orders_window(
-        start, end, tz, date_field, use_cutoff_window, lte_cutoff_only, lookback_days
-    )
-    agg = _aggregate(orders, date_field, tz, include_states, excl_states, exclude_canceled, lte_cutoff_only, cutoff_t)
-
-    result: Dict[str, Any] = {
-        **agg,
-        "currency": "KZT",
-        "date_field": date_field,
-        "range": {"start": start_dt.isoformat(), "end": end_dt.isoformat()},
-    }
-
-    if with_prev:
-        days_span = (datetime.fromisoformat(end) - datetime.fromisoformat(start)).days + 1
-        prev_end = datetime.fromisoformat(start) - timedelta(days=1)
-        prev_start = prev_end - timedelta(days=days_span - 1)
-        orders_prev, pstart_dt, pend_dt, _ = await _fetch_orders_window(
-            prev_start.date().isoformat(), prev_end.date().isoformat(), tz, date_field, use_cutoff_window, lte_cutoff_only, lookback_days
+    prev_days = []
+    if with_prev and not cutoff_mode:
+        span = (end_dt.date() - start_dt.date()).days + 1
+        prev_end = start_dt - timedelta(milliseconds=1)
+        prev_start = prev_end - timedelta(days=span) + timedelta(milliseconds=1)
+        prev_days, _, _, _, _ = collect_range(
+            start_dt=prev_start, end_dt=prev_end, tz=tz, date_field=date_field,
+            states_inc=states_inc, states_exc=states_exc, cutoff_mode=False
         )
-        agg_prev = _aggregate(orders_prev, date_field, tz, include_states, excl_states, exclude_canceled, lte_cutoff_only, cutoff_t)
-        result["prev_days"] = agg_prev["days"]
 
-    return result
+    return {
+        "range": {"start": start_dt.date().isoformat(), "end": end_dt.date().isoformat()},
+        "timezone": tz,
+        "currency": settings.CURRENCY,
+        "date_field": date_field,
+        "total_orders": tot,
+        "total_amount": tot_amt,
+        "days": days,
+        "prev_days": prev_days,
+        "cities": cities,
+        "state_breakdown": st_break
+    }
 
-async def fetch_order_ids(start: str, end: str, tz: str, date_field: str, states: Optional[str], exclude_states: Optional[str], exclude_canceled: bool, use_cutoff_window: bool, lte_cutoff_only: bool, lookback_days: int, limit: int = 10000):
-    include_states = [s.upper() for s in _parse_csv(states)]
-    excl_states = [s.upper() for s in _parse_csv(exclude_states)]
+def list_numbers(*, start: str, end: str, tz: str, date_field: str,
+                 states: Optional[str], exclude_canceled: bool,
+                 end_time: Optional[str], cutoff_mode: bool, cutoff: str,
+                 lookback_days: int):
+    tzinfo = pytz.timezone(tz)
+    states_inc = parse_states_csv(states)
+    states_exc = set()
+    if exclude_canceled: states_exc.add("CANCELED")
 
-    orders, start_dt, end_dt, cutoff_t = await _fetch_orders_window(
-        start, end, tz, date_field, use_cutoff_window, lte_cutoff_only, lookback_days
-    )
-    agg = _aggregate(orders, date_field, tz, include_states, excl_states, exclude_canceled, lte_cutoff_only, cutoff_t)
+    if cutoff_mode:
+        start_dt, end_dt = cutoff_range(end, tz, cutoff, lookback_days)
+    else:
+        start_dt = tz_localize(start, tz)
+        end_dt = tz_localize(end, tz) + timedelta(days=1) - timedelta(milliseconds=1)
+        if end_time:
+            end_dt = apply_hhmm(tz_localize(end, tz), end_time)
 
-    out = [{"id": i["id"], "number": i["number"], "state": i["state"], "date": i["date"], "amount": i["amount"], "city": i["city"]}
-           for i in agg["order_ids"]]
-    return out[:limit]
+    items = []
+    seen = set()
+    for s,e in iter_chunks(start_dt, end_dt, 7):
+        try_field = date_field
+        while True:
+            try:
+                for order in client.iter_orders(start=s, end=e, filter_field=try_field):
+                    oid = order.get("id")
+                    if oid in seen: continue
+                    attrs = order.get("attributes", {})
+                    st = norm_state(str(attrs.get("state","")))
+                    if states_inc and st not in states_inc: continue
+                    if st in states_exc: continue
+
+                    ms = extract_ms(attrs, date_field) or extract_ms(attrs, try_field)
+                    if ms is None: continue
+                    dtt = datetime.fromtimestamp(ms/1000.0, tz=tzinfo)
+                    if cutoff_mode:
+                        if dtt > end_dt: continue
+                    else:
+                        if dtt < start_dt or dtt > end_dt: continue
+
+                    items.append({
+                        "id": str(oid),
+                        "number": guess_order_number(attrs, oid),
+                        "state": st,
+                        "date": dtt.isoformat(),
+                        "amount": extract_amount(attrs),
+                        "city": extract_city(attrs),
+                    })
+                    seen.add(oid)
+                break
+            except HTTPStatusError as ee:
+                if ee.response.status_code in (400,422) and try_field != "creationDate":
+                    try_field = "creationDate"; continue
+                raise
+    items.sort(key=lambda x: x["number"])
+    return items
