@@ -2,9 +2,9 @@
 # app/api/products.py
 from __future__ import annotations
 
-from typing import Callable, Optional, List, Dict, Any
+from typing import Callable, Optional, List, Dict, Any, Tuple
 from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import Response
+from fastapi.responses import Response, JSONResponse
 
 try:
     from ..kaspi_client import KaspiClient  # type: ignore
@@ -20,11 +20,96 @@ def _pick(attrs: Dict[str, Any], *keys: str) -> str:
     return ""
 
 
+def _normalize_active(val: Any) -> Optional[bool]:
+    if val is None or val == "":
+        return None
+    if isinstance(val, bool):
+        return val
+    s = str(val).strip().lower()
+    if s in ("1", "true", "yes", "on", "published", "active"):
+        return True
+    if s in ("0", "false", "no", "off", "unpublished", "inactive"):
+        return False
+    return None
+
+
+def _parse_number(x: Any) -> float:
+    try:
+        return float(x)
+    except Exception:
+        try:
+            return float(str(x).replace(' ', '').replace(',', '.'))
+        except Exception:
+            return 0.0
+
+
 def _find_iter_fn(client: Any) -> Optional[Callable]:
     for name in ("iter_products", "iter_offers", "iter_catalog"):
         if hasattr(client, name):
             return getattr(client, name)
     return None
+
+
+def _collect_products(client: KaspiClient, active_only: Optional[bool]) -> Tuple[List[Dict[str, Any]], int]:
+    iter_fn = _find_iter_fn(client)
+    if iter_fn is None:
+        raise HTTPException(
+            status_code=501,
+            detail=(
+                "В kaspi_client отсутствует метод итерации по товарам. "
+                "Ожидается iter_products(...) или iter_offers(...)."
+            ),
+        )
+
+    items: List[Dict[str, Any]] = []
+    seen = set()
+    total = 0
+
+    def add_row(item: Dict[str, Any]):
+        nonlocal total
+        attrs = item.get("attributes", {}) or {}
+        pid = item.get("id") or _pick(attrs, "id", "sku", "code", "offerId")
+        if not pid or pid in seen:
+            return
+        seen.add(pid)
+        total += 1
+
+        code = _pick(attrs, "code", "sku", "offerId", "article")
+        name = _pick(attrs, "name", "title", "productName", "offerName")
+        price = _parse_number(_pick(attrs, "price", "basePrice", "salePrice", "currentPrice"))
+        qty = int(_parse_number(_pick(attrs, "quantity", "availableAmount", "stockQuantity", "qty")))
+        brand = _pick(attrs, "brand", "producer", "manufacturer")
+        category = _pick(attrs, "category", "categoryName", "group")
+        barcode = _pick(attrs, "barcode", "ean")
+        active_val = _normalize_active(_pick(attrs, "active", "isActive", "isPublished", "visible", "isVisible", "status"))
+
+        if active_only is not None and active_val is not None:
+            if active_only is True and active_val is False:
+                return
+            if active_only is False and active_val is True:
+                pass  # включаем всё, фильтр только по True не нужен
+        # Собираем нормализованную запись
+        items.append({
+            "id": pid,
+            "code": code,
+            "name": name,
+            "price": price,
+            "qty": qty,
+            "active": True if active_val else False if active_val is False else None,
+            "brand": brand,
+            "category": category,
+            "barcode": barcode,
+        })
+
+    # Попытка вызвать с active_only, иначе без параметров
+    try:
+        for it in iter_fn(active_only=bool(active_only) if active_only is not None else True):
+            add_row(it)
+    except TypeError:
+        for it in iter_fn():
+            add_row(it)
+
+    return items, total
 
 
 def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
@@ -37,69 +122,48 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
         if client is None:
             raise HTTPException(status_code=500, detail="KASPI_TOKEN is not set")
 
-        iter_fn = _find_iter_fn(client)
-        if iter_fn is None:
-            raise HTTPException(
-                status_code=501,
-                detail=(
-                    "В kaspi_client отсутствует метод итерации по товарам. "
-                    "Ожидается iter_products(...) или iter_offers(...)."
-                ),
-            )
-
-        rows: List[List[str]] = []
-        seen = set()
-
-        def add_row(item: Dict[str, Any]):
-            attrs = item.get("attributes", {}) or {}
-
-            pid = item.get("id") or _pick(attrs, "id", "sku", "code", "offerId")
-            if pid in seen:
-                return
-            seen.add(pid)
-
-            code = _pick(attrs, "code", "sku", "offerId", "article")
-            name = _pick(attrs, "name", "title", "productName", "offerName")
-            price = _pick(attrs, "price", "basePrice", "salePrice", "currentPrice")
-            qty = _pick(attrs, "quantity", "availableAmount", "stockQuantity", "qty")
-            brand = _pick(attrs, "brand", "producer", "manufacturer")
-            category = _pick(attrs, "category", "categoryName", "group")
-            barcode = _pick(attrs, "barcode", "ean")
-
-            active_val = _pick(attrs, "active", "isActive", "isPublished", "visible", "isVisible", "status")
-            if isinstance(active_val, str) and active_val:
-                av = active_val.lower()
-                if av in ("true", "1", "yes", "on", "published"):
-                    active_str = "1"
-                elif av in ("false", "0", "no", "off", "unpublished"):
-                    active_str = "0"
-                else:
-                    active_str = active_val
-            else:
-                active_str = str(active_val)
-
-            rows.append([pid, code, name, price, qty, active_str, brand, category, barcode])
-
-        try:
-            for item in iter_fn(active_only=bool(active)):
-                add_row(item)
-        except TypeError:
-            for item in iter_fn():
-                add_row(item)
+        items, _ = _collect_products(client, active_only=bool(active))
 
         def esc(s: str) -> str:
+            s = "" if s is None else str(s)
             if any(c in s for c in [",", '"', "\n"]):
-                return '"' + s.replace('"', '""') + '"'
+                s = '"' + s.replace('"', '""') + '"'
             return s
 
         header = "id,code,name,price,qty,active,brand,category,barcode\n"
-        body = "".join([",".join(esc(x) for x in r) + "\n" for r in rows])
+        body = "".join([",".join(esc(x) for x in [
+            r["id"], r["code"], r["name"], r["price"], r["qty"], 1 if r["active"] else 0 if r["active"] is False else "",
+            r["brand"], r["category"], r["barcode"]
+        ]) + "\n" for r in items])
         csv = header + body
-
         return Response(
             content=csv,
             media_type="text/csv; charset=utf-8",
             headers={"Content-Disposition": 'attachment; filename="products.csv"'},
         )
+
+    @router.get("/list")
+    async def list_products(
+        active: int = Query(1, description="1 — только активные, 0 — все"),
+        q: Optional[str] = Query(None, description="поиск по названию/коду"),
+        page: int = Query(1, ge=1),
+        page_size: int = Query(500, ge=1, le=2000),
+    ):
+        if client is None:
+            raise HTTPException(status_code=500, detail="KASPI_TOKEN is not set")
+
+        items, total = _collect_products(client, active_only=bool(active))
+
+        # Поиск
+        if q:
+            ql = q.strip().lower()
+            items = [r for r in items if ql in (r["name"] or "").lower() or ql in (r["code"] or "").lower()]
+
+        # Пагинация
+        start = (page - 1) * page_size
+        end = start + page_size
+        page_items = items[start:end]
+
+        return JSONResponse({"items": page_items, "total": len(items)})
 
     return router
