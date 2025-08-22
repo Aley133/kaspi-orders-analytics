@@ -1,7 +1,6 @@
-from __future__ import annotations
-from typing import Dict, Any, List, Optional
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception
+from typing import Dict, Any, List, Optional
 from .config import settings
 
 BASE_URL = "https://kaspi.kz/shop/api/v2"
@@ -11,15 +10,14 @@ class KaspiError(Exception):
 
 def build_headers() -> Dict[str, str]:
     if not settings.KASPI_TOKEN:
-        raise KaspiError("KASPI_TOKEN is empty")
+        raise KaspiError("KASPI_TOKEN is required")
     return {
-        "Accept": "application/vnd.api+json",
-        "Content-Type": "application/vnd.api+json",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
         "X-Auth-Token": settings.KASPI_TOKEN,
-        "User-Agent": "kaspi-orders-service/0.5.0",
     }
 
-def _retryable(exc: Exception) -> bool:
+def _is_retryable(exc: Exception) -> bool:
     if isinstance(exc, httpx.RequestError):
         return True
     if isinstance(exc, httpx.HTTPStatusError):
@@ -27,66 +25,60 @@ def _retryable(exc: Exception) -> bool:
         return sc == 429 or 500 <= sc < 600
     return False
 
-@retry(reraise=True, stop=stop_after_attempt(3),
-       wait=wait_exponential(multiplier=1, min=1, max=6),
-       retry=retry_if_exception(_retryable))
+@retry(reraise=True,
+       stop=stop_after_attempt(3),
+       wait=wait_exponential(multiplier=0.8, min=0.8, max=4),
+       retry=retry_if_exception(_is_retryable))
 async def _get(client: httpx.AsyncClient, url: str, params: Dict[str, Any]) -> Dict[str, Any]:
-    r = await client.get(url, headers=build_headers(), params=params, timeout=httpx.Timeout(20.0, connect=10.0))
-    r.raise_for_status()
-    return r.json()
+    resp = await client.get(url, params=params, headers=build_headers(),
+                            timeout=httpx.Timeout(20.0, connect=10.0))
+    resp.raise_for_status()
+    return resp.json()
 
-async def list_orders(date_field: str, start_ms: int, end_ms: int, page_size: int=100, extra_filters: Optional[Dict[str, Any]]=None) -> List[Dict[str, Any]]:
-    base = f"{BASE_URL}/orders"
+async def list_orders(date_field: str, start_ms: int, end_ms: int, page_size: int = 100, extra_filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    url = f"{BASE_URL}/orders"
     items: List[Dict[str, Any]] = []
     page = 0
-    param_variants = [
-        {f"filter[orders][{date_field}][ge]": start_ms, f"filter[orders][{date_field}][le]": end_ms},
+
+    param_patterns = [
         {f"filter[{date_field}][ge]": start_ms, f"filter[{date_field}][le]": end_ms},
         {f"filter[{date_field}][from]": start_ms, f"filter[{date_field}][to]": end_ms},
         {"from": start_ms, "to": end_ms},
     ]
+
     async with httpx.AsyncClient() as client:
         while True:
-            ok = False
-            last_err = None
-            for pv in param_variants:
-                params = {"page[number]": page, "page[size]": page_size, **pv}
+            got = None
+            last_exc: Optional[Exception] = None
+            for pat in param_patterns:
+                params = {"page[number]": page, "page[size]": page_size, **pat}
                 if extra_filters:
                     params.update(extra_filters)
                 try:
-                    data = await _get(client, base, params=params)
-                    ok = True
+                    got = await _get(client, url, params=params)
                     break
                 except httpx.HTTPStatusError as e:
                     if date_field != "creationDate" and e.response.status_code in (400, 422):
                         return await list_orders("creationDate", start_ms, end_ms, page_size, extra_filters)
-                    last_err = e
+                    last_exc = e
                 except Exception as e:
-                    last_err = e
-            if not ok:
-                if last_err:
-                    raise last_err
+                    last_exc = e
+            if got is None:
+                if last_exc:
+                    raise last_exc
                 break
 
-            chunk = data.get("data") or data.get("orders") or data.get("items") or []
+            chunk = got.get("data") or got.get("orders") or got.get("items") or []
             if not chunk:
                 break
             items.extend(chunk)
+            if len(chunk) < page_size:
+                break
+            page += 1
 
-            meta = data.get("meta") or {}
-            page_count = meta.get("pageCount")
-            if page_count is not None:
-                page += 1
-                if page >= int(page_count):
-                    break
-            else:
-                if len(chunk) < page_size:
-                    break
-                page += 1
-
-    seen = {}
+    dedup = {}
     for it in items:
         _id = it.get("id") or it.get("orderId") or it.get("number")
         if _id is not None:
-            seen[_id] = it
-    return list(seen.values())
+            dedup[_id] = it
+    return list(dedup.values())
