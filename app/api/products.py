@@ -94,7 +94,6 @@ def _collect_products(client: KaspiClient, active_only: Optional[bool]) -> Tuple
             "barcode": barcode,
         })
 
-    # пробуем вызвать с флагом активности; если сигнатура другая — без аргументов
     try:
         try:
             for it in iter_fn(active_only=bool(active_only) if active_only is not None else True):
@@ -103,9 +102,8 @@ def _collect_products(client: KaspiClient, active_only: Optional[bool]) -> Tuple
             for it in iter_fn():
                 add_row(it)
     except Exception:
-        # ничего страшного: вернём пусто и подсказку
-        return [], 0, ("Каталог по API недоступен. Укажите KASPI_PRODUCTS_ENDPOINTS/KASPI_CITY_ID "
-                       "или используйте автодетект в kaspi_client.iter_products().")
+        return [], 0, ("Каталог по API недоступен. Можно задать KASPI_PRODUCTS_ENDPOINTS/KASPI_CITY_ID, "
+                       "или использовать autodetect в kaspi_client.iter_products().")
 
     return items, total, note
 
@@ -134,7 +132,7 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
         ]) + "\n" for r in items])
         csv = header + body
         return Response(content=csv, media_type="text/csv; charset=utf-8",
-                        headers={"Content-Disposition": 'attachment; filename="products.csv"'})
+                        headers={"Content-Disposition": 'attachment; filename=\"products.csv\"'})
 
     @router.get("/list")
     async def list_products(
@@ -157,5 +155,41 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
         page_items = items[start:end]
 
         return JSONResponse({"items": page_items, "total": len(items), "note": note})
+
+    @router.get("/debug")
+    async def debug_products_catalog(
+        active: int = Query(1, description="1 — только активные, 0 — все"),
+    ):
+        """
+        Диагностика autodetect’а: какие пути и какие наборы параметров отвечают 200 OK.
+        Ничего не ломает, просто показывает статусы.
+        """
+        if client is None:
+            raise HTTPException(status_code=500, detail="KASPI_TOKEN is not set")
+
+        # попытаемся выполнить первые пару элементов (не гоним весь каталог), чтобы понять где 200
+        result: List[Dict[str, Any]] = []
+        ok_found = False
+
+        try:
+            fn = _find_iter_fn(client)
+            if fn is None:
+                raise RuntimeError("Нет функции каталога")
+            # попробуем получить 1-2 айтема
+            cnt = 0
+            try:
+                it = fn(active_only=bool(active))
+            except TypeError:
+                it = fn()
+            for row in it:
+                cnt += 1
+                ok_found = True
+                if cnt >= 2:
+                    break
+            result.append({"ok": ok_found, "hint": "Каталог отвечает"})
+        except Exception as e:
+            result.append({"ok": False, "error": str(e)})
+
+        return JSONResponse({"results": result})
 
     return router
