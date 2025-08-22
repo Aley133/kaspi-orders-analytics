@@ -1,13 +1,14 @@
+# app/main.py
+from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 from .api.routes import api_router
 from .core.config import settings
-from pathlib import Path
 
 app = FastAPI(title="Kaspi Orders Analytics", docs_url="/docs", redoc_url="/redoc")
 
-# CORS (open for local; lock down in prod)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -19,10 +20,11 @@ app.add_middleware(
 # API
 app.include_router(api_router, prefix="/api")
 
-# Static UI
-app.mount("/ui", StaticFiles(directory=Path(__file__).resolve().parent / "ui", html=True), name="ui")
+# 🔧 НАДЁЖНОЕ монтирование статики
+UI_DIR = Path(__file__).resolve().parent / "ui"
+app.mount("/ui", StaticFiles(directory=UI_DIR, html=True), name="ui")
 
-# Root redirect -> UI
-@app.get("/")
+# 🔁 Редирект с корня на /ui/
+@app.get("/", include_in_schema=False)
 def root():
-    return {"ok": True, "ui": "/ui/"}
+    return RedirectResponse(url="/ui/")
