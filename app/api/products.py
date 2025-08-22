@@ -63,15 +63,15 @@ def _collect_products(client: KaspiClient, active_only: Optional[bool]) -> Tuple
     def add_row(item: Dict[str, Any]):
         nonlocal total
         attrs = item.get("attributes", {}) or {}
-        pid = item.get("id") or _pick(attrs, "id", "sku", "code", "offerId")
+        pid = item.get("id") or _pick(attrs, "id", "sku", "code", "offerId") or _pick(attrs, "name")
         if not pid or pid in seen:
             return
         seen.add(pid)
         total += 1
 
-        code = _pick(attrs, "code", "sku", "offerId", "article")
+        code = _pick(attrs, "code", "sku", "offerId", "article", "barcode")
         name = _pick(attrs, "name", "title", "productName", "offerName")
-        price = _num(_pick(attrs, "price", "basePrice", "salePrice", "currentPrice"))
+        price = _num(_pick(attrs, "price", "basePrice", "salePrice", "currentPrice", "totalPrice"))
         qty = int(_num(_pick(attrs, "quantity", "availableAmount", "stockQuantity", "qty")))
         brand = _pick(attrs, "brand", "producer", "manufacturer")
         category = _pick(attrs, "category", "categoryName", "group")
@@ -93,6 +93,7 @@ def _collect_products(client: KaspiClient, active_only: Optional[bool]) -> Tuple
             "barcode": barcode,
         })
 
+    # 1) Пытаемся штатный каталог
     try:
         try:
             for it in iter_fn(active_only=bool(active_only) if active_only is not None else True):
@@ -101,8 +102,18 @@ def _collect_products(client: KaspiClient, active_only: Optional[bool]) -> Tuple
             for it in iter_fn():
                 add_row(it)
     except Exception:
-        return [], 0, ("Каталог по API недоступен. Укажи KASPI_PRODUCTS_ENDPOINTS/KASPI_CITY_ID/merchantId "
-                       "или смотри диагностику /products/probe.")
+        items = []
+        total = 0
+
+    # 2) Если пусто — резерв: собираем товары из заказов
+    if not items:
+        try:
+            for it in client.iter_products_from_orders(days=60):
+                add_row(it)
+            note = "Каталог по API недоступен, показаны товары, собранные из последних заказов (60 дней)."
+        except Exception:
+            note = "Каталог по API недоступен."
+            items, total = [], 0
 
     return items, total, note
 
