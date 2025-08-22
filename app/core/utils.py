@@ -1,72 +1,48 @@
-from __future__ import annotations
-from typing import Dict, Optional
-import re
-from datetime import datetime, timedelta
-import pytz
+from datetime import datetime, timedelta, time
+from dateutil import tz, parser
+from typing import Optional, Dict, Any
 from .config import settings
 
-STATE_MAP = {
-    "CANCELED":"CANCELED","CANCELLED":"CANCELED","CANCEL":"CANCELED",
-    "CANCELED_BY_SELLER":"CANCELED","CANCELED_BY_CUSTOMER":"CANCELED",
-    "COMPLETED":"COMPLETED","DELIVERED":"COMPLETED",
-    "KASPI_DELIVERY":"KASPI_DELIVERY","ARCHIVE":"ARCHIVE",
-    "APPROVED":"APPROVED","NEW":"NEW","READY_FOR_SHIPMENT":"READY_FOR_SHIPMENT",
-    "ON_DELIVERY":"ON_DELIVERY","DELIVERY":"ON_DELIVERY"
-}
-def norm_state(s: str) -> str:
-    return STATE_MAP.get(s.strip().upper(), s.strip().upper())
+def parse_hhmm(s: Optional[str]) -> Optional[time]:
+    if not s:
+        return None
+    hh, mm = s.split(":")
+    return time(int(hh), int(mm))
 
-def parse_states_csv(csv: Optional[str]):
-    if not csv: return None
-    arr = [x.strip() for x in csv.split(",") if x.strip()]
-    return set(norm_state(x) for x in arr) if arr else None
+def get_tz(tz_name: str):
+    return tz.gettz(tz_name) or tz.gettz(settings.TZ)
 
-def tz_localize(date_str: str, tz: str) -> datetime:
-    tzinfo = pytz.timezone(tz)
-    return tzinfo.localize(datetime.strptime(date_str, "%Y-%m-%d"))
+def date_range_with_cutoff(start: str, end: str, tz_name: str, cutoff: str, use_cutoff_window: bool, lte_cutoff_only: bool, lookback_days: int):
+    tzinfo = get_tz(tz_name)
+    start_dt = datetime.fromisoformat(start).replace(tzinfo=tzinfo)
+    end_dt = datetime.fromisoformat(end).replace(tzinfo=tzinfo)
+    cutoff_t = parse_hhmm(cutoff) or time(20, 0)
 
-def apply_hhmm(dt: datetime, hhmm: Optional[str]) -> datetime:
-    if not hhmm: return dt
-    hh,mm = hhmm.split(":")
-    return dt.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
+    if use_cutoff_window:
+        start_dt = start_dt - timedelta(days=max(0, lookback_days))
+    return start_dt, end_dt, cutoff_t
 
-def cutoff_range(day: str, tz: str, cutoff: str, lookback_days: int):
-    tzinfo = pytz.timezone(tz)
-    end_dt = apply_hhmm(tz_localize(day, tz), cutoff)
-    start_dt = end_dt - timedelta(days=lookback_days) + timedelta(milliseconds=1)
-    return start_dt, end_dt
+def ms(dt: datetime) -> int:
+    return int(dt.timestamp() * 1000)
 
-def extract_amount(attrs: Dict) -> float:
-    for k in settings.AMOUNT_FIELDS:
-        if k in attrs and isinstance(attrs[k], (int, float)):
-            v = float(attrs[k])
-            return v / settings.AMOUNT_DIVISOR if settings.AMOUNT_DIVISOR and settings.AMOUNT_DIVISOR != 1 else v
-    return 0.0
+def normalize_amount(order: Dict[str, Any]) -> float:
+    total = 0
+    for f in settings.amount_fields:
+        v = order.get(f)
+        if isinstance(v, (int, float)):
+            total += v
+    return float(total) / max(1, settings.AMOUNT_DIVISOR)
 
-def extract_ms(attrs: Dict, field: str) -> Optional[int]:
-    if field not in attrs: return None
-    val = attrs[field]
+def pick_city(order: Dict[str, Any]) -> str:
+    return order.get("city", "") or order.get("deliveryAddressCity", "") or order.get("customerCity", "") or ""
+
+def pick_date(order: Dict[str, Any], field: str):
+    v = order.get(field)
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return datetime.fromtimestamp(float(v)/1000.0, tz=get_tz(settings.TZ))
     try:
-        if isinstance(val, str): v = int(float(val))
-        elif isinstance(val, (int,float)): v = int(val)
-        else: return None
+        return parser.isoparse(str(v)).astimezone(get_tz(settings.TZ))
     except Exception:
         return None
-    if v<10_000_000_000: v *= 1000
-    return v
-
-CITY_REGEX = re.compile(r"(?:г\.?|город)\s*([A-Za-zА-Яа-яЁё\-\s]+)")
-def extract_city(attrs: Dict) -> str:
-    # best-effort
-    for key in ("city","deliveryAddress","address","pointOfServiceAddress","pickupPointAddress"):
-        v = attrs.get(key)
-        if isinstance(v, str) and v.strip():
-            m = CITY_REGEX.search(v)
-            return (m.group(1).strip() if m else v.split(',')[0].strip()) or "—"
-    return "—"
-
-def guess_order_number(attrs: Dict, oid: str) -> str:
-    for key in ("code","orderNumber","displayOrderCode","merchantOrderId","kaspiId","idForCustomer"):
-        v = attrs.get(key)
-        if v: return str(v)
-    return str(oid)

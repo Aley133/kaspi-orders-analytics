@@ -1,56 +1,64 @@
-from __future__ import annotations
-from typing import Dict, Generator, Optional
-from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
 import httpx
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from typing import Dict, Any, List, Optional
+from .config import settings
 
 BASE_URL = "https://kaspi.kz/shop/api/v2"
 
-class KaspiClient:
-    def __init__(self, token: str, base_url: str = BASE_URL, timeout_connect: float=10.0, timeout_read: float=20.0):
-        if not token:
-            raise RuntimeError("KASPI_TOKEN is empty")
-        self.base_url = base_url.rstrip('/')
-        self.headers = {
-            "Accept": "application/vnd.api+json",
-            "Content-Type": "application/vnd.api+json",
-            "X-Auth-Token": token,
-            "User-Agent": "kaspi-orders-service/0.5.0",
-        }
-        self.timeout = httpx.Timeout(connect=timeout_connect, read=timeout_read, write=timeout_read, pool=timeout_read)
+class KaspiError(Exception):
+    pass
 
-    @retry(wait=wait_exponential(multiplier=1, min=1, max=8),
-           stop=stop_after_attempt(3), reraise=True,
-           retry=retry_if_exception_type((httpx.RequestError, httpx.HTTPStatusError)))
-    def _get(self, path: str, params: Dict[str, object]) -> Dict:
-        url = f"{self.base_url}/{path.lstrip('/')}"
-        with httpx.Client(headers=self.headers, timeout=self.timeout) as client:
-            resp = client.get(url, params=params)
-            resp.raise_for_status()
-            return resp.json()
+def _headers() -> Dict[str, str]:
+    if not settings.KASPI_TOKEN:
+        raise KaspiError("KASPI_TOKEN is required")
+    return {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "X-Auth-Token": settings.KASPI_TOKEN,
+    }
 
-    @staticmethod
-    def _to_ms(ts) -> int:
-        # ts is datetime with tzinfo
-        return int(ts.timestamp()*1000)
+@retry(reraise=True, stop=stop_after_attempt(5), wait=wait_exponential(multiplier=0.5, min=0.5, max=4), retry=retry_if_exception_type(httpx.RequestError))
+async def _get(client: httpx.AsyncClient, url: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    resp = await client.get(url, params=params, headers=_headers(), timeout=30.0)
+    resp.raise_for_status()
+    return resp.json()
 
-    def iter_orders(self, *, start=None, end=None, page_size:int=50, filter_field:str="creationDate", state: Optional[str]=None) -> Generator[Dict, None, None]:
-        if page_size>100: page_size=100
-        params: Dict[str, object] = {"page[number]":0, "page[size]":page_size}
-        if start is not None:
-            params[f"filter[orders][{filter_field}][$ge]"] = self._to_ms(start)
-        if end is not None:
-            params[f"filter[orders][{filter_field}][$le]"] = self._to_ms(end)
-        if state:
-            params["filter[orders][state]"] = state
+async def list_orders(date_field: str, start_ms: int, end_ms: int, page_size: int = 100, extra_filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    url = f"{BASE_URL}/orders"
+    items: List[Dict[str, Any]] = []
+    page = 0
+
+    params_base: Dict[str, Any] = {
+        "page[number]": 0,
+        "page[size]": page_size,
+        f"filter[{date_field}][ge]": start_ms,
+        f"filter[{date_field}][le]": end_ms,
+    }
+    if extra_filters:
+        params_base.update(extra_filters)
+
+    async with httpx.AsyncClient() as client:
         while True:
-            data = self._get("orders", params)
-            items = data.get("data", [])
-            for it in items:
-                yield it
-            page_count = data.get("meta",{}).get("pageCount")
-            current = int(params["page[number]"])
-            if page_count is not None and current+1 >= int(page_count):
+            params = dict(params_base, **{"page[number]": page})
+            try:
+                data = await _get(client, url, params=params)
+            except httpx.HTTPStatusError as e:
+                if date_field != "creationDate" and e.response.status_code in (400, 422):
+                    return await list_orders("creationDate", start_ms, end_ms, page_size, extra_filters)
+                raise
+
+            chunk = data.get("data") or data.get("orders") or data.get("items") or []
+            if not chunk:
                 break
-            if not items:
+            items.extend(chunk)
+
+            if len(chunk) < page_size:
                 break
-            params["page[number]"] = current+1
+            page += 1
+
+    dedup = {}
+    for it in items:
+        _id = it.get("id") or it.get("orderId") or it.get("number")
+        if _id is not None:
+            dedup[_id] = it
+    return list(dedup.values())
