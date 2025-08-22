@@ -136,6 +136,11 @@ async def meta():
 
 def _collect_range(start_dt: datetime, end_dt: datetime, tz: str, date_field: str, states_inc: Optional[set], states_ex: set):
     tzinfo = pytz.timezone(tz)
+
+# Effective BD settings: request override > env default
+eff_use_bd = USE_BUSINESS_DAY if use_bd is None else bool(use_bd)
+eff_bds = BUSINESS_DAY_START if not business_day_start else business_day_start
+
     seen_ids = set()
     day_counts: Dict[str,int] = {}; day_amounts: Dict[str,float] = {}
     city_counts: Dict[str,int] = {}; city_amounts: Dict[str,float] = {}
@@ -161,7 +166,7 @@ def _collect_range(start_dt: datetime, end_dt: datetime, tz: str, date_field: st
                         if dtt < start_dt.astimezone(tzinfo) or dtt > end_dt.astimezone(tzinfo):
                             continue
 
-                        day_key = ((dtt - _bd_delta(BUSINESS_DAY_START)) if USE_BUSINESS_DAY else dtt).date().isoformat()
+                        day_key = ((dtt + (timedelta(hours=24) - _bd_delta(eff_bds))) if eff_use_bd else dtt).date().isoformat()
                         amt = extract_amount(attrs)
                         city = extract_city(attrs)
 
@@ -198,8 +203,14 @@ async def analytics(start: str = Query(...), end: str = Query(...), tz: str = Qu
                     date_field: str = Query(DATE_FIELD_DEFAULT),
                     states: Optional[str] = Query(None), exclude_states: Optional[str] = Query(None),
                     with_prev: bool = Query(True), exclude_canceled: bool = Query(True),
-                    start_time: Optional[str] = Query(None), end_time: Optional[str] = Query(None)):
+                    start_time: Optional[str] = Query(None), end_time: Optional[str] = Query(None),
+                    use_bd: Optional[bool] = Query(None), business_day_start: Optional[str] = Query(None)):
     tzinfo = pytz.timezone(tz)
+
+# Effective BD settings: request override > env default
+eff_use_bd = USE_BUSINESS_DAY if use_bd is None else bool(use_bd)
+eff_bds = BUSINESS_DAY_START if not business_day_start else business_day_start
+
     start_dt = parse_date_local(start, tz)
     end_dt = parse_date_local(end, tz) + timedelta(days=1) - timedelta(milliseconds=1)
 
@@ -239,6 +250,11 @@ async def list_ids(start: str, end: str, tz: str = DEFAULT_TZ, date_field: str =
                    states: Optional[str] = None, exclude_canceled: bool = True,
                    end_time: Optional[str] = None):
     tzinfo = pytz.timezone(tz)
+
+# Effective BD settings: request override > env default
+eff_use_bd = USE_BUSINESS_DAY if use_bd is None else bool(use_bd)
+eff_bds = BUSINESS_DAY_START if not business_day_start else business_day_start
+
     start_dt = parse_date_local(start, tz)
     end_dt = parse_date_local(end, tz) + timedelta(days=1) - timedelta(milliseconds=1)
     if end_time:
@@ -306,6 +322,11 @@ async def list_ids_csv(start: str, end: str, tz: str = DEFAULT_TZ, date_field: s
 async def debug_list(start: str, end: str, tz: str = DEFAULT_TZ, date_field: str = DATE_FIELD_DEFAULT,
                      states: Optional[str] = None, limit: int = 100):
     tzinfo = pytz.timezone(tz)
+
+# Effective BD settings: request override > env default
+eff_use_bd = USE_BUSINESS_DAY if use_bd is None else bool(use_bd)
+eff_bds = BUSINESS_DAY_START if not business_day_start else business_day_start
+
     start_dt = parse_date_local(start, tz)
     end_dt = parse_date_local(end, tz) + timedelta(days=1) - timedelta(milliseconds=1)
     inc = parse_states_csv(states)
