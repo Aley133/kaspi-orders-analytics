@@ -15,6 +15,17 @@
   }catch(e){}
 })();</script></head>
 <body>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="brand">⚡ LeoXpress</div>
+      <nav>
+        <a class="nav-item" href="#">Мой склад</a>
+        <a class="nav-item" href="#">Предзаказ</a>
+        <a class="nav-item" href="#">Демпинг</a>
+        <a class="nav-item" href="#">WhatsApp Рассылка</a>
+      </nav>
+    </aside>
+    <div class="content">
 <div class="shell">
 <header class="top">
 <h1>Добрый день, LeoXpress</h1>
@@ -179,6 +190,10 @@ async function run(e){
   table('tbl-days', ['Дата','Кол-во','Оборот'], data.days.map(d=>[d.x, d.count, fmt(d.amount)+' '+data.currency]));
 
   await loadIds();
+  const use_bd = document.getElementById('use_bd')?.checked;
+  const bd_start = document.getElementById('bd_start')?.value||'20:00';
+  const el = document.getElementById('bdInfo');
+  if(el){ el.textContent = use_bd?(`День магазина: ${bd_start} → ${bd_start}`):'День магазина: выключен'; }
 }
 
 document.getElementById('f').addEventListener('submit', run);
@@ -209,4 +224,6 @@ async function showBDInfo(){
 }
 showBDInfo();
 </script></body>
+    </div>
+  </div>
 </html>

@@ -40,3 +40,12 @@ td.r,th.r{text-align:right}
 .theme-toggle{margin-left:8px;border:1px solid var(--border);border-radius:10px;padding:6px 10px;background:transparent;color:var(--fg);}
 
 .muted{color:var(--muted);margin-top:6px}
+
+/* Layout with sidebar */
+.layout{display:grid;grid-template-columns:260px 1fr;min-height:100vh;background:var(--bg)}
+.sidebar{position:sticky;top:0;height:100vh;border-right:1px solid var(--border);padding:18px;background:var(--panel)}
+.brand{font-weight:800;margin-bottom:14px}
+.nav-item{display:block;padding:10px 12px;border-radius:10px;margin-bottom:8px;border:1px solid var(--border);color:var(--fg);text-decoration:none;background:var(--card)}
+.nav-item:hover{filter:brightness(0.98)}
+.content{padding:12px 20px}
+.shell{max-width:none;margin:0;padding:0 10px}
