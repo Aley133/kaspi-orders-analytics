@@ -1,31 +1,21 @@
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from __future__ import annotations
+import os
+from dotenv import load_dotenv
 
-class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", case_sensitive=False)
+load_dotenv()
 
-    KASPI_TOKEN: str = ""
+class Settings:
+    KASPI_TOKEN: str = os.getenv("KASPI_TOKEN","")
+    TZ: str = os.getenv("TZ","Asia/Almaty")
+    CACHE_TTL: int = int(os.getenv("CACHE_TTL","300"))
+    CURRENCY: str = os.getenv("CURRENCY","KZT")
 
-    TZ: str = "Asia/Almaty"
-    DAY_CUTOFF: str = "20:00"
-    PACK_LOOKBACK_DAYS: int = 3
+    # amount extraction
+    AMOUNT_FIELDS = [s.strip() for s in os.getenv("AMOUNT_FIELDS","totalPrice").split(",") if s.strip()]
+    AMOUNT_DIVISOR: float = float(os.getenv("AMOUNT_DIVISOR","1"))
 
-    AMOUNT_FIELDS: str = "totalPrice"
-    AMOUNT_DIVISOR: int = 1
-    CHUNK_DAYS: int = 7
-
-    DATE_FIELD_DEFAULT: str = "creationDate"
-    DATE_FIELD_OPTIONS: str = "creationDate,plannedShipmentDate,plannedDeliveryDate,shipmentDate,deliveryDate"
-
-    HOST: str = "0.0.0.0"
-    PORT: int = 8899
-    DEBUG: bool = True
-
-    @property
-    def amount_fields(self):
-        return [x.strip() for x in self.AMOUNT_FIELDS.split(",") if x.strip()]
-
-    @property
-    def date_field_options(self):
-        return [x.strip() for x in self.DATE_FIELD_OPTIONS.split(",") if x.strip()]
+    # cutoff window for "up to HH:MM"
+    DAY_CUTOFF: str = os.getenv("DAY_CUTOFF","20:00")
+    PACK_LOOKBACK_DAYS: int = int(os.getenv("PACK_LOOKBACK_DAYS","3"))
 
 settings = Settings()
