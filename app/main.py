@@ -15,7 +15,6 @@ from pydantic import BaseModel
 from cachetools import TTLCache
 from httpx import HTTPStatusError, RequestError
 
-# Import Kaspi client with robust fallback (relative or absolute)
 try:
     from .kaspi_client import KaspiClient  # type: ignore
 except Exception:  # pragma: no cover
@@ -23,34 +22,25 @@ except Exception:  # pragma: no cover
 
 load_dotenv()
 
-# -------------------- ENV --------------------
+# ------------- ENV -------------
 KASPI_TOKEN = os.getenv("KASPI_TOKEN", "").strip()
-if not KASPI_TOKEN:
-    # Не валим приложение — но дадим понятную ошибку при первом запросе
-    pass
-
 DEFAULT_TZ = os.getenv("TZ", "Asia/Almaty")
 CURRENCY = os.getenv("CURRENCY", "KZT")
 
-# Какие поля из attributes суммировать как оборот (через запятую). Поддержка "a.b.c" путей.
 AMOUNT_FIELDS = [s.strip() for s in os.getenv("AMOUNT_FIELDS", "totalPrice").split(",") if s.strip()]
 AMOUNT_DIVISOR = float(os.getenv("AMOUNT_DIVISOR", "1"))
 
-# По какому полю фильтруем/считаем даты по умолчанию
 DATE_FIELD_DEFAULT = os.getenv("DATE_FIELD_DEFAULT", "creationDate")
 DATE_FIELD_OPTIONS = [s.strip() for s in os.getenv("DATE_FIELD_OPTIONS", "creationDate,plannedShipmentDate,shipmentDate,deliveryDate").split(",") if s.strip()]
-
-# Из каких полей извлекаем город (по порядку)
 CITY_KEYS = [s.strip() for s in os.getenv("CITY_KEYS", "city,deliveryAddress.city").split(",") if s.strip()]
 
-# Размер шага запросов к API (дней) и TTL кэша (сек)
 CHUNK_DAYS = int(os.getenv("CHUNK_DAYS", "7"))
 CACHE_TTL = int(os.getenv("CACHE_TTL", "300"))
 
 SHOP_NAME = os.getenv("SHOP_NAME", "LeoXpress")
 PARTNER_ID = os.getenv("PARTNER_ID", "")
 
-# --- Business day config (env defaults) ---
+# --- Business day defaults ---
 BUSINESS_DAY_START = os.getenv("BUSINESS_DAY_START", "20:00")  # HH:MM
 USE_BUSINESS_DAY = os.getenv("USE_BUSINESS_DAY", "true").lower() in ("1","true","yes","on")
 
@@ -61,26 +51,18 @@ def _bd_delta(hhmm: str) -> timedelta:
     except Exception:
         raise HTTPException(status_code=400, detail=f"Неверный BUSINESS_DAY_START: {hhmm}")
 
-# Глобальные "эффективные" значения на время исполнения запроса (чтобы не передавать в каждую утилиту)
+# runtime effective flags (set per-request)
 _EFF_USE_BD: bool = USE_BUSINESS_DAY
 _EFF_BDS: str = BUSINESS_DAY_START
 
-# -------------------- FASTAPI --------------------
+# ------------- FastAPI -------------
 app = FastAPI(title="Kaspi Orders Analytics")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# -------------------- Client & Cache --------------------
 client = KaspiClient(token=KASPI_TOKEN) if KASPI_TOKEN else None
 orders_cache = TTLCache(maxsize=128, ttl=CACHE_TTL)
 
-# -------------------- Utils --------------------
-
+# ------------- Utils -------------
 def tzinfo_of(name: str) -> pytz.BaseTzInfo:
     try:
         return pytz.timezone(name)
@@ -88,7 +70,6 @@ def tzinfo_of(name: str) -> pytz.BaseTzInfo:
         raise HTTPException(status_code=400, detail=f"Bad timezone: {name}")
 
 def parse_date_local(d: str, tz: str) -> datetime:
-    # Возвращаем локальную дату в 00:00 (tz-aware)
     tzinfo = tzinfo_of(tz)
     try:
         y,m,dd = map(int, d.split("-"))
@@ -145,18 +126,16 @@ def extract_ms(attrs: dict, field: str) -> Optional[int]:
     v = attrs.get(field)
     if v is None:
         return None
-    # Kaspi обычно возвращает миллисекунды
     try:
-        return int(v)
+        return int(v)  # milliseconds typical
     except Exception:
-        # попробуем как ISO8601
         try:
             return int(datetime.fromisoformat(str(v).replace("Z","+00:00")).timestamp() * 1000)
         except Exception:
             return None
 
 def bucket_date(dt_local: datetime) -> str:
-    """Вернём метку бизнес-дня (дата закрытия D): окно [D-1 cutoff .. D cutoff)."""
+    # дата закрытия D: [D-1 cutoff .. D cutoff)
     if _EFF_USE_BD:
         shift = timedelta(hours=24) - _bd_delta(_EFF_BDS)
         return (dt_local + shift).date().isoformat()
@@ -169,8 +148,7 @@ def _guess_number(attrs: dict, fallback_id: str) -> str:
             return v.strip()
     return str(fallback_id)
 
-# -------------------- Pydantic --------------------
-
+# ------------- Models -------------
 class DayPoint(BaseModel):
     x: str
     count: int
@@ -185,11 +163,10 @@ class AnalyticsResponse(BaseModel):
     total_amount: float
     days: List[DayPoint]
     prev_days: List[DayPoint] = []
-    cities: Dict[str,int] = {}
+    cities: List[Dict[str,int]] = []
     state_breakdown: Dict[str,int] = {}
 
-# -------------------- Endpoints --------------------
-
+# ------------- Endpoints -------------
 @app.get("/meta")
 async def meta():
     return {
@@ -262,7 +239,6 @@ def _collect_range(start_dt: datetime, end_dt: datetime, tz: str, date_field: st
                         seen_ids.add(oid)
                     break
                 except HTTPStatusError as ee:
-                    # если поле неподдерживаемо, откатываемся на creationDate
                     if ee.response.status_code in (400, 422) and try_field != "creationDate":
                         try_field = "creationDate"
                         continue
@@ -270,7 +246,7 @@ def _collect_range(start_dt: datetime, end_dt: datetime, tz: str, date_field: st
         except RequestError as e:
             raise HTTPException(status_code=502, detail=f"Network: {e}")
 
-    # Преобразуем в список на весь диапазон (с нулями для пустых дней)
+    # полный список дней (с нулями)
     out_days: List[DayPoint] = []
     cur = start_dt.astimezone(tzinfo).date()
     end_d = end_dt.astimezone(tzinfo).date()
@@ -291,7 +267,7 @@ async def analytics(start: str = Query(...), end: str = Query(...), tz: str = Qu
 
     tzinfo = tzinfo_of(tz)
 
-    # Эффективные настройки на запрос
+    # эффективные настройки на запрос
     global _EFF_USE_BD, _EFF_BDS
     eff_use_bd = USE_BUSINESS_DAY if use_bd is None else bool(use_bd)
     eff_bds = BUSINESS_DAY_START if not business_day_start else business_day_start
@@ -302,7 +278,7 @@ async def analytics(start: str = Query(...), end: str = Query(...), tz: str = Qu
 
     if eff_use_bd:
         delta = _bd_delta(eff_bds)
-        # Метка дня D: окно [D-1 00:00+delta .. D 00:00+delta)
+        # метка дня D: окно [D-1 00:00+delta .. D 00:00+delta)
         start_dt = tzinfo.localize(datetime.combine((start_dt.date() - timedelta(days=1)), time(0,0,0))) + delta
         end_dt = tzinfo.localize(datetime.combine(end_dt.date(), time(0,0,0))) + delta - timedelta(milliseconds=1)
     else:
@@ -321,7 +297,10 @@ async def analytics(start: str = Query(...), end: str = Query(...), tz: str = Qu
     if exclude_canceled:
         exc |= {"CANCELED"}
 
-    days, cities, tot, tot_amt, st_counts = _collect_range(start_dt, end_dt, tz, date_field, inc, exc)
+    days, cities_dict, tot, tot_amt, st_counts = _collect_range(start_dt, end_dt, tz, date_field, inc, exc)
+
+    # фронт ждёт массив {city, count}
+    cities_list = [{"city": c, "count": n} for c, n in sorted(cities_dict.items(), key=lambda x: -x[1])]
 
     prev_days: List[DayPoint] = []
     if with_prev:
@@ -342,7 +321,7 @@ async def analytics(start: str = Query(...), end: str = Query(...), tz: str = Qu
         "total_amount": tot_amt,
         "days": days,
         "prev_days": prev_days,
-        "cities": cities,
+        "cities": cities_list,
         "state_breakdown": st_counts,
     }
 
@@ -352,7 +331,6 @@ async def list_ids(start: str = Query(...), end: str = Query(...), tz: str = Que
                    states: Optional[str] = Query(None), exclude_states: Optional[str] = Query(None),
                    use_bd: Optional[bool] = Query(None), business_day_start: Optional[str] = Query(None),
                    limit: int = Query(1000)):
-    # Настройки эффектиные для запроса (влияют на период, а не на сортировку)
     tzinfo = tzinfo_of(tz)
     global _EFF_USE_BD, _EFF_BDS
     eff_use_bd = USE_BUSINESS_DAY if use_bd is None else bool(use_bd)
@@ -417,7 +395,6 @@ async def list_ids_csv(start: str = Query(...), end: str = Query(...), tz: str =
     data = await list_ids(start=start, end=end, tz=tz, date_field=date_field,
                           states=states, exclude_states=exclude_states,
                           use_bd=use_bd, business_day_start=business_day_start, limit=100000)
-    # Номера по строкам
     csv = "\n".join([it["number"] for it in data["items"]])
     return csv
 
@@ -425,5 +402,4 @@ async def list_ids_csv(start: str = Query(...), end: str = Query(...), tz: str =
 async def root():
     return RedirectResponse(url="/ui/")
 
-# Раздача статики (UI)
 app.mount("/ui", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static"), html=True), name="static")
