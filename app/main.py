@@ -137,10 +137,6 @@ async def meta():
 def _collect_range(start_dt: datetime, end_dt: datetime, tz: str, date_field: str, states_inc: Optional[set], states_ex: set):
     tzinfo = pytz.timezone(tz)
 
-# Effective BD settings: request override > env default
-eff_use_bd = USE_BUSINESS_DAY if use_bd is None else bool(use_bd)
-eff_bds = BUSINESS_DAY_START if not business_day_start else business_day_start
-
     seen_ids = set()
     day_counts: Dict[str,int] = {}; day_amounts: Dict[str,float] = {}
     city_counts: Dict[str,int] = {}; city_amounts: Dict[str,float] = {}
@@ -206,6 +202,10 @@ async def analytics(start: str = Query(...), end: str = Query(...), tz: str = Qu
                     start_time: Optional[str] = Query(None), end_time: Optional[str] = Query(None),
                     use_bd: Optional[bool] = Query(None), business_day_start: Optional[str] = Query(None)):
     tzinfo = pytz.timezone(tz)
+    # Effective BD settings: request override > env default
+    eff_use_bd = USE_BUSINESS_DAY if use_bd is None else bool(use_bd)
+    eff_bds = BUSINESS_DAY_START if not business_day_start else business_day_start
+
 
 # Effective BD settings: request override > env default
 eff_use_bd = USE_BUSINESS_DAY if use_bd is None else bool(use_bd)
