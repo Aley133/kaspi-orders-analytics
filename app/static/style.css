@@ -14,11 +14,11 @@ body{margin:0;background:var(--bg);color:var(--fg);font-family: Inter, ui-sans-s
 .shell{max-width:1280px;margin:24px auto;padding:0 20px}
 .top{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
 .top h1{margin:0;font-size:28px}
-.tabs .btn{margin-left:8px}
+.tabs .btn{padding:8px 12px;border-radius:10px;border:1px solid var(--border);background:var(--panel);color:var(--fg);cursor:pointer}
 .controls{display:flex;gap:10px;flex-wrap:wrap;margin:10px 0 16px}
-.controls label{display:flex;align-items:center;gap:6px;background:#0b1220;padding:6px 10px;border:1px solid var(--border);border-radius:10px}
+.controls label{display:flex;align-items:center;gap:6px;background: var(--panel);padding:6px 10px;border:1px solid var(--border);border-radius:10px}
 input{background:transparent;color:var(--fg);border:none;outline:none}
-.btn{padding:8px 12px;border-radius:10px;border:1px solid #2b3a4f;background:#0d1726;color:var(--fg);cursor:pointer}
+.btn{padding:8px 12px;border-radius:10px;border:1px solid var(--border);background:var(--panel);color:var(--fg);cursor:pointer}
 .btn.primary{background:#0f2f23;border-color:#155e4a}
 .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:14px 0 18px}
 .card{background:var(--card);border:1px solid #243042;border-radius:16px;padding:14px}
@@ -33,8 +33,10 @@ table{width:100%;border-collapse:collapse}
 th,td{padding:10px;border-bottom:1px solid var(--border)}
 td.r,th.r{text-align:right}
 .flexrow{display:flex;justify-content:space-between;align-items:center}
-.actions .btn{margin-left:8px}
+.actions .btn{padding:8px 12px;border-radius:10px;border:1px solid var(--border);background:var(--panel);color:var(--fg);cursor:pointer}
 @media(max-width:980px){.grid2{grid-template-columns:1fr}.kpis{grid-template-columns:1fr 1fr}}
 
 /* Theme toggle button */
 .theme-toggle{margin-left:8px;border:1px solid var(--border);border-radius:10px;padding:6px 10px;background:transparent;color:var(--fg);}
+
+.muted{color:var(--muted);margin-top:6px}
