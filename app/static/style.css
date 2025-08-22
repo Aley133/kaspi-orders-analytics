@@ -61,6 +61,7 @@ input[type="text"],input[type="date"],input[type="time"],select{
 .kpi-item{border:1px solid var(--border);background:var(--card);border-radius:14px;padding:12px}
 .kpi-label{color:var(--muted);font-weight:600}
 .kpi-value{font-size:22px;font-weight:800}
+.kpi-sub{color:var(--muted);margin-top:4px}
 
 .shell{border:1px solid var(--border);background:var(--card);border-radius:14px;padding:12px;margin-top:12px}
 
@@ -70,6 +71,9 @@ input[type="text"],input[type="date"],input[type="time"],select{
 
 .pillbox{display:flex;flex-wrap:wrap;gap:8px}
 .pill{border:1px solid var(--border);background:var(--panel);padding:6px 10px;border-radius:999px}
+
+.ids-summary{display:flex;gap:8px;align-items:center;margin:4px 0 10px;color:var(--fg)}
+.ids-summary b{font-weight:800}
 
 .ids-actions{display:flex;gap:8px;justify-content:flex-end;margin-bottom:8px}
 .ids-groups details{border:1px solid var(--border); border-radius:10px; background:var(--card); margin-bottom:8px; padding:8px 12px}
