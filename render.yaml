@@ -1,0 +1,34 @@
+
+services:
+  - type: web
+    name: kaspi-orders-analytics
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    autoDeploy: true
+    healthCheckPath: /meta
+    envVars:
+      - key: KASPI_TOKEN
+        sync: false
+      - key: TZ
+        value: Asia/Almaty
+      - key: BUSINESS_DAY_START
+        value: 20:00
+      - key: USE_BUSINESS_DAY
+        value: "true"
+      - key: CURRENCY
+        value: KZT
+      - key: AMOUNT_FIELDS
+        value: totalPrice
+      - key: AMOUNT_DIVISOR
+        value: "1"
+      - key: CHUNK_DAYS
+        value: "7"
+      - key: CACHE_TTL
+        value: "300"
+      - key: DATE_FIELD_DEFAULT
+        value: creationDate
+      - key: DATE_FIELD_OPTIONS
+        value: creationDate,plannedDeliveryDate,plannedShipmentDate,shipmentDate,deliveryDate
+      - key: CITY_KEYS
+        value: city
