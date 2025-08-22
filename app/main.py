@@ -134,7 +134,7 @@ async def meta():
             "date_field_default": DATE_FIELD_DEFAULT, "date_field_options": DATE_FIELD_OPTIONS,
             "city_keys": CITY_KEYS, "use_business_day": USE_BUSINESS_DAY, "business_day_start": BUSINESS_DAY_START}
 
-def _collect_range(start_dt: datetime, end_dt: datetime, tz: str, date_field: str, states_inc: Optional[set], states_ex: set):
+def _collect_range(start_dt: datetime, end_dt: datetime, tz: str, date_field: str, states_inc: Optional[set], states_ex: set, eff_use_bd: bool, eff_bds: str):
     tzinfo = pytz.timezone(tz)
 
     seen_ids = set()
@@ -206,14 +206,16 @@ async def analytics(start: str = Query(...), end: str = Query(...), tz: str = Qu
     eff_use_bd = USE_BUSINESS_DAY if use_bd is None else bool(use_bd)
     eff_bds = BUSINESS_DAY_START if not business_day_start else business_day_start
 
+    
+start_dt = parse_date_local(start, tz)
+end_dt = parse_date_local(end, tz) + timedelta(days=1) - timedelta(milliseconds=1)
 
-# Effective BD settings: request override > env default
-eff_use_bd = USE_BUSINESS_DAY if use_bd is None else bool(use_bd)
-eff_bds = BUSINESS_DAY_START if not business_day_start else business_day_start
-
-    start_dt = parse_date_local(start, tz)
-    end_dt = parse_date_local(end, tz) + timedelta(days=1) - timedelta(milliseconds=1)
-
+if eff_use_bd:
+    delta = _bd_delta(eff_bds)
+    # Окно для дня с меткой D: [D-1 00:00+delta .. D 00:00+delta)
+    start_dt = tzinfo.localize(datetime.combine((start_dt.date() - timedelta(days=1)), datetime.min.time())) + delta
+    end_dt = tzinfo.localize(datetime.combine(end_dt.date(), datetime.min.time())) + delta - timedelta(milliseconds=1)
+else:
     if start_time: start_dt = apply_hhmm(start_dt, start_time)
     if end_time:
         e0 = parse_date_local(end, tz)
@@ -226,14 +228,14 @@ eff_bds = BUSINESS_DAY_START if not business_day_start else business_day_start
     exc = parse_states_csv(exclude_states) or set()
     if exclude_canceled: exc |= {"CANCELED"}
 
-    days, cities, tot, tot_amt, st_counts = _collect_range(start_dt, end_dt, tz, date_field, inc, exc)
+    days, cities, tot, tot_amt, st_counts = _collect_range(start_dt, end_dt, tz, date_field, inc, exc, eff_use_bd, eff_bds)
 
     prev_days = []
     if with_prev:
         span_days = (end_dt.date() - start_dt.date()).days + 1
         prev_end = start_dt - timedelta(milliseconds=1)
         prev_start = prev_end - timedelta(days=span_days) + timedelta(milliseconds=1)
-        prev_days, _, _, _, _ = _collect_range(prev_start, prev_end, tz, date_field, inc, exc)
+        prev_days, _, _, _, _ = _collect_range(prev_start, prev_end, tz, date_field, inc, exc, eff_use_bd, eff_bds)
 
     return {"range":{"start":start_dt.astimezone(tzinfo).date().isoformat(),"end":end_dt.astimezone(tzinfo).date().isoformat()},
             "timezone": tz, "currency": CURRENCY, "date_field": date_field,
@@ -250,11 +252,6 @@ async def list_ids(start: str, end: str, tz: str = DEFAULT_TZ, date_field: str =
                    states: Optional[str] = None, exclude_canceled: bool = True,
                    end_time: Optional[str] = None):
     tzinfo = pytz.timezone(tz)
-
-# Effective BD settings: request override > env default
-eff_use_bd = USE_BUSINESS_DAY if use_bd is None else bool(use_bd)
-eff_bds = BUSINESS_DAY_START if not business_day_start else business_day_start
-
     start_dt = parse_date_local(start, tz)
     end_dt = parse_date_local(end, tz) + timedelta(days=1) - timedelta(milliseconds=1)
     if end_time:
@@ -322,11 +319,6 @@ async def list_ids_csv(start: str, end: str, tz: str = DEFAULT_TZ, date_field: s
 async def debug_list(start: str, end: str, tz: str = DEFAULT_TZ, date_field: str = DATE_FIELD_DEFAULT,
                      states: Optional[str] = None, limit: int = 100):
     tzinfo = pytz.timezone(tz)
-
-# Effective BD settings: request override > env default
-eff_use_bd = USE_BUSINESS_DAY if use_bd is None else bool(use_bd)
-eff_bds = BUSINESS_DAY_START if not business_day_start else business_day_start
-
     start_dt = parse_date_local(start, tz)
     end_dt = parse_date_local(end, tz) + timedelta(days=1) - timedelta(milliseconds=1)
     inc = parse_states_csv(states)
