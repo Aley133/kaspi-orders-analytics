@@ -29,6 +29,17 @@ DATE_FIELD_DEFAULT = os.getenv("DATE_FIELD_DEFAULT", "creationDate")
 DATE_FIELD_OPTIONS = [s.strip() for s in os.getenv("DATE_FIELD_OPTIONS","creationDate,plannedDeliveryDate,plannedShipmentDate,shipmentDate,deliveryDate").split(",") if s.strip()]
 CITY_KEYS = [s.strip() for s in os.getenv("CITY_KEYS","city").split(",") if s.strip()]
 
+# Business-day settings
+BUSINESS_DAY_START = os.getenv("BUSINESS_DAY_START", "20:00")  # HH:MM local
+USE_BUSINESS_DAY = os.getenv("USE_BUSINESS_DAY", "true").lower() in ("1","true","yes","on")
+
+def _bd_delta(hhmm: str):
+    try:
+        hh, mm = hhmm.split(":")
+        return timedelta(hours=int(hh), minutes=int(mm))
+    except Exception:
+        raise HTTPException(status_code=400, detail=f"Неверный BUSINESS_DAY_START: {hhmm}")
+
 if not KASPI_TOKEN: raise RuntimeError("KASPI_TOKEN не задан в окружении (.env)")
 client = KaspiClient(token=KASPI_TOKEN)
 
@@ -121,7 +132,7 @@ async def meta():
     return {"shop": SHOP_NAME, "partner_id": PARTNER_ID, "timezone": DEFAULT_TZ, "currency": CURRENCY,
             "amount_fields": AMOUNT_FIELDS, "divisor": AMOUNT_DIVISOR, "chunk_days": CHUNK_DAYS,
             "date_field_default": DATE_FIELD_DEFAULT, "date_field_options": DATE_FIELD_OPTIONS,
-            "city_keys": CITY_KEYS}
+            "city_keys": CITY_KEYS, "use_business_day": USE_BUSINESS_DAY, "business_day_start": BUSINESS_DAY_START}
 
 def _collect_range(start_dt: datetime, end_dt: datetime, tz: str, date_field: str, states_inc: Optional[set], states_ex: set):
     tzinfo = pytz.timezone(tz)
@@ -150,7 +161,7 @@ def _collect_range(start_dt: datetime, end_dt: datetime, tz: str, date_field: st
                         if dtt < start_dt.astimezone(tzinfo) or dtt > end_dt.astimezone(tzinfo):
                             continue
 
-                        day_key = dtt.date().isoformat()
+                        day_key = ((dtt - _bd_delta(BUSINESS_DAY_START)) if USE_BUSINESS_DAY else dtt).date().isoformat()
                         amt = extract_amount(attrs)
                         city = extract_city(attrs)
 
