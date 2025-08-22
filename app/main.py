@@ -195,6 +195,10 @@ class DayPoint(BaseModel):
     count: int
     amount: float = 0.0
 
+class CityCount(BaseModel):
+    city: str
+    count: int
+
 class AnalyticsResponse(BaseModel):
     range: Dict[str, str]
     timezone: str
@@ -204,7 +208,7 @@ class AnalyticsResponse(BaseModel):
     total_amount: float
     days: List[DayPoint]
     prev_days: List[DayPoint] = []
-    cities: List[Dict[str, int]] = []
+    cities: List[CityCount] = []
     state_breakdown: Dict[str, int] = {}
 
 # -------------------- Endpoints --------------------
