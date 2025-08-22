@@ -1,143 +1,97 @@
-(async function(){
-  const meta = await Api.meta();
-  const elStart = document.getElementById('start');
-  const elEnd = document.getElementById('end');
-  const elDateField = document.getElementById('date_field');
-  const elStates = document.getElementById('states');
-  const elExcludeStates = document.getElementById('exclude_states');
-  const elExcludeCanceled = document.getElementById('exclude_canceled');
-  const elUseCutoff = document.getElementById('use_cutoff_window');
-  const elLTECutoff = document.getElementById('lte_cutoff_only');
-  const elLookback = document.getElementById('lookback_days');
+import {getMeta, getAnalytics, getIds, buildQuery} from './api.js';
+import {draw, table} from './charts.js';
+import {initTheme} from './state.js';
 
-  const elBtnRun = document.getElementById('btn-run');
-  const elBtnToday = document.getElementById('btn-preset-today');
-  const elBtnPlanToday = document.getElementById('btn-preset-plan-today');
-  const elBtnDelivered = document.getElementById('btn-preset-delivered');
-  const elBtnPack = document.getElementById('btn-preset-pack');
+function fmt(n){ return Number(n).toLocaleString(undefined,{maximumFractionDigits:2}); }
 
-  const statCount = document.getElementById('stat-count');
-  const statAmount = document.getElementById('stat-amount');
-  const statCurrency = document.getElementById('stat-currency');
+async function main(){
+  initTheme();
+  const META = await getMeta();
 
-  const chartTrendCtx = document.getElementById('chart-trend').getContext('2d');
-  const chartCitiesCtx = document.getElementById('chart-cities').getContext('2d');
-  const elStateBreakdown = document.getElementById('state-breakdown');
-  const elOrderIds = document.getElementById('order-ids');
+  // default dates
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || META.timezone || 'Asia/Almaty';
+  const now = new Date(), yyyy=now.getFullYear(), mm=String(now.getMonth()+1).padStart(2,'0'), dd=String(now.getDate()).padStart(2,'0');
+  const end = `${yyyy}-${mm}-${dd}`;
+  const startObj = new Date(now.getTime() - 6*24*3600*1000);
+  const start = `${startObj.getFullYear()}-${String(startObj.getMonth()+1).padStart(2,'0')}-${String(startObj.getDate()).padStart(2,'0')}`;
+  document.getElementById('start').value = start;
+  document.getElementById('end').value = end;
+  document.getElementById('cutoff').value = META.day_cutoff || '20:00';
+  document.getElementById('lookback').value = META.pack_lookback_days || 3;
 
-  const btnCopy = document.getElementById('btn-copy');
-  const btnCsv = document.getElementById('btn-csv');
-
-  meta.date_field_options.forEach(f=>{
-    const opt = document.createElement('option');
-    opt.value = f; opt.textContent = f;
-    if(f === meta.date_field_default) opt.selected = true;
-    elDateField.appendChild(opt);
-  });
-  elLookback.value = meta.pack_lookback_days || 3;
-  statCurrency.textContent = meta.currency || 'KZT';
-
-  function todayStr(offset=0){
-    const d = new Date();
-    d.setDate(d.getDate()+offset);
-    return d.toISOString().slice(0,10);
-  }
-  function params(){
-    const p = {
-      start: elStart.value,
-      end: elEnd.value,
-      tz: meta.tz,
-      date_field: elDateField.value,
-      states: elStates.value,
-      exclude_states: elExcludeStates.value,
-      exclude_canceled: elExcludeCanceled.checked ? 'true' : 'false',
-      use_cutoff_window: elUseCutoff.checked ? 'true' : 'false',
-      lte_cutoff_only: elLTECutoff.checked ? 'true' : 'false',
-      lookback_days: elLookback.value || 3
+  function buildArgs(){
+    const args = {
+      start: document.getElementById('start').value,
+      end: document.getElementById('end').value,
+      tz,
+      date_field: document.getElementById('date_field').value || 'creationDate',
+      states: document.getElementById('states').value || undefined,
+      exclude_canceled: document.getElementById('excCanceled').checked,
     };
-    return p;
+    if (document.getElementById('useCutoff').checked){
+      args.cutoff_mode = true;
+      args.cutoff = document.getElementById('cutoff').value||'20:00';
+      args.lookback_days = Number(document.getElementById('lookback').value||3);
+    } else {
+      const et = document.getElementById('end_time').value.trim();
+      if (et) args.end_time = et;
+    }
+    return args;
   }
 
-  async function run(){
-    elBtnRun.disabled = true;
-    try {
-      const p = params();
-      const res = await Api.analytics(p);
+  async function run(e){
+    if (e) e.preventDefault();
+    const args = buildArgs();
+    const data = await getAnalytics(args);
+    // KPIs
+    document.getElementById('kpis').innerHTML = `
+      <div class="card"><div class="k">Период</div><div class="v">${data.range.start} → ${data.range.end}</div></div>
+      <div class="card"><div class="k">Всего заказов</div><div class="v">${fmt(data.total_orders)}</div></div>
+      <div class="card"><div class="k">Оборот</div><div class="v">${fmt(data.total_amount)} ${data.currency}</div></div>
+      <div class="card"><div class="k">Дата по полю</div><div class="v">${data.date_field}</div></div>
+    `;
+    // charts
+    const labels = data.days.map(d=>d.x);
+    const curCounts = data.days.map(d=>d.count);
+    draw('trend','line',labels,[{label:'Текущий', data:curCounts, tension:.35}], {plugins:{legend:{display:true}}});
+    draw('count','bar',labels,[{label:'Заказы', data:curCounts}], {plugins:{legend:{display:false}}});
 
-      statCount.textContent = res.total_orders ?? '0';
-      statAmount.textContent = (res.total_amount ?? 0).toLocaleString('ru-RU');
+    const cityLabels = data.cities.map(c=>c.city);
+    const cityCounts = data.cities.map(c=>c.count);
+    draw('cities','bar',cityLabels,[{label:'Заказы', data:cityCounts}], {plugins:{legend:{display:false}}});
 
-      KCharts.drawTrend(chartTrendCtx, res.days || []);
-      KCharts.drawCities(chartCitiesCtx, res.cities || []);
-      KCharts.renderStateBreakdown(elStateBreakdown, res.state_breakdown || []);
+    const stRows = Object.entries(data.state_breakdown).sort((a,b)=>b[1]-a[1]).map(([s,c])=>[s,c]);
+    table(document.getElementById('tbl-states'), ['State','Кол-во'], stRows);
 
-      const idsRes = await Api.orderIds({...p, limit: 20000});
-      KCharts.renderOrderIds(elOrderIds, idsRes.items || []);
+    table(document.getElementById('tbl-days'), ['Дата','Кол-во','Оборот'], data.days.map(d=>[d.x, d.count, fmt(d.amount)+' '+data.currency]));
 
-      btnCsv.href = Api.csvHref(p);
-    } finally {
-      elBtnRun.disabled = false;
-    }
+    // numbers
+    const numbers = await getIds(args);
+    const rows = numbers.items.map(it=>[it.number, it.state, it.date.replace('T',' ').slice(0,16), it.amount, it.city]);
+    table(document.getElementById('idsTable'), ['Номер','State','Дата','Сумма','Город'], rows);
+    document.getElementById('csvLink').href = buildQuery('/orders/ids.csv', args);
   }
 
-  elBtnToday.addEventListener('click', ()=>{
-    elDateField.value = 'creationDate';
-    elStart.value = todayStr(0);
-    elEnd.value = todayStr(0);
-    elUseCutoff.checked = false;
-    elLTECutoff.checked = false;
-    elStates.value = ''; elExcludeStates.value = '';
-    run();
+  // presets
+  document.querySelectorAll('.preset').forEach(btn=>{
+    btn.onclick = ()=>{
+      const mode = btn.dataset.mode;
+      document.getElementById('states').value = '';
+      document.getElementById('useCutoff').checked = false;
+      document.getElementById('end_time').value = '';
+      if (mode==='created') document.getElementById('date_field').value='creationDate';
+      if (mode==='planned') document.getElementById('date_field').value='plannedDeliveryDate';
+      if (mode==='delivered') document.getElementById('date_field').value='deliveryDate';
+      if (mode==='kaspi_pack'){
+        document.getElementById('date_field').value='plannedShipmentDate';
+        document.getElementById('states').value='KASPI_DELIVERY';
+        document.getElementById('useCutoff').checked = true;
+      }
+      run();
+    };
   });
 
-  elBtnPlanToday.addEventListener('click', ()=>{
-    elDateField.value = 'plannedDeliveryDate';
-    elStart.value = todayStr(0);
-    elEnd.value = todayStr(0);
-    elUseCutoff.checked = true;
-    elLTECutoff.checked = true;
-    elStates.value = ''; elExcludeStates.value = '';
-    run();
-  });
-
-  elBtnDelivered.addEventListener('click', ()=>{
-    elDateField.value = 'deliveryDate';
-    elStart.value = todayStr(0);
-    elEnd.value = todayStr(0);
-    elUseCutoff.checked = false;
-    elLTECutoff.checked = false;
-    elStates.value = 'COMPLETED';
-    elExcludeStates.value = '';
-    run();
-  });
-
-  elBtnPack.addEventListener('click', ()=>{
-    elDateField.value = 'plannedShipmentDate';
-    elStart.value = todayStr(0);
-    elEnd.value = todayStr(0);
-    elUseCutoff.checked = true;
-    elLTECutoff.checked = true;
-    elStates.value = 'NEW,ACCEPTED_BY_MERCHANT,DELIVERY';
-    elExcludeStates.value = 'COMPLETED,CANCELLED,DELIVERY_TRANSFERRED,RETURNED';
-    run();
-  });
-
-  elStart.value = todayStr(0);
-  elEnd.value = todayStr(0);
-
-  document.getElementById('btn-run').addEventListener('click', run);
-
-  btnCopy.addEventListener('click', async ()=>{
-    const p = params();
-    const res = await Api.orderIds({...p, limit: 50000});
-    const lines = (res.items || []).map(x => x.number).filter(Boolean).join('\n');
-    try {
-      await navigator.clipboard.writeText(lines);
-      btnCopy.textContent = 'Скопировано!';
-      setTimeout(()=>btnCopy.textContent = 'Копировать номера', 1200);
-    } catch (e) {
-      alert('Не удалось скопировать: ' + e);
-    }
-  });
-
-})();
+  document.getElementById('form').onsubmit = run;
+  run();
+}
+window.addEventListener('DOMContentLoaded', main);
