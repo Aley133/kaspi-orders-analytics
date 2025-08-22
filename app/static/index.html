@@ -101,9 +101,7 @@
 
 <script>
 const nf = new Intl.NumberFormat('ru-RU');
-
-function fmt(n){ return nf.format(Math.round((n + Number.EPSILON) * 100) / 100); }
-
+function fmt(n){ return nf.format(Math.round((Number(n) + Number.EPSILON) * 100) / 100); }
 function table(id, rows){
   const tb = document.querySelector(`#${id} tbody`);
   tb.innerHTML = '';
@@ -162,8 +160,9 @@ async function run(e){
   const data = await r.json();
 
   // KPI
+  window.APP_CURRENCY = data.currency || 'KZT';
   document.getElementById('kpiOrders').textContent = fmt(data.total_orders);
-  document.getElementById('kpiAmount').textContent = `${fmt(data.total_amount)} ${data.currency||'KZT'}`;
+  document.getElementById('kpiAmount').textContent = `${fmt(data.total_amount)} ${window.APP_CURRENCY}`;
   document.getElementById('periodLabel').textContent = `${data.range.start} → ${data.range.end}`;
 
   const cutoffEl = document.getElementById('periodCutoff');
@@ -188,7 +187,7 @@ async function run(e){
   if(entries.length===0){ sb.innerHTML = '<div class="muted">Нет данных</div>'; }
 
   // Таблица дней
-  table('tbl-days', (data.days||[]).map(d=>[d.x, d.count, `${fmt(d.amount)} ${data.currency||'KZT'}`]));
+  table('tbl-days', (data.days||[]).map(d=>[d.x, d.count, `${fmt(d.amount)} ${window.APP_CURRENCY}`]));
 
   // Топ города (Chart.js)
   const labels = (data.cities||[]).map(c=>c.city);
@@ -232,9 +231,18 @@ async function loadIds(){
   const r = await fetch(`/orders/ids?${params.toString()}`);
   if(!r.ok) throw new Error('ids failed');
   const data = await r.json();
+  const currency = data.currency || window.APP_CURRENCY || 'KZT';
 
   const container = document.getElementById('ids');
   container.innerHTML = '';
+
+  // Итоги по периоду (шт. и сумма)
+  const totalCount = (typeof data.period_total_count === 'number') ? data.period_total_count : (data.items||[]).length;
+  const totalAmount = (typeof data.period_total_amount === 'number') ? data.period_total_amount : (data.items||[]).reduce((a,it)=>a+(Number(it.amount)||0),0);
+  const summary = document.createElement('div');
+  summary.className = 'ids-summary';
+  summary.innerHTML = `<span>Итого за период:</span> <b>${fmt(totalCount)}</b><span>шт.</span> <span>·</span> <b>${fmt(totalAmount)}</b> <span>${currency}</span>`;
+  container.appendChild(summary);
 
   // Панель действий
   const bar = document.createElement('div');
@@ -263,8 +271,11 @@ async function loadIds(){
   for(const group of (data.groups || [])){
     const det = document.createElement('details');
     det.open = true;
+
+    const dayTotal = (typeof group.total_amount === 'number') ? group.total_amount : group.items.reduce((acc, it) => acc + (Number(it.amount) || 0), 0);
+
     const sum = document.createElement('summary');
-    sum.textContent = `${group.day}  —  ${group.items.length} шт.`;
+    sum.textContent = `${group.day}  —  ${group.items.length} шт. · ${fmt(dayTotal)} ${currency}`;
     det.appendChild(sum);
 
     const pre = document.createElement('pre');
