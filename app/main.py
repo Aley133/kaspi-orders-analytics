@@ -26,8 +26,6 @@ try:
 except Exception:
     from api.products import get_products_router
 
-app.include_router(get_products_router(client), prefix="/products")
-
 load_dotenv()
 
 # -------------------- ENV --------------------
