@@ -120,73 +120,77 @@ class KaspiClient:
 
     def iter_products(self, active_only: bool = True, page_size: int = 100) -> Generator[Dict, None, None]:
         """
-        Итерация по каталогу. Универсальная логика без подгонов:
-        - поддержка ENV KASPI_PRODUCTS_ENDPOINTS (через запятую), KASPI_CITY_ID, MERCHANT_ID/PARTNER_ID
-        - автоперебор популярных путей и вариантов фильтров активности
+        Универсальный autodetect каталога:
+        - ENV KASPI_PRODUCTS_ENDPOINTS (через запятую) — если задан, идёт в приоритете
+        - пробуем популярные пути, а также варианты с merchants/{merchantId}/...
+        - перебираем варианты active/active[offers]/active[products], cityId, merchantId
         """
         if page_size > 200:
             page_size = 200
 
         env_paths = [p.strip() for p in os.getenv("KASPI_PRODUCTS_ENDPOINTS", "").split(",") if p.strip()]
-        partner_id = os.getenv("MERCHANT_ID") or os.getenv("PARTNER_ID")
+        merchant_id = os.getenv("MERCHANT_ID") or os.getenv("PARTNER_ID")
         city_id = os.getenv("KASPI_CITY_ID")
 
         guessed = [
-            "merchant/products",
             "catalog/offers",
-            "offers",
             "merchant/offers",
+            "merchant/products",
+            "offers",
             "merchant/offer",
             "merchant/product-cards",
         ]
-        if partner_id:
+        if merchant_id:
             guessed += [
-                f"merchants/{partner_id}/offers",
-                f"merchants/{partner_id}/products",
-                f"merchants/{partner_id}/product-cards",
+                f"merchants/{merchant_id}/offers",
+                f"merchants/{merchant_id}/products",
+                f"merchants/{merchant_id}/product-cards",
             ]
         paths = env_paths + guessed
 
         last_err: Optional[Exception] = None
 
-        for rel in paths:
-            base_q = {"page[size]": page_size}
-            active_opts = (
-                [
-                    {"filter[products][active]": "true"},
-                    {"filter[offers][active]": "true"},
-                    {"filter[offer][active]": "true"},
-                    {"active": "true"},
-                ]
-                if active_only
-                else [{}]
-            )
-            city_opts = [{"cityId": city_id}] if city_id else [{}]
+        base_q = {"page[size]": page_size}
 
+        active_opts = (
+            [
+                {"filter[products][active]": "true"},
+                {"filter[offers][active]": "true"},
+                {"filter[offer][active]": "true"},
+                {"active": "true"},
+            ]
+            if active_only
+            else [{}]
+        )
+        city_opts = [{"cityId": city_id}] if city_id else [{}]
+        merch_opts = [{"merchantId": merchant_id}] if merchant_id else [{}]
+
+        for rel in paths:
             for aopt in active_opts:
                 for copt in city_opts:
-                    q = {**base_q, **aopt, **copt}
-                    try:
-                        any_yielded = False
-                        for raw in self._iter_jsonapi(rel, params=q):
-                            any_yielded = True
-                            yield self._wrap_product_item(raw)
-                        if any_yielded:
-                            return
-                    except httpx.HTTPStatusError as e:
-                        if e.response.status_code in (404, 403):
+                    for mopt in merch_opts:
+                        q = {**base_q, **aopt, **copt, **mopt}
+                        try:
+                            any_yielded = False
+                            for raw in self._iter_jsonapi(rel, params=q):
+                                any_yielded = True
+                                yield self._wrap_product_item(raw)
+                            if any_yielded:
+                                return
+                        except httpx.HTTPStatusError as e:
+                            if e.response.status_code in (404, 403):
+                                last_err = e
+                                continue
+                            raise
+                        except Exception as e:
                             last_err = e
                             continue
-                        raise
-                    except Exception as e:
-                        last_err = e
-                        continue
 
         if last_err:
             raise last_err
         raise RuntimeError("No known products endpoint responded")
 
-    # алиасы совместимости
+    # алиасы
     def iter_offers(self, active_only: bool = True, page_size: int = 100) -> Generator[Dict, None, None]:
         yield from self.iter_products(active_only=active_only, page_size=page_size)
 
