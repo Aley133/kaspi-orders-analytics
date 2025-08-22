@@ -1,53 +1,44 @@
-# Kaspi Orders Daily Count Service (LeoXpress, v0.2)
+# Kaspi Orders Analytics — Refactor (Cut-off mode, Themes, Order IDs CSV)
 
-Готовый к запуску сервис на **FastAPI** для магазина **LeoXpress** (Partner ID: 30295031).
-Он напрямую обращается к API Kaspi и выдаёт количество заказов по дням за указанный период.
+## Что нового
+- **Режим cut-off** (сдвиг суток): `plannedShipmentDate` ≤ `DAY_CUTOFF` с хвостами через `PACK_LOOKBACK_DAYS`
+- **Пресет "Kaspi: Упаковка (до cut-off)"** в UI
+- **Светлая/тёмная тема** (кнопка "Тема", хранится в `localStorage`)
+- **"Номера заказов (для сверки)"** — список, копирование, CSV
+- Модульная структура: `api / core / services / ui`
 
-## Установка и запуск
-
-### 1) Локально (Windows/Linux/Mac)
+## Быстрый старт
 ```bash
-python -m venv .venv && . .venv/bin/activate   # Windows: .venv\Scripts\activate
+python -m venv .venv
+source .venv/bin/activate # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
+cp .env.example .env  # заполните KASPI_TOKEN и при необходимости TZ/DAY_CUTOFF
 uvicorn app.main:app --host 0.0.0.0 --port 8899
-```
-Открой: `http://localhost:8899`
-
-### 2) Docker
-```bash
-docker build -t kaspi-orders:0.2 .
-docker run --rm -p 8899:8899 --env-file .env kaspi-orders:0.2
+# UI: http://localhost:8899/ui/
 ```
 
-### 3) Быстрые скрипты
-- Windows PowerShell: `./run_win.ps1` (если ругается политика – запусти PowerShell «Запуск от имени администратора» и `Set-ExecutionPolicy Bypass -Scope Process`)
-- Linux/Mac: `./run_unix.sh`
-
-## Проверка
-- `GET /health` — простой ping сервиса.
-- `GET /diagnostics/ping-kaspi` — реальный запрос в Kaspi (1 страница, последние 30 дней).
-- `GET /orders/daily-count?start=YYYY-MM-DD&end=YYYY-MM-DD[&state=NEW][&tz=Asia/Almaty]` — данные по дням.
-
-Примеры:
-```bash
-curl "http://localhost:8899/health"
-curl "http://localhost:8899/diagnostics/ping-kaspi"
-curl "http://localhost:8899/orders/daily-count?start=2025-08-01&end=2025-08-19"
-curl "http://localhost:8899/orders/daily-count?start=2025-08-01&end=2025-08-19&state=NEW"
+## .env
+```
+KASPI_TOKEN=...
+TZ=Asia/Almaty
+DAY_CUTOFF=20:00
+PACK_LOOKBACK_DAYS=3
+AMOUNT_FIELDS=totalPrice
+AMOUNT_DIVISOR=1
+CHUNK_DAYS=7
+DATE_FIELD_DEFAULT=creationDate
+DATE_FIELD_OPTIONS=creationDate,plannedShipmentDate,plannedDeliveryDate,shipmentDate,deliveryDate
+HOST=0.0.0.0
+PORT=8899
+DEBUG=true
 ```
 
-## Интерфейс
-Главная страница `http://localhost:8899/` — простая форма: выбираешь период и, при желании, state. Результат отображается в таблице сразу из браузера.
+## Presets
+- **Пришло сегодня**: `creationDate`, [сегодня…сегодня]
+- **План на сегодня**: `plannedDeliveryDate`, ≤ cut-off
+- **Доставлено**: `deliveryDate`, state=`COMPLETED`
+- **Kaspi: Упаковка (до cut-off)**: `plannedShipmentDate`, `use_cutoff_window=true`, `lte_cutoff_only=true`, states в работе (`NEW,ACCEPTED_BY_MERCHANT,DELIVERY`), исключены `COMPLETED,CANCELLED,DELIVERY_TRANSFERRED,RETURNED`
 
-## Переменные окружения
-- `KASPI_TOKEN` — токен магазина (уже проставлен).
-- `PORT` — порт (по умолчанию 8899).
-- `TZ` — таймзона (по умолчанию Asia/Almaty).
-- `DEFAULT_STATES` — список разрешённых состояний, например `NEW,PICKUP`.
-- `CACHE_TTL` — TTL кэша (сек).
-- `PARTNER_ID`, `SHOP_NAME` — метаданные (для `/meta`).
-
-## Примечания
-- Пагинация: до 100 на страницу, сервис пройдёт все страницы.
-- Ретраи: на 429/5xx и сетевые ошибки.
-- Таймзона: агрегация по дням в заданной таймзоне.
+> Примечание по API Kaspi: параметры фильтра по датам могут отличаться в разных аккаунтах/версиях.
+> В `app/core/kaspi.py` используется вид `filter[{date_field}][ge/le]` и пагинация `page[number]/page[size]`.
+> Если ваш контракт другой — адаптируйте ключи в одном месте.
