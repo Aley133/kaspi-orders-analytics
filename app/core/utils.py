@@ -1,6 +1,8 @@
-from datetime import datetime, timedelta, time
-from dateutil import tz, parser
+from __future__ import annotations
+from datetime import datetime, time, timedelta
 from typing import Optional, Dict, Any
+import pytz
+
 from .config import settings
 
 def parse_hhmm(s: Optional[str]) -> Optional[time]:
@@ -9,40 +11,70 @@ def parse_hhmm(s: Optional[str]) -> Optional[time]:
     hh, mm = s.split(":")
     return time(int(hh), int(mm))
 
-def get_tz(tz_name: str):
-    return tz.gettz(tz_name) or tz.gettz(settings.TZ)
+def tz_localize(dt: datetime, tzname: str) -> datetime:
+    tzinfo = pytz.timezone(tzname)
+    if dt.tzinfo is None:
+        return tzinfo.localize(dt)
+    return dt.astimezone(tzinfo)
 
-def date_range_with_cutoff(start: str, end: str, tz_name: str, cutoff: str, use_cutoff_window: bool, lte_cutoff_only: bool, lookback_days: int):
-    tzinfo = get_tz(tz_name)
-    start_dt = datetime.fromisoformat(start).replace(tzinfo=tzinfo)
-    end_dt = datetime.fromisoformat(end).replace(tzinfo=tzinfo)
-    cutoff_t = parse_hhmm(cutoff) or time(20, 0)
-
-    if use_cutoff_window:
-        start_dt = start_dt - timedelta(days=max(0, lookback_days))
-    return start_dt, end_dt, cutoff_t
-
-def ms(dt: datetime) -> int:
-    return int(dt.timestamp() * 1000)
-
-def normalize_amount(order: Dict[str, Any]) -> float:
-    total = 0
-    for f in settings.amount_fields:
-        v = order.get(f)
-        if isinstance(v, (int, float)):
-            total += v
-    return float(total) / max(1, settings.AMOUNT_DIVISOR)
-
-def pick_city(order: Dict[str, Any]) -> str:
-    return order.get("city", "") or order.get("deliveryAddressCity", "") or order.get("customerCity", "") or ""
-
-def pick_date(order: Dict[str, Any], field: str):
-    v = order.get(field)
-    if v is None:
+def extract_ms(x: Any) -> Optional[int]:
+    if x is None:
         return None
-    if isinstance(v, (int, float)):
-        return datetime.fromtimestamp(float(v)/1000.0, tz=get_tz(settings.TZ))
+    if isinstance(x, (int, float)):
+        return int(x)  # assume ms
     try:
-        return parser.isoparse(str(v)).astimezone(get_tz(settings.TZ))
+        return int(datetime.fromisoformat(str(x)).timestamp()*1000)
     except Exception:
         return None
+
+def extract_amount(order: Dict[str, Any]) -> float:
+    total = 0.0
+    for f in settings.AMOUNT_FIELDS:
+        v = order.get(f)
+        if isinstance(v, (int, float)):
+            total += float(v)
+    return total / max(1.0, float(settings.AMOUNT_DIVISOR))
+
+def extract_city(order: Dict[str, Any]) -> str:
+    for k in ("city","deliveryAddressCity","customerCity"):
+        v = order.get(k)
+        if v:
+            return str(v)
+    return ""
+
+def norm_state(v: Optional[str]) -> str:
+    return (v or "").upper().strip()
+
+def parse_states_csv(s: Optional[str]) -> set:
+    if not s:
+        return set()
+    return {norm_state(x) for x in s.split(",") if x.strip()}
+
+def apply_hhmm(dt: datetime, start_h: Optional[time], end_h: Optional[time]) -> bool:
+    if not start_h and not end_h:
+        return True
+    t = dt.timetz()
+    if start_h and (t.hour, t.minute) < (start_h.hour, start_h.minute):
+        return False
+    if end_h and (t.hour, t.minute) > (end_h.hour, end_h.minute):
+        return False
+    return True
+
+def cutoff_range(start: str, end: str, tzname: str, cutoff: str, lookback_days: int):
+    tzinfo = pytz.timezone(tzname)
+    start_dt = tzinfo.localize(datetime.fromisoformat(start))
+    end_dt = tzinfo.localize(datetime.fromisoformat(end))
+    start_dt = start_dt - timedelta(days=max(0, lookback_days))
+    return start_dt, end_dt, parse_hhmm(cutoff)
+
+def guess_order_number(o: Dict[str, Any]) -> str:
+    for k in ("number","code","orderNumber"):
+        v = o.get(k)
+        if v:
+            return str(v)
+    attrs = o.get("attributes") or {}
+    for k in ("code","number","orderNumber"):
+        v = attrs.get(k)
+        if v:
+            return str(v)
+    return str(o.get("id") or "")
