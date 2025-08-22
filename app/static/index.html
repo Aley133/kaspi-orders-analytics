@@ -33,7 +33,7 @@
 <button class="btn preset" data-mode="created">Пришло сегодня</button>
 <button class="btn preset" data-mode="planned">План на сегодня</button>
 <button class="btn preset" data-mode="delivered">Доставлено сегодня</button>
-<button class="btn preset" data-mode="kaspi_pack">Kaspi: Упаковка (до 20:00)</button>
+<button class="btn preset" data-mode="kaspi_pack">Kaspi: Упаковка (до <span id="periodCutoff">—:—</span>)</button>
 </div>
 <button class="btn theme-toggle" id="themeToggle" type="button">🌓 Тема</button></header>
 <form class="controls" id="f">
@@ -148,10 +148,74 @@ function buildQuery(base){
   return base + q;
 }
 
+
 async function loadIds(){
-  const url = buildQuery('/orders/ids?');
-  const r = await fetch(url); const t = await r.text(); let data;
-  try{ data = JSON.parse(t);} catch{ alert(t); return; }
+  const start = document.getElementById('start').value;
+  const end = document.getElementById('end').value;
+  const tz = document.getElementById('tz').value || 'Asia/Almaty';
+  const date_field = document.getElementById('date_field').value;
+  const states = document.getElementById('states').value;
+  const exc = document.getElementById('exclude_states').checked ? 'CANCELED' : '';
+  const use_bd = document.getElementById('use_bd')?.checked ? '1' : '0';
+  const bd_start = document.getElementById('bd_start')?.value || '';
+  const order = 'asc';
+  const params = new URLSearchParams();
+  params.set('start', start); params.set('end', end); params.set('tz', tz);
+  params.set('date_field', date_field); if(states) params.set('states', states);
+  if(exc) params.set('exclude_states', exc);
+  params.set('use_bd', use_bd); if(bd_start) params.set('business_day_start', bd_start);
+  params.set('order', order); params.set('grouped', '1'); params.set('limit', '100000');
+  const r = await fetch(`/orders/ids?${params.toString()}`);
+  if(!r.ok) throw new Error('ids failed');
+  const data = await r.json();
+
+  const container = document.getElementById('ids');
+  container.innerHTML = '';
+  // controls
+  const bar = document.createElement('div');
+  bar.style.display='flex'; bar.style.gap='8px'; bar.style.justifyContent='flex-end'; bar.style.marginBottom='8px';
+
+  const btnCopy = document.createElement('button'); btnCopy.className='btn'; btnCopy.textContent='Скопировать номера';
+  btnCopy.onclick = () => {
+    const all = data.items.map(it=>it.number).join('
+');
+    navigator.clipboard.writeText(all);
+  };
+  const btnCsv = document.createElement('a'); btnCsv.className='btn'; btnCsv.textContent='Скачать CSV';
+  const csvParams = new URLSearchParams(params); csvParams.delete('grouped'); csvParams.set('limit','100000');
+  btnCsv.href = `/orders/ids.csv?${csvParams.toString()}`; btnCsv.setAttribute('download','ids.csv');
+
+  const btnExpand = document.createElement('button'); btnExpand.className='btn'; btnExpand.textContent='Раскрыть всё';
+  const btnCollapse = document.createElement('button'); btnCollapse.className='btn'; btnCollapse.textContent='Свернуть всё';
+
+  bar.appendChild(btnCopy); bar.appendChild(btnCsv); bar.appendChild(btnExpand); bar.appendChild(btnCollapse);
+  container.appendChild(bar);
+
+  const wrapper = document.createElement('div');
+  wrapper.className='ids-groups';
+  container.appendChild(wrapper);
+
+  const detailsList = [];
+  for(const group of (data.groups || [])){
+    const det = document.createElement('details');
+    det.open = true;
+    const sum = document.createElement('summary');
+    sum.textContent = `${group.day}  —  ${group.items.length} шт.`;
+    det.appendChild(sum);
+
+    const pre = document.createElement('pre');
+    pre.style.whiteSpace='pre-wrap';
+    pre.textContent = group.items.map(it=>`${it.number}	${it.state}	${it.date.slice(0,16).replace('T',' ')}	${it.amount}`).join('
+');
+    det.appendChild(pre);
+
+    detailsList.push(det);
+    wrapper.appendChild(det);
+  }
+
+  btnExpand.onclick = ()=> detailsList.forEach(d=>d.open=true);
+  btnCollapse.onclick = ()=> detailsList.forEach(d=>d.open=false);
+}
   const rows = data.items.map(it => [it.number, it.state, it.date.replace('T',' ').slice(0,16), it.amount, it.city]);
   table('idsTable', ['Номер','State','Дата','Сумма','Город'], rows);
   const csvHref = buildQuery('/orders/ids.csv?');
@@ -180,14 +244,16 @@ async function run(e){
   draw('trend','line',labels,[{label:'Текущий', data:curCounts, tension:.35},{label:'Предыдущий', data:prevCounts, borderDash:[4,4], tension:.35}], {plugins:{legend:{display:true}}});
   draw('count','bar',labels,[{label:'Заказы', data:curCounts}], {plugins:{legend:{display:false}}});
 
-  const cityLabels = data.cities.map(c=>c.city);
-  const cityCounts = data.cities.map(c=>c.count);
+  const cityLabels = (data.cities||[]).map(c=>c.city);
+  const cityCounts = (data.cities||[]).map(c=>c.count);
   draw('cities','bar',cityLabels,[{label:'Заказы', data:cityCounts}], {plugins:{legend:{display:false}}, scales:{x:{ticks:{autoSkip:true,maxTicksLimit:12}}}});
 
   const stRows = Object.entries(data.state_breakdown).sort((a,b)=>b[1]-a[1]).map(([s,c])=>[s,c]);
   table('tbl-states', ['State','Кол-во'], stRows);
 
   table('tbl-days', ['Дата','Кол-во','Оборот'], data.days.map(d=>[d.x, d.count, fmt(d.amount)+' '+data.currency]));
+  const cutoffEl = document.getElementById('periodCutoff');
+  if(cutoffEl){ const use_bd = document.getElementById('use_bd')?.checked; const bd_start = document.getElementById('bd_start')?.value || '20:00'; cutoffEl.textContent = use_bd?bd_start:(document.getElementById('end_time').value||'24:00'); }
 
   await loadIds();
   const use_bd = document.getElementById('use_bd')?.checked;

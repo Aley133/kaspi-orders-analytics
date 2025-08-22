@@ -49,3 +49,8 @@ td.r,th.r{text-align:right}
 .nav-item:hover{filter:brightness(0.98)}
 .content{padding:12px 20px}
 .shell{max-width:none;margin:0;padding:0 10px}
+
+/* IDs groups */
+.ids-groups details{border:1px solid var(--border); border-radius:10px; background:var(--card); margin-bottom:8px; padding:8px 12px}
+.ids-groups summary{cursor:pointer; font-weight:600; color:var(--fg)}
+.ids-groups pre{margin:8px 0 0 0}
