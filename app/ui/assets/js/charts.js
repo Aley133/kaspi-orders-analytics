@@ -1,68 +1,11 @@
-let chartTrend = null;
-let chartCities = null;
-
-function drawTrend(ctx, days){
-  if(chartTrend){ chartTrend.destroy(); }
-  const labels = days.map(d=>d.x);
-  const counts = days.map(d=>d.count);
-  const amounts = days.map(d=>d.amount);
-  chartTrend = new Chart(ctx, {
-    type: 'line',
-    data: {
-      labels,
-      datasets: [
-        { label: 'Заказы', data: counts },
-        { label: 'Сумма', data: amounts }
-      ]
-    },
-    options: { responsive: true, maintainAspectRatio: false }
-  });
+let charts = {};
+export function draw(id, type, labels, series, extra={}){
+  if (charts[id]) charts[id].destroy();
+  const ctx = document.getElementById(id).getContext('2d');
+  charts[id] = new Chart(ctx, { type, data:{ labels, datasets:series }, options:{ responsive:true, maintainAspectRatio:false, plugins:{legend:{display:true}}, ...extra } });
 }
-
-function drawCities(ctx, rows){
-  if(chartCities){ chartCities.destroy(); }
-  const top = rows.slice(0,15);
-  chartCities = new Chart(ctx, {
-    type: 'bar',
-    data: {
-      labels: top.map(r=>r.city),
-      datasets: [
-        { label: 'Сумма', data: top.map(r=>r.amount) },
-        { label: 'Количество', data: top.map(r=>r.count) }
-      ]
-    },
-    options: { indexAxis: 'y', responsive: true, maintainAspectRatio: false }
-  });
+export function table(el, headers, rows){
+  const thead = `<thead><tr>${headers.map(h=>`<th>${h}</th>`).join('')}</tr></thead>`;
+  const tbody = `<tbody>${rows.map(r=>`<tr>${r.map((c,i)=>`<td class="${i===r.length-1?'r':''}">${c}</td>`).join('')}</tr>`).join('')}</tbody>`;
+  el.innerHTML = `<table>${thead}${tbody}</table>`;
 }
-
-function renderStateBreakdown(el, list){
-  el.innerHTML = '';
-  const table = document.createElement('table');
-  const thead = document.createElement('thead');
-  thead.innerHTML = '<tr><th>State</th><th>Count</th></tr>';
-  const tbody = document.createElement('tbody');
-  list.forEach(r=>{
-    const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${r.state}</td><td>${r.count}</td>`;
-    tbody.appendChild(tr);
-  });
-  table.appendChild(thead); table.appendChild(tbody);
-  el.appendChild(table);
-}
-
-function renderOrderIds(el, items){
-  el.innerHTML = '';
-  const table = document.createElement('table');
-  const thead = document.createElement('thead');
-  thead.innerHTML = '<tr><th>#</th><th>number</th><th>state</th><th>date</th><th>amount</th><th>city</th></tr>';
-  const tbody = document.createElement('tbody');
-  items.forEach((it, i)=>{
-    const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${i+1}</td><td>${it.number||''}</td><td>${it.state||''}</td><td>${it.date||''}</td><td>${it.amount||''}</td><td>${it.city||''}</td>`;
-    tbody.appendChild(tr);
-  });
-  table.appendChild(thead); table.appendChild(tbody);
-  el.appendChild(table);
-}
-
-window.KCharts = { drawTrend, drawCities, renderStateBreakdown, renderOrderIds };
