@@ -21,6 +21,11 @@ try:
 except Exception:  # pragma: no cover
     from kaspi_client import KaspiClient  # type: ignore
 
+try:
+    from .api.products import get_products_router
+except Exception:
+    from api.products import get_products_router
+
 load_dotenv()
 
 # -------------------- ENV --------------------
@@ -62,6 +67,8 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 client = KaspiClient(token=KASPI_TOKEN) if KASPI_TOKEN else None
 orders_cache = TTLCache(maxsize=128, ttl=CACHE_TTL)
+
+app.include_router(get_products_router(client), prefix="/products")
 
 # -------------------- Utils --------------------
 def tzinfo_of(name: str) -> pytz.BaseTzInfo:
