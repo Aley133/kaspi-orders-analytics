@@ -27,6 +27,11 @@ class KaspiClient:
             resp.raise_for_status()
             return resp.json()
 
+    def iter_products(self, active_only: bool = True):
+        if False:
+            yield  # заглушка-генератор
+        return
+
     @staticmethod
     def _to_ms(dt: datetime) -> int:
         if dt.tzinfo is None:
