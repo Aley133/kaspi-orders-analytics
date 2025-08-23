@@ -36,6 +36,8 @@
             <label>Поиск</label>
             <input type="text" id="search" placeholder="Название или код...">
             <button class="btn" id="btnLoad">Загрузить</button>
+            <label class="btn" for="fileInput">Импорт из файла (XML/XLSX)</label>
+            <input type="file" id="fileInput" accept=".xml,.xlsx,.xls" style="display:none">
             <button class="btn" id="btnExport">Экспорт CSV (из таблицы)</button>
           </div>
         </div>
@@ -166,9 +168,25 @@ function exportCsvFromTable(){
   document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
 }
 
+async function uploadManual(file){
+  const fd = new FormData();
+  fd.append('file', file);
+  const res = await fetch('/products/manual-upload', { method: 'POST', body: fd });
+  if(!res.ok){
+    const err = await res.json().catch(()=>({}));
+    throw new Error(err.detail || ('HTTP '+res.status));
+  }
+  const data = await res.json();
+  renderTable(data.items || []);
+  const note = document.getElementById('note');
+  if(note){ note.textContent = `Файл загружен: ${file.name}. Позиций: ${data.count||0}`; }
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('btnLoad').addEventListener('click', loadProducts);
   document.getElementById('btnExport').addEventListener('click', exportCsvFromTable);
+  const fi = document.getElementById('fileInput');
+  fi.addEventListener('change', async ()=>{ if(fi.files && fi.files[0]){ try{ await uploadManual(fi.files[0]); } catch(e){ alert('Ошибка: '+e.message); } fi.value=''; }});
   const t = document.getElementById('themeToggle');
   if(t){ t.addEventListener('change', (e)=> document.body.setAttribute('data-theme', e.target.checked ? 'dark' : 'light')); }
   loadProducts();
