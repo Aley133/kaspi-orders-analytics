@@ -12,13 +12,16 @@ except Exception:  # pragma: no cover
     _OPENPYXL_AVAILABLE = False
 
 try:
-    from ..kaspi_client import ProductStock, normalize_row  # type: ignore
+    from app.kaspi_client import ProductStock, normalize_row  # type: ignore
 except Exception:
     try:
-        from kaspi_client import ProductStock, normalize_row  # type: ignore
+        from ..kaspi_client import ProductStock, normalize_row  # type: ignore
     except Exception:
-        ProductStock = None
-        normalize_row = None  # will fallback
+        try:
+            from kaspi_client import ProductStock, normalize_row  # type: ignore
+        except Exception:
+            ProductStock = None
+            normalize_row = None  # will fallback
 
 def _parse_xml(content: bytes):
     try:
@@ -61,9 +64,12 @@ def _parse_excel(file):
 
 
 try:
-    from ..kaspi_client import KaspiClient  # type: ignore
+    from app.kaspi_client import KaspiClient  # type: ignore
 except Exception:  # pragma: no cover
-    from kaspi_client import KaspiClient  # type: ignore
+    try:
+        from ..kaspi_client import KaspiClient  # type: ignore
+    except Exception:
+        from kaspi_client import KaspiClient  # type: ignore
 
 
 def _pick(attrs: Dict[str, Any], *keys: str) -> str:
@@ -233,4 +239,30 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
         except Exception as e:
             return JSONResponse({"attempts": [], "error": str(e)})
 
-    return router
+    
+    @router.post("/manual-upload")
+    async def manual_upload(file: UploadFile = File(...)):
+        """Ручная загрузка выгрузки Kaspi (XML или Excel .xlsx/.xls).
+        Возвращает нормализованный список товаров под текущую таблицу."""
+        filename = (file.filename or "").lower()
+        content = await file.read()
+
+        if filename.endswith(".xml"):
+            raw_rows = _parse_xml(content)
+        elif filename.endswith(".xlsx") or filename.endswith(".xls"):
+            file.file = io.BytesIO(content)  # реиспользуем буфер
+            raw_rows = _parse_excel(file)
+        else:
+            raise HTTPException(status_code=400, detail="Поддерживаются только XML или Excel (.xlsx/.xls).")
+
+        normalized = []
+        for r in raw_rows:
+            if normalize_row:
+                ps = normalize_row(r)
+                normalized.append(ps.to_dict())
+            else:
+                normalized.append(r)
+
+        normalized.sort(key=lambda x: (x.get("name") or x.get("Name") or '').lower())
+        return JSONResponse({ "count": len(normalized), "items": normalized })
+return router
