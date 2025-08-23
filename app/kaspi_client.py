@@ -4,9 +4,13 @@ from typing import Dict, Generator, Optional, Any, List, Iterable
 import os
 import httpx
 from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
+from __future__ import annotations
+from typing import List, Dict, Any, Optional
+from io import BytesIO
+import xml.etree.ElementTree as ET
 
 DEFAULT_BASE_URL = "https://kaspi.kz/shop/api/v2"
-
+KASPI_NS = {"k": "kaspiShopping"}  # в ваших XML <kaspi_catalog xmlns="kaspiShopping"> ...
 
 class KaspiClient:
     def __init__(
@@ -28,6 +32,64 @@ class KaspiClient:
             connect=timeout_connect, read=timeout_read, write=timeout_read, pool=timeout_read
         )
 
+def parse_kaspi_catalog_xml(xml_bytes: bytes) -> List[Dict[str, Any]]:
+    """
+    Парсит выгрузку kaspi_catalog XML в плоский список товаров.
+    Поля: sku, model, brand, stock, price, storeId, cityId
+    Значения по умолчанию: None/0, если узел отсутствует.
+    """
+    try:
+        tree = ET.parse(BytesIO(xml_bytes))
+        root = tree.getroot()
+    except ET.ParseError as e:
+        raise ValueError(f"Некорректный XML: {e}")
+
+    items: List[Dict[str, Any]] = []
+
+    # <offers><offer ...>
+    # пример вашей структуры: sku в атрибуте offer, model/brand как ноды,
+    # stockCount в <availabilities>/<availability>, цена в <cityprices>/<cityprice>
+    for offer in root.findall("k:offers/k:offer", KASPI_NS):
+        sku = offer.get("sku")
+        model = (offer.findtext("k:model", default="", namespaces=KASPI_NS) or "").strip()
+        brand = (offer.findtext("k:brand", default="", namespaces=KASPI_NS) or "").strip()
+
+        # stock
+        stock = 0.0
+        store_id: Optional[str] = None
+        availability = offer.find("k:availabilities/k:availability", KASPI_NS)
+        if availability is not None:
+            stock_str = availability.get("stockCount")
+            try:
+                stock = float(stock_str) if stock_str is not None else 0.0
+            except ValueError:
+                stock = 0.0
+            store_id = availability.get("storeId")
+
+        # price (берём первый cityprice)
+        price = None
+        city_id = None
+        cityprice = offer.find("k:cityprices/k:cityprice", KASPI_NS)
+        if cityprice is not None:
+            city_id = cityprice.get("cityId")
+            txt = (cityprice.text or "").strip()
+            try:
+                price = float(txt) if txt else None
+            except ValueError:
+                price = None
+
+        items.append({
+            "sku": sku,
+            "model": model or None,
+            "brand": brand or None,
+            "stock": stock,
+            "price": price,
+            "storeId": store_id,
+            "cityId": city_id,
+        })
+
+    return items
+    
     # ---------- base urls ----------
     def _base_urls(self) -> List[str]:
         # 1) явный список из .env (KASPI_BASE_URLS, через запятую)
