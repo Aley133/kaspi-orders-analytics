@@ -333,12 +333,13 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
 
         normalized = []
         for r in raw_rows:
-            if normalize_row:
-                ps = normalize_row(r)
+            try:
+                ps = normalize_row(r)  # -> ProductStock
                 normalized.append(ps.to_dict())
-            else:
+            except Exception:
                 normalized.append(r)
 
-        normalized.sort(key=lambda x: (x.get("name") or x.get("Name") or '').lower())
-        return JSONResponse({ "count": len(normalized), "items": normalized })
-return router
+        normalized.sort(key=lambda x: (x.get("name") or x.get("model") or x.get("Name") or '').lower())
+        return JSONResponse({"count": len(normalized), "items": normalized})
+
+    return router
