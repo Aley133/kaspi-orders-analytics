@@ -15,16 +15,30 @@ from pydantic import BaseModel
 from cachetools import TTLCache
 from httpx import HTTPStatusError, RequestError
 
-# --- Kaspi client import (relative/absolute) ---
+# --- Kaspi client import (robust) ---
 try:
-    from .kaspi_client import KaspiClient  # type: ignore
-except Exception:  # pragma: no cover
-    from kaspi_client import KaspiClient  # type: ignore
-
-try:
-    from .api.products import get_products_router
+    # абсолютный импорт, когда запускаем как пакет: uvicorn app.main:app
+    from app.kaspi_client import KaspiClient  # type: ignore
 except Exception:
-    from api.products import get_products_router
+    try:
+        # относительный импорт, если интерпретатор уже внутри пакета app
+        from .kaspi_client import KaspiClient  # type: ignore
+    except Exception:  # pragma: no cover
+        # крайний случай (скриптовый запуск из app/)
+        from kaspi_client import KaspiClient  # type: ignore
+
+# --- products router import (robust, без маскирующего fallback на `api`) ---
+try:
+    from app.api.products import get_products_router
+except Exception as _e1:
+    try:
+        from .api.products import get_products_router
+    except Exception as _e2:
+        # Не уходим в `from api.products ...`, чтобы не маскировать реальную ошибку импорта
+        import traceback
+        print("Failed to import app.api.products:", repr(_e1), "| secondary:", repr(_e2))
+        traceback.print_exc()
+        raise
 
 load_dotenv()
 
