@@ -23,26 +23,102 @@ except Exception:
             ProductStock = None
             normalize_row = None  # will fallback
 
-def _parse_xml(content: bytes):
+def _parse_xml(content: bytes) -> List[Dict[str, Any]]:
+    """
+    Поддержка Kaspi XML c namespace (xmlns="kaspiShopping").
+    Берём:
+      - sku из атрибута <offer sku="...">
+      - name из <model>
+      - brand из <brand>
+      - quantity из атрибута stockCount в <availabilities>/<availability>
+      - price из текста первого <cityprices>/<cityprice>
+    """
     try:
         root = ET.fromstring(content)
     except ET.ParseError as e:
         raise HTTPException(status_code=400, detail=f"Некорректный XML: {e}")
-    rows = []
-    offers = root.findall(".//offer") or root.findall(".//item") or root.findall(".//product")
+
+    # Определяем дефолтный namespace, если он есть
+    ns = ""
+    if root.tag.startswith("{"):
+        ns = root.tag[1:root.tag.find("}")]
+
+    def q(tag: str) -> str:
+        # поиск с учётом ns
+        return f".//{{{ns}}}{tag}" if ns else f".//{tag}"
+
+    # Ищем офферы
+    offers = root.findall(q("offer"))
+    if not offers:
+        # запасной путь — на всякий случай
+        offers = root.findall(".//offer")
+
+    rows: List[Dict[str, Any]] = []
     for off in offers:
-        row = {}
-        # attributes
-        for attr in ("id","available","shop-sku","sku","offerid","code"):
-            if off.get(attr) is not None:
-                row[attr] = off.get(attr)
-        # common child tags
-        for tag in ["vendorCode","barcode","price","name","title","model",
-                    "quantity","qty","category","vendor","brand"]:
-            el = off.find(tag)
+        row: Dict[str, Any] = {}
+
+        # Атрибуты offer (sku, id и т.п.)
+        for attr in ("id", "available", "shop-sku", "sku", "offerid", "code"):
+            v = off.get(attr)
+            if v is not None:
+                row[attr] = v
+
+        # Простые дочерние теги (с ns и без — на всякий случай)
+        def grab_text(tag: str) -> Optional[str]:
+            el = off.find(q(tag)) or off.find(tag)
             if el is not None and (el.text or "").strip():
-                row[tag] = (el.text or "").strip()
+                return (el.text or "").strip()
+            return None
+
+        # Название
+        model = grab_text("model")
+        if model:
+            row["model"] = model
+            row["name"] = model  # нормализатор использует name
+
+        # Бренд
+        brand = grab_text("brand")
+        if brand:
+            row["brand"] = brand
+            row["vendor"] = brand  # нормализатор понимает vendor/brand
+
+        # Остаток: <availabilities>/<availability stockCount="...">
+        availability = (
+            off.find(q("availability"))
+            or (off.find(q("availabilities")) and off.find(q("availabilities")).find(q("availability")))
+            or off.find(".//availability")
+        )
+        if availability is not None:
+            sc = availability.get("stockCount") or availability.get("stockcount")
+            if sc:
+                row["quantity"] = sc  # нормализатор понимает quantity/qty/остаток/stock
+            av = availability.get("available")
+            if av is not None:
+                row["available"] = av
+
+        # Цена: берём первый <cityprices>/<cityprice>
+        cityprice = (
+            off.find(q("cityprice"))
+            or (off.find(q("cityprices")) and off.find(q("cityprices")).find(q("cityprice")))
+        )
+        if cityprice is None:
+            # полный обход на всякий случай
+            cps = off.findall(q("cityprice")) or off.findall(".//cityprice")
+            cityprice = cps[0] if cps else None
+        if cityprice is not None and (cityprice.text or "").strip():
+            row["price"] = (cityprice.text or "").strip()
+
+        # Доп. стандартные теги, если вдруг есть
+        for tag in ["vendorCode", "barcode", "title", "quantity", "qty", "category", "price"]:
+            v = grab_text(tag)
+            if v is not None:
+                row[tag] = v
+
+        if not row.get("name"):
+            row["name"] = row.get("sku") or row.get("model") or "Без названия"
+
         rows.append(row)
+
     return rows
 
 def _parse_excel(file):
@@ -265,4 +341,4 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
 
         normalized.sort(key=lambda x: (x.get("name") or x.get("Name") or '').lower())
         return JSONResponse({ "count": len(normalized), "items": normalized })
-    return router
+return router
