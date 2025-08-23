@@ -321,3 +321,56 @@ class KaspiClient:
                                     })
         results.sort(key=lambda x: (not x["ok"], -(x.get("count") or 0)))
         return results
+
+# ---- Manual Upload Helpers: ProductStock model + normalize_row ----
+from dataclasses import dataclass, asdict
+from typing import Optional, Dict, Any
+
+@dataclass
+class ProductStock:
+    sku: str
+    name: str
+    qty: Optional[float] = None
+    price: Optional[float] = None
+    category: Optional[str] = None
+    barcode: Optional[str] = None
+    vendor: Optional[str] = None
+    extra: Optional[Dict[str, Any]] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        d = asdict(self)
+        return {k: v for k, v in d.items() if v not in (None, "", [], {})}
+
+def normalize_row(row: Dict[str, Any]) -> ProductStock:
+    def key(x: str) -> str:
+        return str(x).strip().lower()
+    lowered = {key(k): v for k, v in row.items()}
+
+    def pick(*names, default=None):
+        for n in names:
+            if n in lowered and lowered[n] not in ("", None):
+                return lowered[n]
+        return default
+
+    sku = str(pick("sku", "vendorcode", "code", "артикул", "код", "id", "offerid", "shop-sku", default="")).strip()
+    name = str(pick("name", "title", "model", "наименование", "товар", "itemname", default="")).strip()
+
+    def to_float(x):
+        if x is None: return None
+        try: return float(str(x).replace(" ", "").replace(",", "."))
+        except Exception: return None
+
+    qty = to_float(pick("qty","quantity","остаток","stock","количество"))
+    price = to_float(pick("price","цена","cost","amount","pricekzt"))
+    category = pick("category","категория")
+    barcode = str(pick("barcode","штрихкод","ean","ean13","ean-13", default="") or "").strip()
+    vendor = pick("vendor","brand","производитель")
+
+    extra = {k: v for k, v in row.items() if str(k).lower() not in {"sku","name","qty","price","barcode","category","vendor"}}
+    return ProductStock(
+        sku=sku or name or "unknown",
+        name=name or sku or "Без названия",
+        qty=qty, price=price, category=category,
+        barcode=barcode or None, vendor=vendor,
+        extra=extra or None,
+    )
