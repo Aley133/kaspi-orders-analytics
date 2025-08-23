@@ -560,7 +560,7 @@ except NameError:
 
 if stock_router is not None:
     # готовый router с внутренними префиксами
-# (disabled: moved to tail) app.include_router(stock_router)
+app.include_router(stock_router)
 elif get_products_router is not None:
     # режим совместимости со старым кодом
     try:
