@@ -22,8 +22,7 @@ except Exception:  # pragma: no cover
     from kaspi_client import KaspiClient  # type: ignore
 from app.api.products import router as stock_router
 import sys
-app.include_router(stock_router)
-
+# (moved) app.include_router(stock_router)
 # --- Stock router import (safe) ---
 # 1) Пытаемся импортировать готовый router
 stock_router = None
@@ -97,13 +96,13 @@ except Exception:
 
 if stock_router is not None:
     # наш актуальный путь — готовый router c префиксами внутри
-    app.include_router(stock_router)
+# (moved) app.include_router(stock_router)
 elif get_products_router is not None:
     # режим совместимости со старым кодом
     try:
-        app.include_router(get_products_router(client), prefix="/products")
+# (moved)         app.include_router(get_products_router(client), prefix="/products")
     except Exception:
-        app.include_router(get_products_router(None), prefix="/products")
+# (moved)         app.include_router(get_products_router(None), prefix="/products")
 else:
     # ничего не рушим — просто пишем в лог
     print(
@@ -116,7 +115,7 @@ else:
 client = KaspiClient(token=KASPI_TOKEN, base_url=KASPI_BASE_URL) if KASPI_TOKEN else None
 orders_cache = TTLCache(maxsize=128, ttl=CACHE_TTL)
 # (disabled by patch) 
-app.include_router(get_products_router(client), prefix="/products")
+# (moved) app.include_router(get_products_router(client), prefix="/products")
 
 # -------------------- Utils --------------------
 def tzinfo_of(name: str) -> pytz.BaseTzInfo:
@@ -550,3 +549,24 @@ async def root():
 
 # Статика UI
 app.mount("/ui", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static"), html=True), name="static")
+
+
+# ===== Router include (guaranteed after app init) =====
+try:
+    _kaspi_client_ok = bool(KASPI_TOKEN)
+except Exception:
+    _kaspi_client_ok = False
+
+if 'app' in globals():
+    if stock_router is not None:
+        # готовый router с внутренними префиксами
+        app.include_router(stock_router)
+    elif get_products_router is not None:
+        try:
+            app.include_router(get_products_router(client), prefix="/products")
+        except Exception:
+            app.include_router(get_products_router(None), prefix="/products")
+    else:
+        import sys as _sys
+        print("[WARN] /api/stock router not found. Import products.router or provide get_products_router(client).", file=_sys.stderr)
+
