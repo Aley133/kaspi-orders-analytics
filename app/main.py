@@ -86,7 +86,7 @@ _EFF_BDS: str = BUSINESS_DAY_START
 # -------------------- FastAPI --------------------
 app = FastAPI(title="Kaspi Orders Analytics")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-
+app.include_router(stock_router)
 
 # Подключение роутера склада (после инициализации app!)
 try:
