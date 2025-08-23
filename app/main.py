@@ -552,21 +552,21 @@ app.mount("/ui", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "
 
 
 # ===== Router include (guaranteed after app init) =====
+# убедимся, что app уже создан
 try:
-    _kaspi_client_ok = bool(KASPI_TOKEN)
-except Exception:
-    _kaspi_client_ok = False
+    _ = app  # noqa: F401
+except NameError:
+    raise RuntimeError("FastAPI app must be defined before including routers")
 
-if 'app' in globals():
-    if stock_router is not None:
-        # готовый router с внутренними префиксами
-        app.include_router(stock_router)
-    elif get_products_router is not None:
-        try:
-            app.include_router(get_products_router(client), prefix="/products")
-        except Exception:
-            app.include_router(get_products_router(None), prefix="/products")
-    else:
-        import sys as _sys
-        print("[WARN] /api/stock router not found. Import products.router or provide get_products_router(client).", file=_sys.stderr)
-
+if stock_router is not None:
+    # готовый router с внутренними префиксами
+# (disabled: moved to tail) app.include_router(stock_router)
+elif get_products_router is not None:
+    # режим совместимости со старым кодом
+    try:
+        app.include_router(get_products_router(client), prefix="/products")
+    except Exception:
+        app.include_router(get_products_router(None), prefix="/products")
+else:
+    import sys as _sys
+    print("[WARN] /api/stock router not found. Import products.router or provide get_products_router(client).", file=_sys.stderr)
