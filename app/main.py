@@ -20,11 +20,33 @@ try:
     from .kaspi_client import KaspiClient  # type: ignore
 except Exception:  # pragma: no cover
     from kaspi_client import KaspiClient  # type: ignore
+from app.api.products import router as stock_router
+import sys
+app.include_router(stock_router)
 
+# --- Stock router import (safe) ---
+# 1) Пытаемся импортировать готовый router
+stock_router = None
 try:
-    from .api.products import get_products_router
+    from .api.products import router as stock_router  # type: ignore
 except Exception:
-    from api.products import get_products_router
+    try:
+        from app.api.products import router as stock_router  # type: ignore
+    except Exception:
+        try:
+            from api.products import router as stock_router  # type: ignore
+        except Exception:
+            stock_router = None
+
+# 2) Совместимость: если ещё есть фабрика get_products_router
+get_products_router = None
+try:
+    from .api.products import get_products_router  # type: ignore
+except Exception:
+    try:
+        from api.products import get_products_router  # type: ignore
+    except Exception:
+        get_products_router = None
 
 load_dotenv()
 
@@ -66,13 +88,36 @@ _EFF_BDS: str = BUSINESS_DAY_START
 app = FastAPI(title="Kaspi Orders Analytics")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+
+# Подключение роутера склада (после инициализации app!)
+try:
+    _kaspi_client_ok = bool(KASPI_TOKEN)
+except Exception:
+    _kaspi_client_ok = False
+
+if stock_router is not None:
+    # наш актуальный путь — готовый router c префиксами внутри
+    app.include_router(stock_router)
+elif get_products_router is not None:
+    # режим совместимости со старым кодом
+    try:
+        app.include_router(get_products_router(client), prefix="/products")
+    except Exception:
+        app.include_router(get_products_router(None), prefix="/products")
+else:
+    # ничего не рушим — просто пишем в лог
+    print(
+        "[WARN] Не найден router для /api/stock (app.api.products). "
+        "Импортируй products.router или добавь get_products_router(client).",
+        file=sys.stderr,
+    )
+
+
 client = KaspiClient(token=KASPI_TOKEN, base_url=KASPI_BASE_URL) if KASPI_TOKEN else None
 orders_cache = TTLCache(maxsize=128, ttl=CACHE_TTL)
-
+# (disabled by patch) 
 app.include_router(get_products_router(client), prefix="/products")
 
-from app.api.products import router as stock_router
-app.include_router(stock_router)
 # -------------------- Utils --------------------
 def tzinfo_of(name: str) -> pytz.BaseTzInfo:
     try:
