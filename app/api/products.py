@@ -265,4 +265,4 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
 
         normalized.sort(key=lambda x: (x.get("name") or x.get("Name") or '').lower())
         return JSONResponse({ "count": len(normalized), "items": normalized })
-return router
+    return router
