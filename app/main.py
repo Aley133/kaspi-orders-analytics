@@ -20,32 +20,14 @@ try:
     from .kaspi_client import KaspiClient  # type: ignore
 except Exception:  # pragma: no cover
     from kaspi_client import KaspiClient  # type: ignore
-from app.api.products import router as stock_router
-import sys
-# (moved) app.include_router(stock_router)
-# --- Stock router import (safe) ---
-# 1) Пытаемся импортировать готовый router
-stock_router = None
-try:
-    from .api.products import router as stock_router  # type: ignore
-except Exception:
-    try:
-        from app.api.products import router as stock_router  # type: ignore
-    except Exception:
-        try:
-            from api.products import router as stock_router  # type: ignore
-        except Exception:
-            stock_router = None
 
-# 2) Совместимость: если ещё есть фабрика get_products_router
-get_products_router = None
 try:
-    from .api.products import get_products_router  # type: ignore
+    from .api.products import get_products_router
 except Exception:
-    try:
-        from api.products import get_products_router  # type: ignore
-    except Exception:
-        get_products_router = None
+    from api.products import get_products_router
+
+from app.api.products import router as stock_router
+app.include_router(stock_router)
 
 load_dotenv()
 
@@ -86,36 +68,11 @@ _EFF_BDS: str = BUSINESS_DAY_START
 # -------------------- FastAPI --------------------
 app = FastAPI(title="Kaspi Orders Analytics")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-app.include_router(stock_router)
-
-# Подключение роутера склада (после инициализации app!)
-try:
-    _kaspi_client_ok = bool(KASPI_TOKEN)
-except Exception:
-    _kaspi_client_ok = False
-
-if stock_router is not None:
-    # наш актуальный путь — готовый router c префиксами внутри
-# (moved) app.include_router(stock_router)
-elif get_products_router is not None:
-    # режим совместимости со старым кодом
-    try:
-# (moved)         app.include_router(get_products_router(client), prefix="/products")
-    except Exception:
-# (moved)         app.include_router(get_products_router(None), prefix="/products")
-else:
-    # ничего не рушим — просто пишем в лог
-    print(
-        "[WARN] Не найден router для /api/stock (app.api.products). "
-        "Импортируй products.router или добавь get_products_router(client).",
-        file=sys.stderr,
-    )
-
 
 client = KaspiClient(token=KASPI_TOKEN, base_url=KASPI_BASE_URL) if KASPI_TOKEN else None
 orders_cache = TTLCache(maxsize=128, ttl=CACHE_TTL)
-# (disabled by patch) 
-# (moved) app.include_router(get_products_router(client), prefix="/products")
+
+app.include_router(get_products_router(client), prefix="/products")
 
 # -------------------- Utils --------------------
 def tzinfo_of(name: str) -> pytz.BaseTzInfo:
@@ -549,8 +506,6 @@ async def root():
 
 # Статика UI
 app.mount("/ui", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static"), html=True), name="static")
-
-
 # ===== Router include (guaranteed after app init) =====
 # убедимся, что app уже создан
 try:
@@ -560,7 +515,7 @@ except NameError:
 
 if stock_router is not None:
     # готовый router с внутренними префиксами
-app.include_router(stock_router)
+    app.include_router(stock_router)
 elif get_products_router is not None:
     # режим совместимости со старым кодом
     try:
