@@ -233,4 +233,29 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
         except Exception as e:
             return JSONResponse({"attempts": [], "error": str(e)})
 
-    return router
+    
+    @router.post("/manual-upload")
+    async def manual_upload(file: UploadFile = File(...)):
+        """Принимает XML или Excel (.xlsx/.xls), нормализует и возвращает JSON для отрисовки таблицы."""
+        filename = (file.filename or "").lower()
+        content = await file.read()
+
+        if filename.endswith(".xml"):
+            raw_rows = _parse_xml(content)
+        elif filename.endswith(".xlsx") or filename.endswith(".xls"):
+            file.file = io.BytesIO(content)  # reuse buffer
+            raw_rows = _parse_excel(file)
+        else:
+            raise HTTPException(status_code=400, detail="Поддерживаются только XML или Excel (.xlsx/.xls).")
+
+        normalized = []
+        for r in raw_rows:
+            try:
+                ps = normalize_row(r)
+                normalized.append(ps.to_dict())
+            except Exception:
+                normalized.append(r)
+
+        normalized.sort(key=lambda x: (x.get("name") or x.get("Name") or '').lower())
+        return JSONResponse({"count": len(normalized), "items": normalized})
+return router
