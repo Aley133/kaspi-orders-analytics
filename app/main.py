@@ -22,12 +22,9 @@ except Exception:  # pragma: no cover
     from kaspi_client import KaspiClient  # type: ignore
 
 try:
-    from app.api.products import get_products_router
+    from .api.products import get_products_router
 except Exception:
-    try:
-        from .api.products import get_products_router
-    except Exception:
-        from api.products import get_products_router
+    from api.products import get_products_router
 
 load_dotenv()
 
