@@ -1,7 +1,64 @@
 from __future__ import annotations
 from typing import Callable, Optional, List, Dict, Any, Tuple
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, UploadFile, File
 from fastapi.responses import Response, JSONResponse
+
+import io
+from xml.etree import ElementTree as ET
+try:
+    import openpyxl  # optional for .xlsx/.xls
+    _OPENPYXL_AVAILABLE = True
+except Exception:  # pragma: no cover
+    _OPENPYXL_AVAILABLE = False
+
+try:
+    from ..kaspi_client import ProductStock, normalize_row  # type: ignore
+except Exception:
+    try:
+        from kaspi_client import ProductStock, normalize_row  # type: ignore
+    except Exception:
+        ProductStock = None
+        normalize_row = None  # will fallback
+
+def _parse_xml(content: bytes):
+    try:
+        root = ET.fromstring(content)
+    except ET.ParseError as e:
+        raise HTTPException(status_code=400, detail=f"Некорректный XML: {e}")
+    rows = []
+    offers = root.findall(".//offer") or root.findall(".//item") or root.findall(".//product")
+    for off in offers:
+        row = {}
+        # attributes
+        for attr in ("id","available","shop-sku","sku","offerid","code"):
+            if off.get(attr) is not None:
+                row[attr] = off.get(attr)
+        # common child tags
+        for tag in ["vendorCode","barcode","price","name","title","model",
+                    "quantity","qty","category","vendor","brand"]:
+            el = off.find(tag)
+            if el is not None and (el.text or "").strip():
+                row[tag] = (el.text or "").strip()
+        rows.append(row)
+    return rows
+
+def _parse_excel(file):
+    if not _OPENPYXL_AVAILABLE:
+        raise HTTPException(status_code=500, detail="openpyxl не установлен на сервере.")
+    try:
+        data = file.file.read()
+        wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Не удалось открыть Excel: {e}")
+    ws = wb.active
+    headers = [str(c.value or '').strip() for c in ws[1]]
+    rows = []
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        item = {h: v for h, v in zip(headers, row)}
+        if any(v not in (None, "", []) for v in item.values()):
+            rows.append(item)
+    return rows
+
 
 try:
     from ..kaspi_client import KaspiClient  # type: ignore
