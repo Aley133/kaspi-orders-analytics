@@ -24,11 +24,10 @@ except Exception:  # pragma: no cover
 try:
     from .api.products import get_products_router
 except Exception:
-    from api.products import get_products_router
+    from .api.products import get_products_router
 
-from app.api.products import router as stock_router
-app.include_router(stock_router)
-
+from .api.products import router as stock_router
+# moved-below: app.include_router(stock_router)
 load_dotenv()
 
 # -------------------- ENV --------------------
@@ -68,6 +67,18 @@ _EFF_BDS: str = BUSINESS_DAY_START
 # -------------------- FastAPI --------------------
 app = FastAPI(title="Kaspi Orders Analytics")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+
+# === ensured include of products router (must be after app init) ===
+try:
+    app.include_router(stock_router)
+except Exception as _e:
+    # keep old factory fallback if present
+    try:
+        app.include_router(get_products_router(client), prefix='/products')
+    except Exception:
+        pass
+
 
 client = KaspiClient(token=KASPI_TOKEN, base_url=KASPI_BASE_URL) if KASPI_TOKEN else None
 orders_cache = TTLCache(maxsize=128, ttl=CACHE_TTL)
@@ -515,7 +526,7 @@ except NameError:
 
 if stock_router is not None:
     # готовый router с внутренними префиксами
-    app.include_router(stock_router)
+# moved-below: app.include_router(stock_router)
 elif get_products_router is not None:
     # режим совместимости со старым кодом
     try:
