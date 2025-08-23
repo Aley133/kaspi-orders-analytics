@@ -2,12 +2,108 @@ from __future__ import annotations
 from typing import Callable, Optional, List, Dict, Any, Tuple
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response, JSONResponse
+from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi.responses import JSONResponse
+from typing import List, Dict, Any
+from io import BytesIO
+from openpyxl import load_workbook
+
+from app.kaspi_client import parse_kaspi_catalog_xml
 
 try:
     from ..kaspi_client import KaspiClient  # type: ignore
 except Exception:  # pragma: no cover
     from kaspi_client import KaspiClient  # type: ignore
 
+router = APIRouter(prefix="/api/stock", tags=["stock"])
+
+EXPECTED_XLSX_HEADERS = {
+    # гнёмся под простой человекочитаемый Excel
+    # допускаем разные регистры и пробелы (нормализуем в коде)
+    "sku", "model", "brand", "stock", "price", "storeid", "cityid"
+}
+
+def _normalize_header(h: str) -> str:
+    return "".join(h.strip().lower().split())
+
+@router.post("/import/xml")
+async def import_xml(file: UploadFile = File(...)):
+    if not file.filename.lower().endswith(".xml"):
+        raise HTTPException(status_code=400, detail="Ожидается XML файл из кабинета Kaspi.")
+
+    xml_bytes = await file.read()
+    try:
+        items = parse_kaspi_catalog_xml(xml_bytes)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return JSONResponse({"count": len(items), "items": items})
+
+@router.post("/import/xlsx")
+async def import_xlsx(file: UploadFile = File(...)):
+    fname = file.filename.lower()
+    if not (fname.endswith(".xlsx") or fname.endswith(".xlsm") or fname.endswith(".xls")):
+        raise HTTPException(status_code=400, detail="Ожидается Excel (.xlsx/.xls).")
+
+    data = await file.read()
+    try:
+        wb = load_workbook(filename=BytesIO(data), data_only=True)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Не удалось прочитать Excel: {e}")
+
+    ws = wb.active
+    if ws.max_row < 2 or ws.max_column < 1:
+        return {"count": 0, "items": []}
+
+    # заголовки
+    headers_raw = [str(ws.cell(row=1, column=c).value or "").strip() for c in range(1, ws.max_column + 1)]
+    headers_norm = [_normalize_header(h) for h in headers_raw]
+
+    missing = EXPECTED_XLSX_HEADERS - set(headers_norm)
+    if missing:
+        # не падаем жёстко: позволим частичный импорт по совпадающим полям
+        pass
+
+    # соберём индексы колонок
+    idx = {h: i for i, h in enumerate(headers_norm)}
+
+    items: List[Dict[str, Any]] = []
+    for r in range(2, ws.max_row + 1):
+        row = [ws.cell(row=r, column=c).value for c in range(1, ws.max_column + 1)]
+        def getv(key: str):
+            i = idx.get(key)
+            return (row[i] if i is not None and i < len(row) else None)
+
+        # нормализация типов
+        def to_float(x):
+            try:
+                return float(x) if x is not None and str(x).strip() != "" else None
+            except Exception:
+                return None
+
+        items.append({
+            "sku": (getv("sku") if getv("sku") is not None else None),
+            "model": (str(getv("model")).strip() if getv("model") is not None else None),
+            "brand": (str(getv("brand")).strip() if getv("brand") is not None else None),
+            "stock": to_float(getv("stock")) or 0.0,
+            "price": to_float(getv("price")),
+            "storeId": (str(getv("storeid")).strip() if getv("storeid") is not None else None),
+            "cityId": (str(getv("cityid")).strip() if getv("cityid") is not None else None),
+        })
+
+    return JSONResponse({"count": len(items), "items": items})
+
+@router.get("/xlsx/expected-columns")
+async def expected_columns():
+    """
+    Подсказка для Excel-формата.
+    """
+    return {
+        "required_or_recommended": [
+            "sku", "model", "brand", "stock", "price", "storeId", "cityId"
+        ],
+        "note": "Регистр не важен. Пробелы в заголовках допустимы."
+    }
 
 def _pick(attrs: Dict[str, Any], *keys: str) -> str:
     for k in keys:
