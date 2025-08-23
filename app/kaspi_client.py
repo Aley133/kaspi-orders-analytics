@@ -1,69 +1,11 @@
 from __future__ import annotations
 from datetime import datetime, timedelta
-from typing import Dict, Generator, Optional, Any, List
+from typing import Dict, Generator, Optional, Any, List, Iterable
 import os
-from io import BytesIO
 import httpx
-import xml.etree.ElementTree as ET
 from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
 
 DEFAULT_BASE_URL = "https://kaspi.kz/shop/api/v2"
-KASPI_NS = {"k": "kaspiShopping"}  # в выгрузке Kaspi: <kaspi_catalog xmlns="kaspiShopping">
-
-
-def parse_kaspi_catalog_xml(xml_bytes: bytes) -> List[Dict[str, Any]]:
-    """
-    Парсит выгрузку kaspi_catalog XML в плоский список товаров.
-    Поля: sku, model, brand, stock, price, storeId, cityId.
-    Значения по умолчанию: None/0, если узел отсутствует.
-    """
-    try:
-        tree = ET.parse(BytesIO(xml_bytes))
-        root = tree.getroot()
-    except ET.ParseError as e:
-        raise ValueError(f"Некорректный XML: {e}")
-
-    items: List[Dict[str, Any]] = []
-    for offer in root.findall("k:offers/k:offer", KASPI_NS):
-        sku = offer.get("sku")
-        model = (offer.findtext("k:model", default="", namespaces=KASPI_NS) or "").strip()
-        brand = (offer.findtext("k:brand", default="", namespaces=KASPI_NS) or "").strip()
-
-        # stock
-        stock = 0.0
-        store_id: Optional[str] = None
-        availability = offer.find("k:availabilities/k:availability", KASPI_NS)
-        if availability is not None:
-            stock_str = availability.get("stockCount")
-            try:
-                stock = float(stock_str) if stock_str is not None else 0.0
-            except ValueError:
-                stock = 0.0
-            store_id = availability.get("storeId")
-
-        # price (берём первый cityprice)
-        price: Optional[float] = None
-        city_id: Optional[str] = None
-        cityprice = offer.find("k:cityprices/k:cityprice", KASPI_NS)
-        if cityprice is not None:
-            city_id = cityprice.get("cityId")
-            txt = (cityprice.text or "").strip()
-            try:
-                price = float(txt) if txt else None
-            except ValueError:
-                price = None
-
-        items.append({
-            "sku": sku,
-            "model": model or None,
-            "brand": brand or None,
-            "stock": stock,
-            "price": price,
-            "storeId": store_id,
-            "cityId": city_id,
-        })
-
-    return items
 
 
 class KaspiClient:
@@ -153,7 +95,7 @@ class KaspiClient:
         }
         if state:
             params["filter[orders][state]"] = state
-        base = self._base_urls()[0]  # берём первый
+        base = self._base_urls()[0]  # orders у нас уже работают на shop/api/v2, берём первый
         while True:
             data = self._get(base, "orders", params)
             items = data.get("data", [])
@@ -262,6 +204,7 @@ class KaspiClient:
                                 if any_yielded:
                                     return
                             except httpx.HTTPStatusError as e:
+                                # 404/403 — пробуем дальше
                                 if e.response.status_code in (404, 403):
                                     last_err = e
                                     continue
@@ -290,6 +233,7 @@ class KaspiClient:
         for order in self.iter_orders(start=start, end=end, filter_field="creationDate", page_size=100):
             attrs = order.get("attributes", {}) or {}
             items = attrs.get("items") or attrs.get("positions") or []
+            # поддержим два популярных формата: list[dict] или dict с 'data'
             if isinstance(items, dict) and "data" in items:
                 items = items["data"]
             if not isinstance(items, list):
