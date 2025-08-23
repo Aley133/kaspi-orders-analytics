@@ -26,9 +26,6 @@ try:
 except Exception:
     from api.products import get_products_router
 
-from app.api.products import router as stock_router
-app.include_router(stock_router)
-
 load_dotenv()
 
 # -------------------- ENV --------------------
@@ -74,6 +71,8 @@ orders_cache = TTLCache(maxsize=128, ttl=CACHE_TTL)
 
 app.include_router(get_products_router(client), prefix="/products")
 
+from app.api.products import router as stock_router
+app.include_router(stock_router)
 # -------------------- Utils --------------------
 def tzinfo_of(name: str) -> pytz.BaseTzInfo:
     try:
