@@ -5,26 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Мой склад — Kaspi</title>
   <link rel="stylesheet" href="style.css" />
-  <style>
-    :root { --bg:#0b0c10; --panel:#12141a; --line:#223047; --muted:#a0a8b3; --brand:#eaf0f6; }
-    body { background: var(--bg); color: var(--brand); }
-    .card { background: var(--panel); border:1px solid #1e2633; border-radius:14px; padding:16px; margin:12px 0; }
-    .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
-    .btn { padding:10px 14px; border-radius:10px; border:1px solid #2a3342; background:#18202c; color:var(--brand); cursor:pointer; }
-    .btn:hover { background:#1c2533; }
-    .muted { color: var(--muted); }
-    .table { width:100%; border-collapse: collapse; }
-    th, td { padding:10px 12px; border-bottom:1px solid var(--line); }
-    th { position: sticky; top: 0; background:#0f1520; text-align:left; font-weight:600; }
-    .right { text-align:right; }
-    input[type="number"] { width:120px; }
-    .pill { padding:4px 10px; border-radius:999px; border:1px solid #2b3648; background:#1b2330; font-size:12px; }
-    .tabs { display:flex; gap:8px; }
-    .tab { padding:8px 12px; border-radius:10px; border:1px solid #2a3342; cursor:pointer; }
-    .tab.active { background:#1c2533; }
-  </style>
 </head>
-<body data-theme="dark">
+<body data-theme="light">
   <div class="layout">
     <aside class="sidebar">
       <div class="brand">⚡ LeoXpress</div>
@@ -47,76 +29,48 @@
     <div class="content">
       <h1>Мой склад</h1>
 
-      <div class="card">
-        <div class="tabs">
-          <div class="tab active" data-tab="api">Каталог по API</div>
-          <div class="tab" data-tab="manual">Ручной импорт (XML/XLSX)</div>
-        </div>
-      </div>
-
-      <!-- API блок -->
-      <section class="card" id="tab-api">
-        <div class="row">
-          <label class="chk"><input type="checkbox" id="onlyActive" checked> Только активные</label>
-          <label>Поиск</label>
-          <input type="text" id="search" placeholder="Название или код...">
-          <button class="btn" id="btnLoad">Загрузить по API</button>
-          <a class="btn" id="btnExport" href="/api/stock/export.csv" target="_blank" rel="noopener">Экспорт CSV</a>
-          <span id="note" class="muted"></span>
+      <section class="shell">
+        <div class="filters">
+          <div class="row">
+            <label class="chk"><input type="checkbox" id="onlyActive" checked> Только активные</label>
+            <label>Поиск</label>
+            <input type="text" id="search" placeholder="Название или код...">
+            <button class="btn" id="btnLoad">Загрузить</button>
+            <button class="btn" id="btnExport">Экспорт CSV (из таблицы)</button>
+          </div>
         </div>
 
-        <div class="muted" style="margin:10px 0">
+        <div id="note" class="muted" style="margin:6px 0 10px"></div>
+
+        <div class="muted" style="margin:6px 0 10px">
           Для расчёта прибыли укажи закупочную цену (KZT). Значения сохраняются локально (позже перенесём в БД).
         </div>
 
-        <div style="overflow:auto; max-height:60vh">
-          <table class="table" id="tbl">
-            <thead>
-              <tr>
-                <th style="min-width:110px">Код</th>
-                <th style="min-width:260px">Название</th>
-                <th>Бренд</th>
-                <th>Категория</th>
-                <th>ШТ</th>
-                <th>Цена, KZT</th>
-                <th>Активен</th>
-                <th>ШК</th>
-                <th>Закупочная, KZT</th>
-                <th>Маржа, %</th>
-                <th>Прибыль, KZT</th>
-              </tr>
-            </thead>
-            <tbody></tbody>
-            <tfoot>
-              <tr>
-                <td colspan="10" style="text-align:right;font-weight:700">Итого прибыль:</td>
-                <td id="sumProfit" style="font-weight:800">0</td>
-              </tr>
-            </tfoot>
-          </table>
-        </div>
-      </section>
-
-      <!-- Ручной импорт -->
-      <section class="card" id="tab-manual" style="display:none">
-        <div class="row">
-          <input id="fileInput" type="file" accept=".xml,.xlsx,.xls" />
-          <button id="uploadBtn" class="btn">Импортировать</button>
-          <span id="status" class="muted">Поддерживаются XML (Kaspi выгрузка) и Excel.</span>
-          <span id="countBadge" class="pill" style="display:none"></span>
-        </div>
-
-        <div class="card" style="margin-top:12px">
-          <div style="overflow:auto; max-height:60vh">
-            <table class="table" id="manualTable">
+        <div class="shell" style="padding:0">
+          <div style="overflow:auto; max-height:70vh">
+            <table class="table" id="tbl">
               <thead>
                 <tr>
-                  <th>SKU</th><th>Model</th><th>Brand</th>
-                  <th class="right">Stock</th><th class="right">Price</th>
-                  <th>Store</th><th>City</th>
+                  <th style="min-width:110px">Код</th>
+                  <th style="min-width:260px">Название</th>
+                  <th>Бренд</th>
+                  <th>Категория</th>
+                  <th>ШТ</th>
+                  <th>Цена, KZT</th>
+                  <th>Активен</th>
+                  <th>ШК</th>
+                  <th>Закупочная, KZT</th>
+                  <th>Маржа, %</th>
+                  <th>Прибыль, KZT</th>
                 </tr>
               </thead>
               <tbody></tbody>
+              <tfoot>
+                <tr>
+                  <td colspan="10" style="text-align:right;font-weight:700">Итого прибыль:</td>
+                  <td id="sumProfit" style="font-weight:800">0</td>
+                </tr>
+              </tfoot>
             </table>
           </div>
         </div>
@@ -125,18 +79,9 @@
   </div>
 
 <script>
-// ===== Табы =====
-const tabs = document.querySelectorAll('.tab');
-tabs.forEach(t => t.addEventListener('click', () => {
-  tabs.forEach(x => x.classList.remove('active'));
-  t.classList.add('active');
-  document.getElementById('tab-api').style.display = t.dataset.tab === 'api' ? '' : 'none';
-  document.getElementById('tab-manual').style.display = t.dataset.tab === 'manual' ? '' : 'none';
-}));
-
-// ===== Общие утилы =====
 const nf = new Intl.NumberFormat('ru-RU');
 function fmt(n){ return nf.format(Math.round((Number(n)||0)*100)/100); }
+
 function getCost(id){
   const m = JSON.parse(localStorage.getItem('purchase_costs') || '{}');
   return Number(m[id] || 0);
@@ -147,7 +92,6 @@ function setCost(id, v){
   localStorage.setItem('purchase_costs', JSON.stringify(m));
 }
 
-// ===== API загрузка каталога =====
 async function loadProducts(){
   const onlyActive = document.getElementById('onlyActive').checked;
   const q = document.getElementById('search').value.trim();
@@ -155,7 +99,7 @@ async function loadProducts(){
   p.set('active', onlyActive ? '1' : '0');
   if(q) p.set('q', q);
   p.set('page', '1'); p.set('page_size', '2000');
-  const r = await fetch(`/api/stock/list?${p.toString()}`);
+  const r = await fetch(`/products/list?${p.toString()}`);
   const data = await r.json();
   if(data.note){ document.getElementById('note').textContent = data.note; }
   renderTable(data.items || []);
@@ -165,11 +109,13 @@ function renderTable(items){
   const tb = document.querySelector('#tbl tbody');
   tb.innerHTML = '';
   let sumProfit = 0;
+
   for(const it of items){
     const tr = document.createElement('tr');
     const profit = (Number(it.price)||0) - getCost(it.id);
     const totalProfit = (Number(it.qty)||0) * profit;
     sumProfit += totalProfit;
+
     tr.innerHTML = `
       <td>${it.code||''}</td>
       <td>${it.name||''}</td>
@@ -179,18 +125,20 @@ function renderTable(items){
       <td>${fmt(it.price||0)}</td>
       <td>${it.active===true ? 'Да' : it.active===false ? 'Нет' : ''}</td>
       <td>${it.barcode||''}</td>
-      <td><input data-id="${it.id}" class="cost-input" type="number" min="0" step="1" value="${getCost(it.id)}"></td>
+      <td><input data-id="${it.id}" class="cost-input" type="number" min="0" step="1" value="${getCost(it.id)}" style="width:120px"></td>
       <td>${fmt((it.price ? ((it.price - getCost(it.id))/it.price*100) : 0))}</td>
       <td>${fmt(totalProfit)}</td>
     `;
     tb.appendChild(tr);
   }
+
   document.getElementById('sumProfit').textContent = fmt(sumProfit);
+
   tb.querySelectorAll('input.cost-input').forEach(inp => {
     inp.addEventListener('change', () => {
       const id = inp.getAttribute('data-id');
       setCost(id, Number(inp.value)||0);
-      loadProducts(); // пересчитать
+      loadProducts(); // пересчитать строку и итог
     });
   });
 }
@@ -218,80 +166,9 @@ function exportCsvFromTable(){
   document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
 }
 
-// ===== Ручной импорт (XML/XLSX) =====
-const fileInput = document.getElementById('fileInput');
-const uploadBtn = document.getElementById('uploadBtn');
-const statusEl = document.getElementById('status');
-const countBadge = document.getElementById('countBadge');
-const manualTbody = document.querySelector('#manualTable tbody');
-
-function setStatus(msg, isError=false) {
-  statusEl.textContent = msg;
-  statusEl.style.color = isError ? '#ff7b7b' : 'var(--muted)';
-}
-function detectEndpointByFilename(name) {
-  const n = (name||'').toLowerCase();
-  if (n.endsWith('.xml')) return '/api/stock/import/xml';
-  if (n.endsWith('.xlsx') || n.endsWith('.xlsm') || n.endsWith('.xls')) return '/api/stock/import/xlsx';
-  return null;
-}
-function fmtStr(v){ return (v===null||v===undefined) ? '' : String(v); }
-function fmtNumLocal(v){
-  if (v === null || v === undefined || v === '') return '';
-  const n = Number(v); return Number.isFinite(n) ? n.toLocaleString() : String(v);
-}
-function renderManualRows(items){
-  manualTbody.innerHTML = '';
-  for (const it of items) {
-    const tr = document.createElement('tr');
-    tr.innerHTML = `
-      <td>${fmtStr(it.sku)}</td>
-      <td>${fmtStr(it.model)}</td>
-      <td>${fmtStr(it.brand)}</td>
-      <td class="right">${fmtNumLocal(it.stock)}</td>
-      <td class="right">${fmtNumLocal(it.price)}</td>
-      <td>${fmtStr(it.storeId)}</td>
-      <td>${fmtStr(it.cityId)}</td>
-    `;
-    manualTbody.appendChild(tr);
-  }
-}
-
-if (uploadBtn){
-  uploadBtn.addEventListener('click', async () => {
-    const f = fileInput.files?.[0];
-    if (!f) { setStatus('Выберите файл для загрузки.', true); return; }
-    const endpoint = detectEndpointByFilename(f.name);
-    if (!endpoint) { setStatus('Поддерживаются только XML/XLSX файлы.', true); return; }
-    const fd = new FormData();
-    fd.append('file', f);
-    setStatus('Загружаем и парсим…');
-    uploadBtn.disabled = true;
-    try {
-      const res = await fetch(endpoint, { method: 'POST', body: fd });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.detail || `HTTP ${res.status}`);
-      }
-      const data = await res.json();
-      renderManualRows(data.items || []);
-      countBadge.style.display = 'inline-block';
-      countBadge.textContent = `Позиций: ${data.count || 0}`;
-      setStatus('Готово.');
-    } catch (e) {
-      setStatus(`Ошибка: ${e.message}`, true);
-    } finally {
-      uploadBtn.disabled = false;
-    }
-  });
-}
-
-// ===== Init =====
 document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('btnLoad').addEventListener('click', loadProducts);
-  document.getElementById('btnExport').addEventListener('click', (e) => {
-    e.preventDefault(); exportCsvFromTable();
-  });
+  document.getElementById('btnExport').addEventListener('click', exportCsvFromTable);
   const t = document.getElementById('themeToggle');
   if(t){ t.addEventListener('change', (e)=> document.body.setAttribute('data-theme', e.target.checked ? 'dark' : 'light')); }
   loadProducts();
