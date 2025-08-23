@@ -12,13 +12,16 @@ except Exception:  # pragma: no cover
     _OPENPYXL_AVAILABLE = False
 
 try:
-    from ..kaspi_client import ProductStock, normalize_row  # type: ignore
+    from app.kaspi_client import ProductStock, normalize_row  # type: ignore
 except Exception:
     try:
-        from kaspi_client import ProductStock, normalize_row  # type: ignore
+        from ..kaspi_client import ProductStock, normalize_row  # type: ignore
     except Exception:
-        ProductStock = None
-        normalize_row = None  # will fallback
+        try:
+            from kaspi_client import ProductStock, normalize_row  # type: ignore
+        except Exception:
+            ProductStock = None
+            normalize_row = None  # will fallback
 
 def _parse_xml(content: bytes):
     try:
@@ -61,9 +64,12 @@ def _parse_excel(file):
 
 
 try:
-    from ..kaspi_client import KaspiClient  # type: ignore
+    from app.kaspi_client import KaspiClient  # type: ignore
 except Exception:  # pragma: no cover
-    from kaspi_client import KaspiClient  # type: ignore
+    try:
+        from ..kaspi_client import KaspiClient  # type: ignore
+    except Exception:
+        from kaspi_client import KaspiClient  # type: ignore
 
 
 def _pick(attrs: Dict[str, Any], *keys: str) -> str:
