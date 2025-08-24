@@ -6,13 +6,12 @@
   <title>Мой склад — Kaspi</title>
   <link rel="stylesheet" href="style.css" />
   <style>
-    /* мини-стили для раскрывающейся панели под строкой */
-    .details-row td { background: var(--surface-2,#fafafa); padding: 12px 16px; }
-    .mini-table { width:100%; border-collapse: collapse; }
-    .mini-table th, .mini-table td { border-bottom: 1px solid rgba(0,0,0,.06); padding:6px 8px; }
-    .chip { display:inline-block; padding:2px 8px; border-radius:999px; background:#eef; font-size:12px; }
-    .clickable { cursor: pointer; }
-    .btn.small { padding: 4px 8px; font-size: 12px; }
+    .details-row td{background:var(--surface-2,#fafafa);padding:12px 16px}
+    .mini-table{width:100%;border-collapse:collapse}
+    .mini-table th,.mini-table td{border-bottom:1px solid rgba(0,0,0,.06);padding:6px 8px}
+    .chip{display:inline-block;padding:2px 8px;border-radius:999px;background:#eef;font-size:12px}
+    .clickable{cursor:pointer}
+    .btn.small{padding:4px 8px;font-size:12px}
   </style>
 </head>
 <body data-theme="light">
@@ -40,14 +39,20 @@
 
       <section class="shell">
         <div class="filters">
-          <div class="row">
+          <div class="row" style="gap:8px;flex-wrap:wrap">
             <label class="chk"><input type="checkbox" id="onlyActive" checked> Только активные</label>
             <label>Поиск</label>
             <input type="text" id="search" placeholder="Название или код...">
-            <button class="btn" id="btnLoad">Загрузить</button>
+            <button class="btn" id="btnLoad">Загрузить (API)</button>
             <label class="btn" for="fileInput">Импорт из файла (XML/XLSX)</label>
             <input type="file" id="fileInput" accept=".xml,.xlsx,.xls" style="display:none">
             <button class="btn" id="btnExport">Экспорт CSV (из таблицы)</button>
+
+            <!-- работа с локальной БД -->
+            <button class="btn" id="btnLoadDB">Загрузить из БД</button>
+            <a class="btn" id="btnBackup" href="/products/db/backup.sqlite3">Бэкап БД</a>
+            <label class="btn" for="restoreInput">Восстановить БД</label>
+            <input type="file" id="restoreInput" accept=".sqlite,.sqlite3" style="display:none">
           </div>
         </div>
 
@@ -92,20 +97,21 @@
 <script>
 const nf = new Intl.NumberFormat('ru-RU');
 const fmt = n => nf.format(Math.round((Number(n)||0)*100)/100);
+const marginPercent = (price, cost) => {
+  price = Number(price)||0; cost = Number(cost)||0;
+  return price ? ((price - cost)/price*100) : 0;
+};
 
 async function loadProducts(){
   const onlyActive = document.getElementById('onlyActive').checked;
   const q = document.getElementById('search').value.trim();
-  const p = new URLSearchParams();
-  p.set('active', onlyActive ? '1' : '0');
-  if(q) p.set('q', q);
-  p.set('page', '1'); p.set('page_size', '2000');
+  const qs = new URLSearchParams({active: (onlyActive?1:0), page: 1, page_size: 2000});
+  if(q) qs.set('q', q);
 
   const [catalogRes, dbRes] = await Promise.all([
-    fetch(`/products/list?${p.toString()}`),
+    fetch(`/products/list?${qs.toString()}`),
     fetch(`/products/db/list?active_only=${onlyActive?1:0}&search=${encodeURIComponent(q)}`)
   ]);
-
   const catalog = await catalogRes.json();
   const db = await dbRes.json();
 
@@ -116,10 +122,25 @@ async function loadProducts(){
   renderTable(catalog.items || [], avgMap);
 }
 
-function marginPercent(price, cost){
-  price = Number(price)||0; cost = Number(cost)||0;
-  if(!price) return 0;
-  return ((price - cost) / price) * 100.0;
+async function loadFromDB(){
+  const onlyActive = document.getElementById('onlyActive').checked;
+  const q = document.getElementById('search').value.trim();
+  const data = await fetch(`/products/db/list?active_only=${onlyActive?1:0}&search=${encodeURIComponent(q)}`).then(r=>r.json());
+  const avgMap = {};
+  (data.items || []).forEach(it => { if (it.avg_cost != null) avgMap[it.code] = it.avg_cost; });
+  // преобразуем к единому формату
+  const items = (data.items||[]).map(it => ({
+    id: it.code,
+    code: it.code,
+    name: it.name,
+    brand: it.brand,
+    category: it.category,
+    qty: it.qty,
+    price: it.price,
+    active: it.active,
+    barcode: it.barcode
+  }));
+  renderTable(items, avgMap);
 }
 
 function renderTable(items, avgMap){
@@ -128,17 +149,21 @@ function renderTable(items, avgMap){
   let sumProfit = 0;
 
   for(const it of items){
-    const avg = avgMap[it.code] ?? 0;
+    // ключ: code -> id -> barcode (чтобы не было пустых SKU)
+    const key = it.code || it.id || it.barcode || '';
+    const shownCode = it.code || it.id || '';
+
+    const avg = avgMap[key] ?? 0;
     const profit = (Number(it.price)||0) - avg;
     const totalProfit = (Number(it.qty)||0) * profit;
     sumProfit += totalProfit;
 
     const tr = document.createElement('tr');
-    tr.setAttribute('data-sku', it.code || '');
-    tr.setAttribute('data-name', it.name || '');
+    tr.setAttribute('data-sku', key);
+    tr.setAttribute('data-name', it.name || shownCode);
     tr.classList.add('clickable');
     tr.innerHTML = `
-      <td>${it.code||''}</td>
+      <td>${shownCode}</td>
       <td>${it.name||''}</td>
       <td>${it.brand||''}</td>
       <td>${it.category||''}</td>
@@ -154,56 +179,46 @@ function renderTable(items, avgMap){
   }
 
   document.getElementById('sumProfit').textContent = fmt(sumProfit);
-
-  // раскрытие панели по клику на строку (кроме клика по input)
-  tb.addEventListener('click', onRowClick, { once: true });
 }
 
-function onRowClick(e){
+// постоянный делегированный обработчик
+document.querySelector('#tbl tbody').addEventListener('click', async (e)=>{
   const tr = e.target.closest('tr[data-sku]');
   if(!tr) return;
-  if(e.target.closest('input')) return; // не раскрываем при клике по инпуту
-  toggleDetails(tr);
-  // делегирование продолжаем слушать
-  tr.parentElement.addEventListener('click', onRowClick, { once: true });
-}
+  if(e.target.closest('input')) return;
+  await toggleDetails(tr);
+});
 
 function closeDetails(tr){
   const next = tr.nextElementSibling;
-  if(next && next.classList.contains('details-row')){
-    next.remove();
-  }
+  if(next && next.classList.contains('details-row')) next.remove();
 }
 
 async function toggleDetails(tr){
-  const sku = tr.getAttribute('data-sku');
+  const sku = (tr.getAttribute('data-sku')||'').trim();
   const name = tr.getAttribute('data-name') || sku;
+  if(!sku){ alert('У товара нет кода/sku — некуда сохранять партии.'); return; }
 
   const already = tr.nextElementSibling;
-  if(already && already.classList.contains('details-row')){
-    already.remove();
-    return;
-  }
+  if(already && already.classList.contains('details-row')){ already.remove(); return; }
   closeDetails(tr);
 
-  // контейнер
   const det = document.createElement('tr');
   det.className = 'details-row';
   det.innerHTML = `<td colspan="11"><div id="d-body">Загрузка партий...</div></td>`;
   tr.after(det);
 
-  // загрузим партии
   const data = await fetch(`/products/db/price-batches/${encodeURIComponent(sku)}`).then(r=>r.json());
-  renderDetails(det.querySelector('#d-body'), sku, name, data);
+  renderDetails(det.querySelector('#d-body'), sku, name, data, tr);
 }
 
-function renderDetails(container, sku, name, data){
+function renderDetails(container, sku, name, data, hostRow){
   container.innerHTML = `
     <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
       <div style="font-weight:700;">Партии закупок — ${name}</div>
       <div style="font-size:12px; color:#666;">Средняя закупочная: <b id="avgVal">${data.avg_cost ?? '—'}</b></div>
     </div>
-    <table class="mini-table" id="mini-${sku}">
+    <table class="mini-table">
       <thead><tr><th>№ партии</th><th>Дата</th><th>Кол-во</th><th>Закуп., KZT</th><th>Прим.</th><th style="width:80px"></th></tr></thead>
       <tbody></tbody>
     </table>
@@ -214,37 +229,34 @@ function renderDetails(container, sku, name, data){
   `;
 
   const tbody = container.querySelector('tbody');
-  const rows = data.batches || [];
-  for(const r of rows){
+  for(const r of (data.batches||[])){
     tbody.appendChild(makeMiniRow(r.batch_no || '', r.date, r.qty, r.unit_cost, r.note));
   }
 
   container.addEventListener('click', async (e)=>{
     const action = e.target.getAttribute('data-action');
     if(action === 'add'){
-      // попытка предсказать следующий номер
       const maxNo = [...tbody.querySelectorAll('tr')].reduce((m,tr)=>{
         const v = Number(tr.querySelector('[name="batch_no"]').value||0);
         return Math.max(m, v);
       }, 0);
-      tbody.appendChild(makeMiniRow(maxNo ? maxNo+1 : '', new Date().toISOString().slice(0,10), '', '', ''));
+      tbody.appendChild(makeMiniRow(maxNo?maxNo+1:'', new Date().toISOString().slice(0,10), '', '', ''));
     }
     if(action === 'del'){
       e.target.closest('tr').remove();
     }
     if(action === 'save'){
       const payload = gatherMini(tbody);
+      if(!payload.entries.length){ alert('Заполните хотя бы одну партию'); return; }
       const res = await fetch(`/products/db/price-batches/${encodeURIComponent(sku)}`, {
         method: 'PUT',
         headers: {'Content-Type':'application/json'},
         body: JSON.stringify(payload)
       }).then(r=>r.json());
       container.querySelector('#avgVal').textContent = res.avg_cost ?? '—';
-      // проставим среднюю закупочную в строке таблицы
-      const hostRow = container.closest('tr.details-row').previousElementSibling;
+      // обновим строку таблицы
       const avgInput = hostRow.querySelector('input[data-role="avg"]');
       avgInput.value = res.avg_cost ?? 0;
-      // пересчёт маржи/прибыли
       const price = Number(hostRow.children[5].textContent.replace(/\s/g,'') || 0);
       const qty   = Number(hostRow.children[4].textContent.replace(/\s/g,'') || 0);
       hostRow.querySelector('[data-role="margin"]').textContent = fmt(marginPercent(price, res.avg_cost||0));
@@ -280,6 +292,21 @@ function gatherMini(tbody){
   return { entries };
 }
 
+async function uploadManual(file){
+  const fd = new FormData();
+  fd.append('file', file);
+  const res = await fetch('/products/manual-upload', { method: 'POST', body: fd });
+  if(!res.ok){
+    const err = await res.json().catch(()=>({}));
+    alert('Ошибка: '+(err.detail || ('HTTP '+res.status)));
+    return;
+  }
+  const data = await res.json();
+  renderTable(data.items || [], {}); // среднюю можно подмешать после кнопки "Загрузить из БД"
+  const note = document.getElementById('note');
+  if(note){ note.textContent = `Файл загружен: ${file.name}. Позиций: ${data.count||0}`; }
+}
+
 function exportCsvFromTable(){
   const rows = [];
   const header = ["code","name","brand","category","qty","price","active","barcode","avg_cost","margin_percent","profit_total"];
@@ -302,28 +329,27 @@ function exportCsvFromTable(){
   document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
 }
 
-async function uploadManual(file){
-  const fd = new FormData();
-  fd.append('file', file);
-  const res = await fetch('/products/manual-upload', { method: 'POST', body: fd });
-  if(!res.ok){
-    const err = await res.json().catch(()=>({}));
-    alert('Ошибка: '+(err.detail || ('HTTP '+res.status)));
-    return;
-  }
-  const data = await res.json();
-  renderTable(data.items || [], {}); // после импорта можно нажать "Загрузить" чтобы подмешать avg из БД
-  const note = document.getElementById('note');
-  if(note){ note.textContent = `Файл загружен: ${file.name}. Позиций: ${data.count||0}`; }
+async function restoreDB(file){
+  const fd = new FormData(); fd.append('file', file);
+  const r = await fetch('/products/db/restore', {method:'POST', body: fd});
+  if(!r.ok){ alert('Не удалось восстановить БД'); return; }
+  alert('БД восстановлена'); loadFromDB();
 }
 
 document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('btnLoad').addEventListener('click', loadProducts);
+  document.getElementById('btnLoadDB').addEventListener('click', loadFromDB);
   document.getElementById('btnExport').addEventListener('click', exportCsvFromTable);
+
   const fi = document.getElementById('fileInput');
   fi.addEventListener('change', async ()=>{ if(fi.files && fi.files[0]){ await uploadManual(fi.files[0]); fi.value=''; } });
+
+  const rfi = document.getElementById('restoreInput');
+  rfi.addEventListener('change', async ()=>{ if(rfi.files && rfi.files[0]){ await restoreDB(rfi.files[0]); rfi.value=''; } });
+
   const t = document.getElementById('themeToggle');
   if(t){ t.addEventListener('change', (e)=> document.body.setAttribute('data-theme', e.target.checked ? 'dark' : 'light')); }
+
   loadProducts();
 });
 </script>
