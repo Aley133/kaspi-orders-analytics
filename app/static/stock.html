@@ -47,17 +47,13 @@
     .muted{color:var(--muted)}
     .dot{display:inline-block;width:10px;height:10px;border-radius:50%;background:#9ca3af;position:relative}
     .dot.on{background:#10b981}
-    .dot.on::after{
-      content:"";position:absolute;inset:-5px; border-radius:50%; border:2px solid rgba(16,185,129,.4);
-      animation:pulse 1.8s ease-out infinite;
-    }
+    .dot.on::after{content:"";position:absolute;inset:-5px;border-radius:50%;border:2px solid rgba(16,185,129,.4);animation:pulse 1.8s ease-out infinite;}
     @keyframes pulse{0%{transform:scale(.6);opacity:1}70%{transform:scale(1.4);opacity:0}100%{opacity:0}}
     .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:var(--pill-bg);color:var(--pill-fg);font-size:12px}
     .col-right{text-align:right}
     .detail{background:var(--card)}
     .block{padding:12px}
     .shell{border:1px solid var(--line);border-radius:12px;overflow:hidden}
-    .gap8{gap:8px}
   </style>
 </head>
 <body data-theme="light">
@@ -122,9 +118,6 @@ const qsa=(s,el=document)=>[...el.querySelectorAll(s)];
 const nf = new Intl.NumberFormat('ru-RU');
 const fmt = n => nf.format(Number(n||0));
 
-let CATEGORIES = [];
-
-// ----- Theme -----
 (function initTheme(){
   const saved = localStorage.getItem('theme') || 'light';
   document.body.setAttribute('data-theme', saved);
@@ -142,25 +135,7 @@ async function fetchJSON(url, opts){
   return r.json();
 }
 
-function skuFromRow(tr){
-  let sku = tr?.dataset?.sku;
-  if(!sku){
-    const text = tr?.cells?.[0]?.textContent?.trim();
-    if(text) sku = text;
-  }
-  return sku;
-}
-
-function clearDetails(){ qsa('tr.detail').forEach(tr => tr.remove()); }
-
-function makeDetailRow(colspan){
-  const tr = document.createElement('tr');
-  tr.className = 'detail';
-  const td = document.createElement('td');
-  td.colSpan = colspan;
-  tr.appendChild(td);
-  return tr;
-}
+function parsePriceCell(cell){ return Number((cell?.textContent||'0').toString().replace(/\s/g,'')); }
 
 function renderProducts(items){
   const tb = qs('#tbl tbody');
@@ -175,7 +150,7 @@ function renderProducts(items){
       <td>${sku}</td>
       <td>${it.name||''}</td>
       <td>${it.brand||''}</td>
-      <td>${it.category||''}${it.commission_total!=null?` <span class="pill">${it.commission_total}%</span>`:''}</td>
+      <td>${it.category||''}</td>
       <td>${fmt(it.qty||0)}</td>
       <td>${fmt(it.price||0)}</td>
       <td><span class="dot ${on?'on':''}"></span></td>
@@ -214,124 +189,68 @@ async function importFile(file){
   renderProducts(data.items||[]);
 }
 
-function parsePriceCell(cell){ return Number((cell?.textContent||'0').toString().replace(/\s/g,'')); }
-
-// ---- Маржа (калькулятор в «Партиях») ----
-function renderMarginPreview(host, priceKZT, commissionTotalGetter, rowGetter){
-  const wrap = document.createElement('div');
-  wrap.className = 'block shell';
-  wrap.style.marginTop = '10px';
-  wrap.innerHTML = `
-    <div class="row gap8" style="align-items:flex-end">
-      <div><div class="muted">Ритейл-цена (из таблицы)</div><div style="font-weight:700" id="mpPrice">${fmt(priceKZT)}</div></div>
-      <div>
-        <div class="muted">Доп. расходы/комиссия, %</div>
-        <input id="mpExtra" type="number" step="0.1" min="0" value="0" style="width:120px">
-      </div>
-      <div>
-        <div class="muted">Итоговая комиссия, %</div>
-        <div id="mpComm" style="font-weight:700">—</div>
-      </div>
-      <div style="margin-left:auto;text-align:right">
-        <div class="muted">Чистая прибыль / 1 шт</div>
-        <div id="mpNet" style="font-weight:800;font-size:18px">—</div>
-      </div>
-    </div>
-  `;
-  host.appendChild(wrap);
-
-  const mpExtra = qs('#mpExtra', wrap), mpComm = qs('#mpComm', wrap), mpNet = qs('#mpNet', wrap);
-
-  const recalc = ()=>{
-    const comBase = Number(commissionTotalGetter()||0);
-    const extra = Number(mpExtra.value||0);
-    mpComm.textContent = (comBase+extra).toFixed(2) + '%';
-    // из активной строки партий берём unit_cost первой непустой
-    const row = rowGetter();
-    const uc = row ? Number(row.querySelector('input[data-role="uc"]').value||0) : 0;
-    const commissionAmount = priceKZT * (comBase+extra)/100;
-    const net = priceKZT - commissionAmount - uc;
-    mpNet.textContent = fmt(net);
-  };
-
-  wrap.addEventListener('input', recalc);
-  recalc();
+function clearDetails(){ qsa('tr.detail').forEach(tr => tr.remove()); }
+function makeDetailRow(colspan){
+  const tr = document.createElement('tr');
+  tr.className = 'detail';
+  const td = document.createElement('td');
+  td.colSpan = colspan;
+  tr.appendChild(td);
+  return tr;
 }
 
 async function openDetail(row){
   clearDetails();
-  const sku = skuFromRow(row);
+  const sku = row?.dataset?.sku || row.cells?.[0]?.textContent?.trim();
   if(!sku) { alert('У товара нет кода/sku — некуда сохранить партии.'); return; }
 
-  // категории для селектора
-  if(!CATEGORIES.length){
-    const c = await fetchJSON('/products/db/categories');
-    CATEGORIES = c.categories || [];
-  }
-
-  // ставим строку-деталь
   const tr = makeDetailRow(row.children.length);
   row.insertAdjacentElement('afterend', tr);
   const mount = tr.firstChild;
 
   mount.innerHTML = `
     <div class="block">
-      <div class="row" style="align-items:flex-end; gap:12px; margin-bottom:8px">
-        <div>
-          <div class="muted" style="margin-bottom:4px">Категория / комиссия</div>
-          <div class="row" style="gap:6px">
-            <select id="catSel"></select>
-            <button class="btn secondary" id="btnSaveCat">Сохранить категорию</button>
-          </div>
-        </div>
-      </div>
-
       <div style="margin:8px 0 6px; font-weight:600">Партии закупок — <span id="dTitle">${row.cells[1].textContent}</span></div>
-      <table style="width:100%">
-        <thead><tr><th>Дата</th><th>Кол-во</th><th>Закуп., KZT</th><th>Примечание</th><th></th></tr></thead>
+      <table style="width:100%" id="btTable">
+        <thead>
+          <tr>
+            <th>Дата</th><th>Кол-во</th><th>Закуп., KZT</th><th>Комиссия, %</th><th>Маржа / шт</th><th>Код</th><th>Прим.</th><th></th>
+          </tr>
+        </thead>
         <tbody id="btBody"></tbody>
       </table>
       <div class="row" style="margin-top:8px; gap:8px">
         <button class="btn secondary" id="btnAddRow">+ Добавить</button>
         <button class="btn" id="btnSaveRows">Сохранить</button>
       </div>
-      <div id="marginMount"></div>
     </div>
   `;
 
-  // селектор категорий
-  const sel = qs('#catSel', mount);
-  sel.innerHTML = CATEGORIES.map(c=>{
-    const total = (Number(c.base_percent||0)+Number(c.extra_percent||0)+Number(c.tax_percent||0)).toFixed(2);
-    return `<option value="${c.name}" data-total="${total}">${c.name} — ${total}%</option>`;
-  }).join('');
-  const currentCat = row.cells[3].childNodes[0]?.nodeValue?.trim() || '';
-  if(currentCat) sel.value = currentCat;
-
-  qs('#btnSaveCat', mount).onclick = async ()=>{
-    const cat = sel.value || '';
-    await fetchJSON(`/products/db/product-category/${encodeURIComponent(sku)}`, {
-      method:'PUT',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({category: cat})
-    });
-    const match = CATEGORIES.find(x=>x.name===cat);
-    const total = match ? (Number(match.base_percent||0)+Number(match.extra_percent||0)+Number(match.tax_percent||0)).toFixed(2) : null;
-    row.cells[3].innerHTML = cat + (total?` <span class="pill">${total}%</span>`:'');
-  };
-
   const tbody = qs('#btBody', mount);
+  const priceKZT = parsePriceCell(row.cells[5]);
+
+  function recalc(tr){
+    const [dEl, qEl, cEl, commEl] = qsa('input', tr);
+    const uc = Number(cEl.value||0);
+    const comm = Number(commEl.value||0);
+    const net = priceKZT - (priceKZT * comm/100) - uc;
+    tr.querySelector('.net').textContent = isFinite(net) ? fmt(net) : '—';
+  }
 
   function addRow(data){
     const tr = document.createElement('tr');
     tr.innerHTML = `
       <td><input type="date" value="${data?.date || new Date().toISOString().slice(0,10)}"></td>
       <td><input type="number" min="0" step="1" value="${data?.qty ?? ''}" style="width:90px"></td>
-      <td><input data-role="uc" type="number" min="0" step="0.01" value="${data?.unit_cost ?? ''}" style="width:110px"></td>
+      <td><input type="number" min="0" step="0.01" value="${data?.unit_cost ?? ''}" style="width:110px"></td>
+      <td><input type="number" min="0" step="0.01" value="${data?.commission_pct ?? ''}" style="width:100px"></td>
+      <td class="net">—</td>
+      <td class="code">${data?.batch_code || '<span class="muted">— генерируется</span>'}</td>
       <td><input type="text" value="${data?.note ?? ''}"></td>
       <td>${data?.id ? `<button class="btn-link btnDel" data-id="${data.id}">Удалить</button>` : ''}</td>
     `;
     tbody.appendChild(tr);
+    recalc(tr);
   }
 
   // текущие партии
@@ -339,6 +258,12 @@ async function openDetail(row){
   (data.batches||[]).forEach(addRow);
 
   qs('#btnAddRow', mount).onclick = ()=> addRow({});
+
+  tbody.addEventListener('input', e=>{
+    const tr = e.target.closest('tr'); if(!tr) return;
+    recalc(tr);
+  });
+
   tbody.addEventListener('click', async (e)=>{
     const btn = e.target.closest('.btnDel');
     if(!btn) return;
@@ -348,28 +273,35 @@ async function openDetail(row){
 
   qs('#btnSaveRows', mount).onclick = async ()=>{
     const entries = qsa('tr', tbody).map(tr=>{
-      const [d,q,c,n] = qsa('input', tr);
-      return {date:d.value, qty:Number(q.value||0), unit_cost:Number(c.value||0), note:n.value||null};
+      const [d,q,c,comm, ,codeCell, noteInput] = [
+        tr.children[0].querySelector('input'),
+        tr.children[1].querySelector('input'),
+        tr.children[2].querySelector('input'),
+        tr.children[3].querySelector('input'),
+        tr.children[4],
+        tr.children[5],
+        tr.children[6].querySelector('input'),
+      ];
+      const batch_code = codeCell.textContent?.trim()?.startsWith('—') ? null : (codeCell.textContent||'').trim();
+      return {
+        date: d.value,
+        qty: Number(q.value||0),
+        unit_cost: Number(c.value||0),
+        commission_pct: Number(comm.value||0) || null,
+        note: noteInput.value || null,
+        batch_code
+      };
     }).filter(e => e.qty>0 && e.unit_cost>0);
     if(!entries.length){ alert('Добавьте хотя бы одну строку партии.'); return; }
+
     await fetchJSON(`/products/db/price-batches/${encodeURIComponent(sku)}`, {
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({entries})
     });
     alert('Сохранено.');
-    openDetail(row); // перерисуем, чтобы появились кнопки "Удалить"
+    openDetail(row); // перезагрузим, чтобы серверные коды появились
   };
-
-  // калькулятор маржи (preview)
-  const price = parsePriceCell(row.cells[5]);
-  const commissionGetter = ()=>{
-    const opt = sel.options[sel.selectedIndex];
-    const ds = opt ? Number(opt.dataset.total||0) : 0;
-    return ds;
-  };
-  const rowGetter = ()=> qs('#btBody tr');
-  renderMarginPreview(qs('#marginMount', mount), price, commissionGetter, rowGetter);
 }
 
 // ----- events -----
@@ -402,7 +334,7 @@ document.addEventListener('DOMContentLoaded', ()=>{
     openDetail(row);
   });
 
-  // автозагрузка из БД
+  // автозагрузка из БД при открытии
   loadDB();
 });
 </script>
