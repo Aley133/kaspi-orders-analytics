@@ -3,7 +3,7 @@ from typing import Callable, Optional, List, Dict, Any, Tuple
 from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Body
 from fastapi.responses import Response, JSONResponse, FileResponse
 from pydantic import BaseModel
-import secrets, string
+import secrets
 import io
 import sqlite3, os, shutil
 from xml.etree import ElementTree as ET
@@ -106,14 +106,12 @@ def _ensure_schema():
             tax_percent REAL DEFAULT 0.0     -- налоги (если нужно)
         );
         """)
-
         # миграция недостающих колонок batches
         cols = {r["name"] for r in c.execute("PRAGMA table_info(batches)")}
         if "commission_pct" not in cols:
             c.execute("ALTER TABLE batches ADD COLUMN commission_pct REAL")
         if "batch_code" not in cols:
             c.execute("ALTER TABLE batches ADD COLUMN batch_code TEXT")
-
         # сгенерировать коды для старых партий
         for r in c.execute("SELECT id FROM batches WHERE batch_code IS NULL OR batch_code=''").fetchall():
             c.execute("UPDATE batches SET batch_code=? WHERE id=?", (_gen_batch_code(c), r["id"]))
@@ -167,7 +165,7 @@ def _upsert_products(items: List[Dict[str, Any]]) -> None:
             barcode = it.get("barcode") or it.get("Barcode")
             active = it.get("active")
             if isinstance(active, str):
-                active = 1 if active.lower() in ("1","true","yes","on") else 0
+                active = 1 if active.lower() in ("1", "true", "yes", "on") else 0
             elif isinstance(active, bool):
                 active = 1 if active else 0
             else:
@@ -469,6 +467,7 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
     async def export_products_csv(active: int = Query(1)):
         if client is None:
             raise HTTPException(status_code=500, detail="KASPI_TOKEN is not set")
+
         items, _, _ = _collect_products(client, active_only=bool(active))
 
         def esc(s: str) -> str:
@@ -478,14 +477,32 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
             return s
 
         header = "id,code,name,price,qty,active,brand,category,barcode\n"
-        body = "".join([",".join(esc(x) for x in [
-            r["id"], r["code"], r["name"], r["price"], r["qty"],
-            1 if r["active"] else 0 if r["active"] is False else "",
-            r["brand"], r["category"], r["barcode"]
-        ]) + "\n" for r in items])
+        body = "".join(
+            [
+                ",".join(
+                    esc(x)
+                    for x in [
+                        r["id"],
+                        r["code"],
+                        r["name"],
+                        r["price"],
+                        r["qty"],
+                        1 if r["active"] else 0 if r["active"] is False else "",
+                        r["brand"],
+                        r["category"],
+                        r["barcode"],
+                    ]
+                )
+                + "\n"
+                for r in items
+            ]
+        )
         csv = header + body
-        return Response(content=csv, media_type="text/csv; charset=utf-8",
-                        headers={"Content-Disposition": 'attachment; filename=\"products.csv\""})
+        return Response(
+            content=csv,
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": 'attachment; filename="products.csv"'},
+        )
 
     @router.get("/probe")
     async def probe_products(active: int = Query(1)):
@@ -525,7 +542,7 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
             # Гарантируем поля
             d.setdefault("code", (d.get("sku") or d.get("vendorCode") or d.get("barcode") or d.get("id") or ""))
             d["code"] = str(d["code"]).strip()
-            d.setdefault("id", d["code"])
+            d.setdefault("id", d["code"])  # ключевая строка: id = code
             d.setdefault("name", d.get("model") or d.get("title") or d.get("Name") or d.get("name") or d["code"])
             d["name"] = str(d["name"]).strip()
             d["qty"] = _to_int(d.get("qty") or d.get("quantity") or d.get("stock"))
