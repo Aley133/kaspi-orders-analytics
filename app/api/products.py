@@ -44,7 +44,7 @@ def _resolve_db_path() -> str:
 
 DB_PATH = _resolve_db_path()
 
-# migrate old file into /data once
+# Переносим старую локальную БД в /data один раз (если была)
 _OLD_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data.sqlite3"))
 if DB_PATH != _OLD_PATH and os.path.exists(_OLD_PATH) and not os.path.exists(DB_PATH):
     try:
@@ -61,11 +61,19 @@ def _db():
     conn.row_factory = sqlite3.Row
     return conn
 
-# --- REPLACE the _ensure_schema() with this version ---
+def _gen_batch_code(conn: sqlite3.Connection) -> str:
+    """Уникальный 6-символьный код партии (без неоднозначных символов)."""
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    while True:
+        code = "".join(secrets.choice(alphabet) for _ in range(6))
+        if not conn.execute("SELECT 1 FROM batches WHERE batch_code=?", (code,)).fetchone():
+            return code
+
 def _ensure_schema():
     with _db() as c:
         c.executescript("""
         PRAGMA journal_mode=WAL;
+
         CREATE TABLE IF NOT EXISTS products(
             sku TEXT PRIMARY KEY,
             name TEXT,
@@ -77,6 +85,7 @@ def _ensure_schema():
             barcode TEXT,
             updated_at TEXT
         );
+
         CREATE TABLE IF NOT EXISTS batches(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             sku TEXT NOT NULL,
@@ -84,28 +93,36 @@ def _ensure_schema():
             qty INTEGER NOT NULL,
             unit_cost REAL NOT NULL,
             note TEXT,
-            /* new columns will be added below if missing */
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(sku) REFERENCES products(sku) ON DELETE CASCADE
         );
         CREATE INDEX IF NOT EXISTS idx_batches_sku ON batches(sku);
+
+        /* Категории/комиссии (уникальное имя) */
+        CREATE TABLE IF NOT EXISTS categories(
+            name TEXT PRIMARY KEY,
+            base_percent REAL DEFAULT 0.0,   -- комиссия маркетплейса
+            extra_percent REAL DEFAULT 3.0,  -- доставка/прочее
+            tax_percent REAL DEFAULT 0.0     -- налоги (если нужно)
+        );
         """)
-        # --- migrate optional columns if they are missing ---
+
+        # миграция недостающих колонок batches
         cols = {r["name"] for r in c.execute("PRAGMA table_info(batches)")}
         if "commission_pct" not in cols:
             c.execute("ALTER TABLE batches ADD COLUMN commission_pct REAL")
         if "batch_code" not in cols:
             c.execute("ALTER TABLE batches ADD COLUMN batch_code TEXT")
-        # generate codes for old rows
+
+        # сгенерировать коды для старых партий
         for r in c.execute("SELECT id FROM batches WHERE batch_code IS NULL OR batch_code=''").fetchall():
             c.execute("UPDATE batches SET batch_code=? WHERE id=?", (_gen_batch_code(c), r["id"]))
 
 def _seed_categories_if_empty():
     _ensure_schema()
     with _db() as c:
-        cnt = c.execute("SELECT COUNT(*) FROM categories").fetchone()[0]
+        cnt = c.execute("SELECT COUNT(*) AS c FROM categories").fetchone()["c"]
         if cnt == 0:
-            # Базовый набор — поправите в UI
             defaults = [
                 ("Витамины/БАДы", 10.0, 3.0, 0.0),
                 ("Сад/освещение", 10.0, 3.0, 0.0),
@@ -154,7 +171,7 @@ def _upsert_products(items: List[Dict[str, Any]]) -> None:
             elif isinstance(active, bool):
                 active = 1 if active else 0
             else:
-                active = 1 if qty > 0 else 0  # запасной вариант
+                active = 1 if qty > 0 else 0
             c.execute("""
                 INSERT INTO products(sku,name,brand,category,price,quantity,active,barcode,updated_at)
                 VALUES(?,?,?,?,?,?,?,?,datetime('now'))
@@ -169,8 +186,19 @@ def _upsert_products(items: List[Dict[str, Any]]) -> None:
                     updated_at=excluded.updated_at
             """, (sku, name, brand, category, price, qty, active, barcode))
 
+def _avg_cost(sku: str) -> float | None:
+    _ensure_schema()
+    with _db() as c:
+        r = c.execute(
+            "SELECT SUM(qty*unit_cost) AS tc, SUM(qty) AS tq FROM batches WHERE sku=?",
+            (sku,)
+        ).fetchone()
+        if not r or not r["tq"]:
+            return None
+        return float(r["tc"]) / float(r["tq"])
+
 # =============================================================================
-# Parsers
+# Parsers (XML/Excel)
 # =============================================================================
 def _parse_xml(content: bytes) -> List[Dict[str, Any]]:
     """
@@ -219,11 +247,15 @@ def _parse_xml(content: bytes) -> List[Dict[str, Any]]:
             if strip(el.tag) == "availability":
                 sc = el.get("stockCount")
                 if sc:
-                    try: qty = int(float(sc))
-                    except Exception: qty = 0
+                    try:
+                        qty = int(float(sc))
+                    except Exception:
+                        qty = 0
                 av = (el.get("available") or "").strip().lower()
-                if av in ("yes", "true", "1"): active = True
-                elif av in ("no", "false", "0"): active = False
+                if av in ("yes", "true", "1"):
+                    active = True
+                elif av in ("no", "false", "0"):
+                    active = False
                 break
 
         price = 0.0
@@ -231,12 +263,14 @@ def _parse_xml(content: bytes) -> List[Dict[str, Any]]:
             if strip(el.tag) == "cityprice":
                 txt = (el.text or "").strip()
                 if txt:
-                    try: price = float(txt.replace(" ", "").replace(",", "."))
-                    except Exception: price = 0.0
+                    try:
+                        price = float(txt.replace(" ", "").replace(",", "."))
+                    except Exception:
+                        price = 0.0
                 break
 
         rows.append({
-            "id": code,          # важно: теперь и id и code одинаковы
+            "id": code,          # важно: id = code
             "code": code,
             "name": name or code,
             "brand": brand or None,
@@ -268,7 +302,7 @@ def _parse_excel(file: UploadFile) -> List[Dict[str, Any]]:
 # =============================================================================
 try:
     from app.kaspi_client import KaspiClient  # type: ignore
-except Exception:
+except Exception:  # pragma: no cover
     try:
         from ..kaspi_client import KaspiClient  # type: ignore
     except Exception:
@@ -314,7 +348,10 @@ def _find_iter_fn(client: Any) -> Optional[Callable]:
 def _collect_products(client: KaspiClient, active_only: Optional[bool]) -> Tuple[List[Dict[str, Any]], int, Optional[str]]:
     iter_fn = _find_iter_fn(client)
     if iter_fn is None:
-        raise HTTPException(status_code=501, detail="В kaspi_client нет метода каталога. Ожидается iter_products/iter_offers/iter_catalog.")
+        raise HTTPException(
+            status_code=501,
+            detail="В kaspi_client нет метода каталога. Ожидается iter_products/iter_offers/iter_catalog."
+        )
 
     items: List[Dict[str, Any]] = []
     seen = set()
@@ -355,6 +392,7 @@ def _collect_products(client: KaspiClient, active_only: Optional[bool]) -> Tuple
             "barcode": barcode,
         })
 
+    # 1) основной каталог
     try:
         try:
             for it in iter_fn(active_only=bool(active_only) if active_only is not None else True):
@@ -366,6 +404,7 @@ def _collect_products(client: KaspiClient, active_only: Optional[bool]) -> Tuple
         items = []
         total = 0
 
+    # 2) резерв: из заказов
     if not items:
         try:
             for it in client.iter_products_from_orders(days=60):
@@ -380,7 +419,6 @@ def _collect_products(client: KaspiClient, active_only: Optional[bool]) -> Tuple
 # =============================================================================
 # Pydantic models
 # =============================================================================
-# --- REPLACE Pydantic models (add commission_pct & batch_code) ---
 class BatchIn(BaseModel):
     date: str
     qty: int
@@ -435,7 +473,8 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
 
         def esc(s: str) -> str:
             s = "" if s is None else str(s)
-            if any(c in s for c in [",", '"', "\n"]): s = '"' + s.replace('"', '""') + '"'
+            if any(c in s for c in [",", '"', "\n"]):
+                s = '"' + s.replace('"', '""') + '"'
             return s
 
         header = "id,code,name,price,qty,active,brand,category,barcode\n"
@@ -446,7 +485,7 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
         ]) + "\n" for r in items])
         csv = header + body
         return Response(content=csv, media_type="text/csv; charset=utf-8",
-                        headers={"Content-Disposition": 'attachment; filename="products.csv"'})
+                        headers={"Content-Disposition": 'attachment; filename=\"products.csv\""})
 
     @router.get("/probe")
     async def probe_products(active: int = Query(1)):
@@ -486,7 +525,7 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
             # Гарантируем поля
             d.setdefault("code", (d.get("sku") or d.get("vendorCode") or d.get("barcode") or d.get("id") or ""))
             d["code"] = str(d["code"]).strip()
-            d.setdefault("id", d["code"])  # ключевая строка: id = code
+            d.setdefault("id", d["code"])
             d.setdefault("name", d.get("model") or d.get("title") or d.get("Name") or d.get("name") or d["code"])
             d["name"] = str(d["name"]).strip()
             d["qty"] = _to_int(d.get("qty") or d.get("quantity") or d.get("stock"))
@@ -505,7 +544,6 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
     async def db_list(active_only: int = 1, search: str = ""):
         _ensure_schema()
         _seed_categories_if_empty()
-        # словарь категорий -> проценты
         with _db() as c:
             cats = {r["name"]: dict(r) for r in c.execute("SELECT * FROM categories")}
             sql = "SELECT * FROM products"
@@ -548,27 +586,27 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
     async def get_batches(sku: str):
         _ensure_schema()
         with _db() as c:
-        rows = [dict(r) for r in c.execute(
-            "SELECT id, date, qty, unit_cost, commission_pct, batch_code, note "
-            "FROM batches WHERE sku=? ORDER BY date",
-            (sku,)
-        )]
-       avgc = _avg_cost(sku)
-       return {"batches": rows, "avg_cost": round(avgc, 2) if avgc is not None else None}
+            rows = [dict(r) for r in c.execute(
+                "SELECT id, date, qty, unit_cost, commission_pct, batch_code, note "
+                "FROM batches WHERE sku=? ORDER BY date",
+                (sku,)
+            )]
+        avgc = _avg_cost(sku)
+        return {"batches": rows, "avg_cost": round(avgc, 2) if avgc is not None else None}
 
     @router.post("/db/price-batches/{sku}")
     async def add_batches(sku: str, payload: BatchListIn = Body(...)):
         _ensure_schema()
         with _db() as c:
             for e in payload.entries:
-            code = e.batch_code or _gen_batch_code(c)
-            c.execute(
-                "INSERT INTO batches(sku,date,qty,unit_cost,note,commission_pct,batch_code) "
-                "VALUES(?,?,?,?,?,?,?)",
-                (sku, e.date, int(e.qty), float(e.unit_cost), e.note,
-                 float(e.commission_pct) if e.commission_pct is not None else None,
-                 code)
-            )
+                code = e.batch_code or _gen_batch_code(c)
+                c.execute(
+                    "INSERT INTO batches(sku,date,qty,unit_cost,note,commission_pct,batch_code) "
+                    "VALUES(?,?,?,?,?,?,?)",
+                    (sku, e.date, int(e.qty), float(e.unit_cost), e.note,
+                     float(e.commission_pct) if e.commission_pct is not None else None,
+                     code)
+                )
         avgc = _avg_cost(sku)
         return {"status": "ok", "avg_cost": round(avgc, 2) if avgc is not None else None}
 
