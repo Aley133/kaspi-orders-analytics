@@ -4,299 +4,290 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Мой склад — Kaspi</title>
-  <link rel="stylesheet" href="style.css" />
   <style>
-    .dot {width:10px;height:10px;border-radius:50%;display:inline-block;vertical-align:middle}
-    .dot.green{background:#26c281}
-    .row-panel {background: var(--panel-bg, #fafafa); padding:12px 14px; border-top:1px solid #eee;}
-    .btn-mini {font-size:12px; padding:4px 8px; border-radius:8px}
-    .muted {color:#666; font-size:12px}
-    .cell-sku{font-family: ui-monospace, Consolas, monospace}
+    body{font:14px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Helvetica Neue",Arial;}
+    .wrap{max-width:1400px;margin:20px auto;padding:0 12px;}
+    .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    .btn{background:#1f7aee;color:#fff;border:0;border-radius:8px;padding:8px 12px;cursor:pointer}
+    .btn:disabled{opacity:.5;cursor:default}
+    .btn.secondary{background:#e9eef6;color:#1f2a37}
+    input[type="text"],input[type="number"],select{height:34px;padding:6px 8px;border:1px solid #cbd5e1;border-radius:8px}
+    .muted{color:#6b7280}
+    table{border-collapse:collapse;width:100%}
+    th,td{border-bottom:1px solid #e5e7eb;padding:8px 10px;text-align:left;vertical-align:middle}
+    thead th{position:sticky;top:0;background:#f8fafc;z-index:1}
+    .dot{display:inline-block;width:10px;height:10px;border-radius:50%;background:#9ca3af}
+    .dot.on{background:#10b981}
+    .detail{background:#f8fafc}
+    .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#eef2ff;color:#3730a3;font-size:12px}
+    .btn-link{background:transparent;color:#2563eb;border:0;cursor:pointer;padding:0}
+    .col-right{text-align:right}
   </style>
 </head>
-<body data-theme="light">
-  <div class="layout">
-    <aside class="sidebar">
-      <div class="brand">⚡ LeoXpress</div>
-      <nav class="nav">
-        <a class="nav-item" href="index.html">Главная</a>
-        <a class="nav-item" href="stock.html">Мой склад</a>
-      </nav>
-      <div class="theme-switch">
-        <label class="switch">
-          <input type="checkbox" id="themeToggle">
-          <span class="slider"></span>
-        </label>
-        <span>Тёмная тема</span>
-      </div>
-    </aside>
+<body>
+<div class="wrap">
+  <h1>Мой склад</h1>
 
-    <div class="content">
-      <h1>Мой склад</h1>
-
-      <section class="shell">
-        <div class="filters">
-          <div class="row" style="gap:8px; flex-wrap:wrap;">
-            <label class="chk"><input type="checkbox" id="onlyActive" checked> Только активные</label>
-            <label>Поиск</label>
-            <input type="text" id="search" placeholder="Название, код, бренд...">
-            <button class="btn" id="btnLoadDb">Загрузить из БД</button>
-            <button class="btn" id="btnLoadApi">Загрузить (API)</button>
-            <label class="btn" for="fileInput">Импорт из файла (XML/XLSX)</label>
-            <input type="file" id="fileInput" accept=".xml,.xlsx,.xls" style="display:none">
-            <button class="btn" id="btnBackup">Бэкап БД</button>
-            <label class="btn" for="restoreInput">Восстановить БД</label>
-            <input type="file" id="restoreInput" accept=".sqlite3,.db,.sqlite" style="display:none">
-          </div>
-        </div>
-
-        <div id="note" class="muted" style="margin:6px 0 10px"></div>
-        <div class="muted" style="margin:6px 0 10px">
-          Партию закупок открывай кнопкой «Партии» под нужным товаром. Сохраняется в БД, номер партии присваивается автоматически.
-        </div>
-
-        <div class="shell" style="padding:0">
-          <div style="overflow:auto; max-height:70vh">
-            <table class="table" id="tbl">
-              <thead>
-                <tr>
-                  <th style="min-width:130px">Код</th>
-                  <th style="min-width:320px">Название</th>
-                  <th style="min-width:120px">Бренд</th>
-                  <th>Категория</th>
-                  <th>ШТ</th>
-                  <th>Цена, KZT</th>
-                  <th style="min-width:70px">Активен</th>
-                  <th style="min-width:100px">Партии</th>
-                </tr>
-              </thead>
-              <tbody></tbody>
-            </table>
-          </div>
-        </div>
-      </section>
-    </div>
+  <div class="row" style="margin-bottom:10px">
+    <label><input id="onlyActive" type="checkbox" checked> Только активные</label>
+    <input id="search" type="text" placeholder="Название, код, бренд..." style="min-width:260px">
+    <button class="btn" id="btnLoadApi">Загрузить</button>
+    <label class="btn secondary" for="fileInput">Импорт из файла (XML/XLSX)</label>
+    <input type="file" id="fileInput" accept=".xml,.xlsx,.xls" style="display:none">
+    <button class="btn secondary" id="btnLoadDb">Загрузить из БД</button>
+    <button class="btn secondary" id="btnBackup">Бэкап БД</button>
+    <label class="btn secondary" for="restoreFile">Восстановить БД</label>
+    <input type="file" id="restoreFile" accept=".sqlite3" style="display:none">
   </div>
 
+  <div id="note" class="muted" style="margin:6px 0 12px"></div>
+
+  <div style="overflow:auto; max-height:70vh; border:1px solid #e5e7eb; border-radius:10px">
+    <table id="tbl">
+      <thead>
+        <tr>
+          <th style="min-width:160px">Код</th>
+          <th style="min-width:360px">Название</th>
+          <th>Бренд</th>
+          <th>Категория</th>
+          <th>ШТ</th>
+          <th>Цена, KZT</th>
+          <th>Активен</th>
+          <th class="col-right">Партии</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+
 <script>
+const qs=(s,el=document)=>el.querySelector(s);
+const qsa=(s,el=document)=>[...el.querySelectorAll(s)];
 const nf = new Intl.NumberFormat('ru-RU');
-const qs = (s, el=document)=>el.querySelector(s);
-const qsa= (s, el=document)=>Array.from(el.querySelectorAll(s));
+const fmt = n => nf.format(Number(n||0));
 
-function fmt(n){ return nf.format(Math.round((Number(n)||0)*100)/100); }
+let CATEGORIES = [];
 
-async function loadFromDB(){
-  const onlyActive = qs('#onlyActive').checked ? 1 : 0;
-  const search = qs('#search').value.trim();
-  const url = `/products/db/list?active_only=${onlyActive}&search=${encodeURIComponent(search)}`;
-  const r = await fetch(url);
-  const data = await r.json();
-  qs('#note').textContent = `Загружено из БД: ${data.count || (data.items||[]).length}`;
-  renderTable(data.items || []);
+async function fetchJSON(url, opts){
+  const r = await fetch(url, opts||{});
+  if(!r.ok) throw new Error((await r.text())||r.statusText);
+  return r.json();
 }
 
-async function loadFromAPI(){
-  const onlyActive = qs('#onlyActive').checked ? 1 : 0;
-  const q = qs('#search').value.trim();
-  const p = new URLSearchParams({active: String(onlyActive), page:'1', page_size:'2000'});
-  if(q) p.set('q', q);
-  const r = await fetch(`/products/list?${p.toString()}`);
-  const data = await r.json();
-  if(data.note) qs('#note').textContent = data.note;
-  renderTable(data.items || []);
+function skuFromRow(tr){
+  let sku = tr?.dataset?.sku;
+  if(!sku){
+    const text = tr?.cells?.[0]?.textContent?.trim();
+    if(text) sku = text;
+  }
+  return sku;
 }
 
-function renderTable(items){
+function clearDetails(){
+  qsa('tr.detail').forEach(tr => tr.remove());
+}
+
+function makeDetailRow(colspan){
+  const tr = document.createElement('tr');
+  tr.className = 'detail';
+  const td = document.createElement('td');
+  td.colSpan = colspan;
+  tr.appendChild(td);
+  return tr;
+}
+
+function renderProducts(items){
   const tb = qs('#tbl tbody');
   tb.innerHTML = '';
-  let openPanelSku = null;
-
-  for(const it of items){
+  items.forEach(it=>{
     const tr = document.createElement('tr');
+    const sku = it.code || it.id || '';
+    tr.dataset.sku = sku;
     tr.className = 'data-row';
-    tr.dataset.sku = it.code || it.id || '';
+    const on = it.qty>0 || it.active===true;
     tr.innerHTML = `
-      <td class="cell-sku">${it.code || it.id || ''}</td>
-      <td>${it.name || ''}</td>
-      <td>${it.brand || ''}</td>
-      <td>${it.category || ''}</td>
-      <td>${fmt(it.qty || 0)}</td>
-      <td>${fmt(it.price || 0)}</td>
-      <td>${(Number(it.qty||0) > 0) ? '<span class="dot green" title="В наличии"></span>' : ''}</td>
-      <td><button class="btn btn-mini btn-batches">Партии</button></td>
+      <td>${sku}</td>
+      <td>${it.name||''}</td>
+      <td>${it.brand||''}</td>
+      <td>${it.category||''}${it.commission_total!=null?` <span class="pill">${it.commission_total}%</span>`:''}</td>
+      <td>${fmt(it.qty||0)}</td>
+      <td>${fmt(it.price||0)}</td>
+      <td><span class="dot ${on?'on':''}"></span></td>
+      <td class="col-right"><button class="btn-link btn-parties">Партии</button></td>
     `;
     tb.appendChild(tr);
-
-    // место под панель
-    const trPanel = document.createElement('tr');
-    trPanel.className = 'panel-row';
-    trPanel.innerHTML = `<td colspan="8" class="row-panel" style="display:none"></td>`;
-    tb.appendChild(trPanel);
-  }
-
-  tb.addEventListener('click', async (e) => {
-    const btn = e.target.closest('.btn-batches');
-    if(!btn) return;
-    const row = btn.closest('tr.data-row');
-    const sku = row?.dataset?.sku;
-    if(!sku){
-      alert('У товара нет кода/sku — некуда сохранить партии.');
-      return;
-    }
-    // закрыть другие панели
-    qsa('.panel-row .row-panel', tb).forEach(p => p.style.display='none');
-    // открыть текущую
-    const panelCell = row.nextElementSibling.querySelector('.row-panel');
-    panelCell.style.display = 'block';
-    panelCell.innerHTML = renderPanelSkeleton(row);
-    await fillPanel(panelCell, sku, row.cells[1]?.textContent?.trim() || sku);
   });
 }
 
-function renderPanelSkeleton(row){
-  const sku = row.dataset.sku;
-  const name = row.cells[1]?.textContent || sku;
-  return `
-    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
-      <div style="font-weight:600">Партии — ${name}</div>
-      <div class="muted">SKU: <span class="cell-sku">${sku}</span></div>
-    </div>
-    <div style="margin-top:10px; display:grid; grid-template-columns: 1fr; gap:10px">
-      <div>
-        <div class="muted" style="margin-bottom:6px">Настройки по товару (для аналитики):</div>
-        <div style="display:flex; gap:8px; flex-wrap:wrap">
-          <label>Категория <input id="pmCategory" type="text" placeholder="Напр. БАДы" style="min-width:220px"></label>
-          <label>Комиссия, % <input id="pmCommission" type="number" step="0.01" min="0" style="width:120px"></label>
-          <label>Доп. %, налоги <input id="pmExtra" type="number" step="0.01" min="0" style="width:120px" value="3"></label>
-          <button id="pmSave" class="btn btn-mini">Сохранить настройки</button>
+async function loadAPI(){
+  const p = new URLSearchParams();
+  p.set('active', qs('#onlyActive').checked ? '1' : '0');
+  const q = qs('#search').value.trim();
+  if(q) p.set('q', q);
+  p.set('page','1'); p.set('page_size','2000');
+  const data = await fetchJSON(`/products/list?${p.toString()}`);
+  if(data.note) qs('#note').textContent = data.note;
+  renderProducts(data.items||[]);
+}
+
+async function loadDB(){
+  const p = new URLSearchParams();
+  p.set('active_only', qs('#onlyActive').checked ? '1' : '0');
+  p.set('search', qs('#search').value.trim());
+  const data = await fetchJSON(`/products/db/list?${p.toString()}`);
+  renderProducts(data.items||[]);
+}
+
+async function importFile(file){
+  const fd = new FormData();
+  fd.append('file', file);
+  const res = await fetch(`/products/manual-upload`, {method:'POST', body:fd});
+  if(!res.ok){ const t = await res.text(); throw new Error(t||res.statusText); }
+  const data = await res.json();
+  qs('#note').textContent = `Файл загружен: ${file.name}. Позиции: ${data.count||0}`;
+  renderProducts(data.items||[]);
+}
+
+async function openDetail(row){
+  clearDetails();
+  const sku = skuFromRow(row);
+  if(!sku) { alert('У товара нет кода/sku — некуда сохранить партии.'); return; }
+
+  // загрузим категории (для селектора)
+  if(!CATEGORIES.length){
+    const c = await fetchJSON('/products/db/categories');
+    CATEGORIES = c.categories || [];
+  }
+
+  // вставляем строку ниже
+  const tr = makeDetailRow(row.children.length);
+  row.insertAdjacentElement('afterend', tr);
+  const mount = tr.firstChild;
+
+  // базовая разметка
+  mount.innerHTML = `
+    <div style="padding:12px">
+      <div class="row" style="align-items:flex-end; gap:12px; margin-bottom:8px">
+        <div>
+          <div class="muted" style="margin-bottom:4px">Категория / комиссия</div>
+          <div class="row" style="gap:6px">
+            <select id="catSel"></select>
+            <button class="btn secondary" id="btnSaveCat">Сохранить категорию</button>
+          </div>
         </div>
       </div>
 
-      <table class="table" style="margin-top:4px">
-        <thead><tr><th>№</th><th>Дата</th><th>Кол-во</th><th>Закуп., KZT</th><th>Прим.</th><th></th></tr></thead>
-        <tbody id="bmBody"></tbody>
+      <div style="margin:8px 0 6px; font-weight:600">Партии закупок — <span id="dTitle">${row.cells[1].textContent}</span></div>
+      <table class="table" style="width:100%">
+        <thead><tr><th>Дата</th><th>Кол-во</th><th>Закуп., KZT</th><th>Примечание</th><th></th></tr></thead>
+        <tbody id="btBody"></tbody>
       </table>
-
-      <div style="display:flex; gap:8px">
-        <button id="bmAddRow" class="btn btn-mini">+ Добавить</button>
-        <button id="bmSave" class="btn btn-mini">Сохранить партии</button>
+      <div class="row" style="margin-top:8px; gap:8px">
+        <button class="btn secondary" id="btnAddRow">+ Добавить</button>
+        <button class="btn" id="btnSaveRows">Сохранить</button>
       </div>
     </div>
   `;
-}
 
-async function fillPanel(panel, sku, title){
-  // загрузить партии + мета
-  const r = await fetch(`/products/db/price-batches/${encodeURIComponent(sku)}`);
-  const data = await r.json();
-  // meta
-  qs('#pmCategory', panel).value = data.meta?.category ?? '';
-  if(data.meta?.commission != null) qs('#pmCommission', panel).value = data.meta.commission;
-  if(data.meta?.extra_percent != null) qs('#pmExtra', panel).value = data.meta.extra_percent;
+  // заполнить селектор категорий
+  const sel = qs('#catSel', mount);
+  sel.innerHTML = CATEGORIES.map(c=>{
+    const total = (Number(c.base_percent||0)+Number(c.extra_percent||0)+Number(c.tax_percent||0)).toFixed(2);
+    return `<option value="${c.name}">${c.name} — ${total}%</option>`;
+  }).join('');
+  // установить текущую категорию из таблицы
+  const currentCat = row.cells[3].childNodes[0]?.nodeValue?.trim() || '';
+  if(currentCat) sel.value = currentCat;
 
-  // партии
-  const tbody = qs('#bmBody', panel);
-  tbody.innerHTML = '';
-  (data.batches || []).forEach(b => addBatchRow(tbody, b));
+  qs('#btnSaveCat', mount).onclick = async ()=>{
+    const cat = sel.value || '';
+    await fetchJSON(`/products/db/product-category/${encodeURIComponent(sku)}`, {
+      method:'PUT',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({category: cat})
+    });
+    // перерисуем строку категории + плашку %
+    const match = CATEGORIES.find(x=>x.name===cat);
+    const total = match ? (Number(match.base_percent||0)+Number(match.extra_percent||0)+Number(match.tax_percent||0)).toFixed(2) : null;
+    row.cells[3].innerHTML = cat + (total?` <span class="pill">${total}%</span>`:'');
+  };
 
-  qs('#bmAddRow', panel).onclick = () => addBatchRow(tbody, {});
-  qs('#bmSave', panel).onclick = async () => {
-    const entries = collectBatchPayload(tbody);
-    if(entries.length === 0){ alert('Добавь хотя бы одну партию.'); return; }
-    const res = await fetch(`/products/db/price-batches/${encodeURIComponent(sku)}`, {
-      method: 'POST', headers: {'Content-Type':'application/json'},
+  const tbody = qs('#btBody', mount);
+
+  function addRow(data){
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td><input type="date" value="${data?.date || new Date().toISOString().slice(0,10)}"></td>
+      <td><input type="number" min="0" step="1" value="${data?.qty ?? ''}" style="width:90px"></td>
+      <td><input type="number" min="0" step="0.01" value="${data?.unit_cost ?? ''}" style="width:110px"></td>
+      <td><input type="text" value="${data?.note ?? ''}"></td>
+      <td>${data?.id ? `<button class="btn-link btnDel" data-id="${data.id}">Удалить</button>`:''}</td>
+    `;
+    tbody.appendChild(tr);
+  }
+
+  // текущие партии
+  const data = await fetchJSON(`/products/db/price-batches/${encodeURIComponent(sku)}`);
+  (data.batches||[]).forEach(addRow);
+
+  qs('#btnAddRow', mount).onclick = ()=> addRow({});
+  tbody.addEventListener('click', async (e)=>{
+    const btn = e.target.closest('.btnDel');
+    if(!btn) return;
+    await fetchJSON(`/products/db/price-batches/${encodeURIComponent(sku)}/${btn.dataset.id}`, {method:'DELETE'});
+    btn.closest('tr').remove();
+  });
+
+  qs('#btnSaveRows', mount).onclick = async ()=>{
+    const entries = qsa('tr', tbody).map(tr=>{
+      const [d,q,c,n] = qsa('input', tr);
+      return {date:d.value, qty:Number(q.value||0), unit_cost:Number(c.value||0), note:n.value||null};
+    }).filter(e => e.qty>0 && e.unit_cost>0);
+    if(!entries.length){ alert('Добавьте хотя бы одну строку партии.'); return; }
+    await fetchJSON(`/products/db/price-batches/${encodeURIComponent(sku)}`, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
       body: JSON.stringify({entries})
     });
-    if(!res.ok){ alert('Ошибка сохранения партий'); return; }
     alert('Сохранено.');
-    // Обновим таблицу из БД, чтобы qty/active подтянулись при следующей загрузке
+    // перезагрузим детали, чтобы появились кнопки "Удалить"
+    openDetail(row);
   };
+}
 
-  qs('#pmSave', panel).onclick = async () => {
-    const payload = {
-      category: qs('#pmCategory', panel).value || null,
-      commission: Number(qs('#pmCommission', panel).value || NaN),
-      extra_percent: Number(qs('#pmExtra', panel).value || NaN),
-    };
-    if(!isFinite(payload.commission)) delete payload.commission;
-    if(!isFinite(payload.extra_percent)) delete payload.extra_percent;
-    const res = await fetch(`/products/db/meta/${encodeURIComponent(sku)}`, {
-      method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload)
-    });
-    if(!res.ok){ alert('Не удалось сохранить настройки.'); return; }
-    alert('Настройки сохранены.');
-  };
+// ---------- events ----------
+document.addEventListener('DOMContentLoaded', ()=>{
+  qs('#btnLoadApi').onclick = loadAPI;
+  qs('#btnLoadDb').onclick = loadDB;
 
-  tbody.addEventListener('click', async (e)=>{
-    const del = e.target.closest('.btn-del'); if(!del) return;
-    const id = del.dataset.id; if(!id) return;
-    const res = await fetch(`/products/db/price-batches/${encodeURIComponent(sku)}/${id}`, {method:'DELETE'});
-    if(!res.ok){ alert('Не удалось удалить.'); return; }
-    del.closest('tr').remove();
+  qs('#fileInput').addEventListener('change', async (e)=>{
+    const f = e.target.files?.[0]; if(!f) return;
+    try{ await importFile(f); } catch(err){ alert(err.message||err); }
+    e.target.value = '';
   });
-}
 
-function addBatchRow(tbody, row){
-  const tr = document.createElement('tr');
-  tr.innerHTML = `
-    <td>${row.serial ?? '—'}</td>
-    <td><input type="date" value="${row.date || new Date().toISOString().slice(0,10)}"></td>
-    <td><input type="number" min="0" step="1" value="${row.qty ?? ''}" style="width:100px"></td>
-    <td><input type="number" min="0" step="0.01" value="${row.unit_cost ?? ''}" style="width:110px"></td>
-    <td><input type="text" value="${row.note ?? ''}"></td>
-    <td>${row.id ? `<button class="btn btn-mini btn-del" data-id="${row.id}">Удалить</button>` : ''}</td>
-  `;
-  tbody.appendChild(tr);
-}
+  qs('#restoreFile').addEventListener('change', async (e)=>{
+    const f = e.target.files?.[0]; if(!f) return;
+    const fd = new FormData(); fd.append('file', f);
+    try{
+      await fetchJSON('/products/db/restore', {method:'POST', body:fd});
+      alert('БД восстановлена.'); loadDB();
+    }catch(err){ alert(err.message||err); }
+    e.target.value = '';
+  });
 
-function collectBatchPayload(tbody){
-  return qsa('tr', tbody).map(tr=>{
-    const [dEl, qEl, cEl, nEl] = qsa('input', tr);
-    const qty = Number(qEl.value || 0);
-    const cost= Number(cEl.value || 0);
-    return {
-      date: dEl.value || new Date().toISOString().slice(0,10),
-      qty, unit_cost: cost, note: nEl.value || null
-    };
-  }).filter(e => e.qty>0 && e.unit_cost>0);
-}
+  qs('#btnBackup').onclick = ()=> { window.location = '/products/db/backup.sqlite3'; };
 
-async function uploadManual(file){
-  const fd = new FormData(); fd.append('file', file);
-  const res = await fetch('/products/manual-upload', { method: 'POST', body: fd });
-  if(!res.ok){
-    const err = await res.json().catch(()=>({})); throw new Error(err.detail || ('HTTP '+res.status));
-  }
-  const data = await res.json();
-  renderTable(data.items || []);
-  qs('#note').textContent = `Файл загружен: ${file.name}. Позиций: ${data.count||0}`;
-}
+  qs('#tbl').addEventListener('click', (e)=>{
+    const btn = e.target.closest('.btn-parties');
+    if(!btn) return;
+    const row = btn.closest('tr');
+    openDetail(row);
+  });
 
-async function backupDB(){
-  window.location.href = '/products/db/backup.sqlite3';
-}
-async function restoreDB(file){
-  const fd = new FormData(); fd.append('file', file);
-  const r = await fetch('/products/db/restore', {method:'POST', body:fd});
-  if(!r.ok){ alert('Не удалось восстановить БД'); return; }
-  alert('БД восстановлена');
-}
-
-document.addEventListener('DOMContentLoaded', () => {
-  qs('#btnLoadDb').addEventListener('click', loadFromDB);
-  qs('#btnLoadApi').addEventListener('click', loadFromAPI);
-  qs('#btnBackup').addEventListener('click', backupDB);
-
-  const fi = qs('#fileInput');
-  fi.addEventListener('change', async ()=>{ if(fi.files && fi.files[0]){ try{ await uploadManual(fi.files[0]); } catch(e){ alert('Ошибка: '+e.message); } fi.value=''; }});
-
-  const restore = qs('#restoreInput');
-  restore.addEventListener('change', async ()=>{ if(restore.files && restore.files[0]){ await restoreDB(restore.files[0]); restore.value=''; } });
-
-  const t = qs('#themeToggle');
-  if(t){ t.addEventListener('change', (e)=> document.body.setAttribute('data-theme', e.target.checked ? 'dark' : 'light')); }
-
-  loadFromDB(); // стартуем с БД
+  // стартовый экран — подгружаем из БД
+  loadDB();
 });
 </script>
 </body>
