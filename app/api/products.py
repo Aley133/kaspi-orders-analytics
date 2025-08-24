@@ -420,6 +420,20 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
 
         return JSONResponse({"items": page_items, "total": len(items), "note": note})
 
+
+    @router.post("/db/upsert")
+    async def db_upsert(payload: Dict[str, List[Dict[str, Any]]] = Body(...)):
+        """
+        Сохраняет/обновляет товары в таблице products.
+        Ожидает JSON вида: {"items":[{code,name,brand,category,price,quantity,active,barcode}, ...]}
+        """
+        items = payload.get("items") or []
+        if not isinstance(items, list):
+            raise HTTPException(status_code=400, detail="Поле 'items' должно быть списком.")
+        _upsert_products(items)
+        return {"status": "ok", "count": len(items)}
+
+    
     @router.get("/export.csv")
     async def export_products_csv(active: int = Query(1)):
         if client is None:
