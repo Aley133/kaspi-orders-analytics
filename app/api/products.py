@@ -6,38 +6,16 @@ from pydantic import BaseModel
 
 import io
 import sqlite3, os, shutil
-
-# === DB path (persistent disk first) ===
-def _resolve_db_path() -> str:
-    # 1) Explicit env var
-    target = os.getenv("DB_PATH", "/data/kaspi-orders.sqlite3")
-    target_dir = os.path.dirname(target)
-    try:
-        os.makedirs(target_dir, exist_ok=True)
-        if os.access(target_dir, os.W_OK):
-            return target
-    except Exception:
-        pass
-    # 2) Fallback near app
-    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data.sqlite3"))
-
-DB_PATH = _resolve_db_path()
-
-# Auto-migrate old local DB to /data on first run
-_OLD_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data.sqlite3"))
-if DB_PATH != _OLD_PATH and os.path.exists(_OLD_PATH) and not os.path.exists(DB_PATH):
-    try:
-        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-        shutil.copy2(_OLD_PATH, DB_PATH)
-    except Exception:
-        pass
 from xml.etree import ElementTree as ET
+
+# ===== optional deps for Excel =====
 try:
-    import openpyxl  # optional for .xlsx/.xls
+    import openpyxl  # for .xlsx
     _OPENPYXL_AVAILABLE = True
 except Exception:  # pragma: no cover
     _OPENPYXL_AVAILABLE = False
 
+# ===== optional imports from kaspi_client =====
 try:
     from app.kaspi_client import ProductStock, normalize_row  # type: ignore
 except Exception:
@@ -48,12 +26,39 @@ except Exception:
             from kaspi_client import ProductStock, normalize_row  # type: ignore
         except Exception:
             ProductStock = None
-            normalize_row = None  # will fallback
+            normalize_row = None  # fallback ниже обрабатывается
 
+# =============================================================================
+# DB path (persistent disk first, fallback to local) + auto-migration
+# =============================================================================
+def _resolve_db_path() -> str:
+    # 1) env var has priority
+    target = os.getenv("DB_PATH", "/data/kaspi-orders.sqlite3")
+    target_dir = os.path.dirname(target)
+    try:
+        os.makedirs(target_dir, exist_ok=True)
+        if os.access(target_dir, os.W_OK):
+            return target  # /data доступен
+    except Exception:
+        pass
+    # 2) fallback рядом с приложением (dev/без диска)
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data.sqlite3"))
 
-# === DB helpers ===
-DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data.sqlite3"))
+DB_PATH = _resolve_db_path()
 
+# Переносим старую локальную БД в /data один раз (если была)
+_OLD_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data.sqlite3"))
+if DB_PATH != _OLD_PATH and os.path.exists(_OLD_PATH) and not os.path.exists(DB_PATH):
+    try:
+        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+        shutil.copy2(_OLD_PATH, DB_PATH)
+    except Exception:
+        # не критично — схема создастся заново при первом обращении
+        pass
+
+# =============================================================================
+# DB helpers
+# =============================================================================
 def _db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -105,7 +110,7 @@ def _sku_of(row: dict) -> str:
         or row.get("barcode") or row.get("Barcode") or row.get("id") or ""
     ).strip()
 
-def _upsert_products(items: list[dict]) -> None:
+def _upsert_products(items: List[Dict[str, Any]]) -> None:
     _ensure_schema()
     with _db() as c:
         for it in items:
@@ -144,21 +149,21 @@ def _avg_cost(sku: str) -> float | None:
             return None
         return float(r["tc"]) / float(r["tq"])
 
-
-def _parse_xml(content: bytes):
+# =============================================================================
+# Parsers
+# =============================================================================
+def _parse_xml(content: bytes) -> List[Dict[str, Any]]:
     try:
         root = ET.fromstring(content)
     except ET.ParseError as e:
         raise HTTPException(status_code=400, detail=f"Некорректный XML: {e}")
-    rows = []
+    rows: List[Dict[str, Any]] = []
     offers = root.findall(".//offer") or root.findall(".//item") or root.findall(".//product")
     for off in offers:
-        row = {}
-        # attributes
+        row: Dict[str, Any] = {}
         for attr in ("id","available","shop-sku","sku","offerid","code"):
             if off.get(attr) is not None:
                 row[attr] = off.get(attr)
-        # common child tags
         for tag in ["vendorCode","barcode","price","name","title","model",
                     "quantity","qty","category","vendor","brand"]:
             el = off.find(tag)
@@ -167,7 +172,7 @@ def _parse_xml(content: bytes):
         rows.append(row)
     return rows
 
-def _parse_excel(file):
+def _parse_excel(file: UploadFile) -> List[Dict[str, Any]]:
     if not _OPENPYXL_AVAILABLE:
         raise HTTPException(status_code=500, detail="openpyxl не установлен на сервере.")
     try:
@@ -177,14 +182,16 @@ def _parse_excel(file):
         raise HTTPException(status_code=400, detail=f"Не удалось открыть Excel: {e}")
     ws = wb.active
     headers = [str(c.value or '').strip() for c in ws[1]]
-    rows = []
+    rows: List[Dict[str, Any]] = []
     for row in ws.iter_rows(min_row=2, values_only=True):
         item = {h: v for h, v in zip(headers, row)}
         if any(v not in (None, "", []) for v in item.values()):
             rows.append(item)
     return rows
 
-
+# =============================================================================
+# Kaspi client
+# =============================================================================
 try:
     from app.kaspi_client import KaspiClient  # type: ignore
 except Exception:  # pragma: no cover
@@ -193,14 +200,15 @@ except Exception:  # pragma: no cover
     except Exception:
         from kaspi_client import KaspiClient  # type: ignore
 
-
+# =============================================================================
+# Utils to normalize products coming from API
+# =============================================================================
 def _pick(attrs: Dict[str, Any], *keys: str) -> str:
     for k in keys:
         v = attrs.get(k)
         if v not in (None, ""):
             return str(v)
     return ""
-
 
 def _normalize_active(val: Any) -> Optional[bool]:
     if val is None or val == "":
@@ -214,7 +222,6 @@ def _normalize_active(val: Any) -> Optional[bool]:
         return False
     return None
 
-
 def _num(x: Any) -> float:
     try:
         return float(x)
@@ -224,13 +231,11 @@ def _num(x: Any) -> float:
         except Exception:
             return 0.0
 
-
 def _find_iter_fn(client: Any) -> Optional[Callable]:
     for name in ("iter_products", "iter_offers", "iter_catalog"):
         if hasattr(client, name):
             return getattr(client, name)
     return None
-
 
 def _collect_products(client: KaspiClient, active_only: Optional[bool]) -> Tuple[List[Dict[str, Any]], int, Optional[str]]:
     iter_fn = _find_iter_fn(client)
@@ -278,7 +283,7 @@ def _collect_products(client: KaspiClient, active_only: Optional[bool]) -> Tuple
             "barcode": barcode,
         })
 
-    # 1) Пытаемся штатный каталог
+    # 1) основной каталог
     try:
         try:
             for it in iter_fn(active_only=bool(active_only) if active_only is not None else True):
@@ -290,7 +295,7 @@ def _collect_products(client: KaspiClient, active_only: Optional[bool]) -> Tuple
         items = []
         total = 0
 
-    # 2) Если пусто — резерв: собираем товары из заказов
+    # 2) резерв: из заказов
     if not items:
         try:
             for it in client.iter_products_from_orders(days=60):
@@ -302,7 +307,9 @@ def _collect_products(client: KaspiClient, active_only: Optional[bool]) -> Tuple
 
     return items, total, note
 
-
+# =============================================================================
+# Router factory
+# =============================================================================
 def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
     router = APIRouter(tags=["products"])
 
@@ -361,11 +368,11 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
         except Exception as e:
             return JSONResponse({"attempts": [], "error": str(e)})
 
-    
     @router.post("/manual-upload")
     async def manual_upload(file: UploadFile = File(...)):
-        """Ручная загрузка выгрузки Kaspi (XML или Excel .xlsx/.xls).
-        Возвращает нормализованный список товаров под текущую таблицу."""
+        """Ручная загрузка (XML или Excel .xlsx/.xls).
+        Нормализуем, сохраняем в БД (upsert) и возвращаем список.
+        """
         filename = (file.filename or "").lower()
         content = await file.read()
 
@@ -377,16 +384,35 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
         else:
             raise HTTPException(status_code=400, detail="Поддерживаются только XML или Excel (.xlsx/.xls).")
 
-        normalized = []
+        normalized: List[Dict[str, Any]] = []
         for r in raw_rows:
             if normalize_row:
-                ps = normalize_row(r)
-                normalized.append(ps.to_dict())
+                try:
+                    ps = normalize_row(r)
+                    normalized.append(ps.to_dict())
+                except Exception:
+                    normalized.append(r)
             else:
                 normalized.append(r)
 
-        normalized.sort(key=lambda x: (x.get("name") or x.get("Name") or '').lower())
-        return JSONResponse({ "count": len(normalized), "items": normalized })
+        # сохраняем в БД
+        _upsert_products(normalized)
+
+        # добавим среднюю закупочную/маржу/прибыль, если есть партии
+        for it in normalized:
+            sku = _sku_of(it)
+            avgc = _avg_cost(sku)
+            if avgc is not None:
+                it["avg_cost"] = round(avgc, 2)
+                price = _to_float(it.get("price"))
+                qty = _to_int(it.get("qty") or it.get("quantity"))
+                if price:
+                    it["margin"] = round((price - avgc) / price * 100.0, 2)
+                    it["profit"] = round((price - avgc) * qty, 2)
+
+        normalized.sort(key=lambda x: (x.get("name") or x.get("Name") or x.get("model") or x.get("title") or '').lower())
+        return JSONResponse({"count": len(normalized), "items": normalized})
+
     # ---- DB: список товаров ----
     @router.get("/db/list")
     async def db_list(active_only: int = 1, search: str = ""):
@@ -403,7 +429,7 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
                 sql += " WHERE " + " AND ".join(conds)
             sql += " ORDER BY name COLLATE NOCASE"
             rows = [dict(r) for r in c.execute(sql, params)]
-        items = []
+        items: List[Dict[str, Any]] = []
         for r in rows:
             sku = r["sku"]
             avgc = _avg_cost(sku)
@@ -427,6 +453,7 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
             items.append(item)
         return {"count": len(items), "items": items}
 
+    # ---- модели для партий ----
     class BatchIn(BaseModel):
         date: str
         qty: int
@@ -466,28 +493,27 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
             c.execute("DELETE FROM batches WHERE id=? AND sku=?", (bid, sku))
         avgc = _avg_cost(sku)
         return {"status": "ok", "avg_cost": round(avgc, 2) if avgc is not None else None}
-# ---- DB: backup/restore (для ручной персистентности без диска) ----
-@router.get("/db/backup.sqlite3")
-async def backup_db():
-    _ensure_schema()
-    fname = os.path.basename(DB_PATH) or "data.sqlite3"
-    return FileResponse(DB_PATH, media_type="application/octet-stream", filename=fname)
 
-@router.post("/db/restore")
-async def restore_db(file: UploadFile = File(...)):
-    content = await file.read()
-    # Закроем все соединения (мы используем короткоживущие, но на всякий)
-    try:
-        with _db() as c:
-            c.execute("PRAGMA wal_checkpoint(TRUNCATE);")
-    except Exception:
-        pass
-    # Запишем файл
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    with open(DB_PATH, "wb") as f:
-        f.write(content)
-    # Проверим/создадим схему (если пустой)
-    _ensure_schema()
-    return {"status": "ok"}
+    # ---- Бэкап / восстановление БД (без диска) ----
+    @router.get("/db/backup.sqlite3")
+    async def backup_db():
+        _ensure_schema()
+        fname = os.path.basename(DB_PATH) or "data.sqlite3"
+        return FileResponse(DB_PATH, media_type="application/octet-stream", filename=fname)
+
+    @router.post("/db/restore")
+    async def restore_db(file: UploadFile = File(...)):
+        content = await file.read()
+        # На всякий случай — сброс WAL, если включён
+        try:
+            with _db() as c:
+                c.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+        except Exception:
+            pass
+        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+        with open(DB_PATH, "wb") as f:
+            f.write(content)
+        _ensure_schema()
+        return {"status": "ok"}
 
     return router
