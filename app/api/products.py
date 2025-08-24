@@ -5,32 +5,7 @@ from fastapi.responses import Response, JSONResponse
 from pydantic import BaseModel
 
 import io
-import sqlite3, os, shutil
-
-# === DB path (persistent disk first) ===
-def _resolve_db_path() -> str:
-    # 1) Explicit env var
-    target = os.getenv("DB_PATH", "/data/kaspi-orders.sqlite3")
-    target_dir = os.path.dirname(target)
-    try:
-        os.makedirs(target_dir, exist_ok=True)
-        if os.access(target_dir, os.W_OK):
-            return target
-    except Exception:
-        pass
-    # 2) Fallback near app
-    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data.sqlite3"))
-
-DB_PATH = _resolve_db_path()
-
-# Auto-migrate old local DB to /data on first run
-_OLD_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data.sqlite3"))
-if DB_PATH != _OLD_PATH and os.path.exists(_OLD_PATH) and not os.path.exists(DB_PATH):
-    try:
-        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-        shutil.copy2(_OLD_PATH, DB_PATH)
-    except Exception:
-        pass
+import sqlite3, os
 from xml.etree import ElementTree as ET
 try:
     import openpyxl  # optional for .xlsx/.xls
