@@ -3,7 +3,7 @@ from typing import Callable, Optional, List, Dict, Any, Tuple
 from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Body
 from fastapi.responses import Response, JSONResponse, FileResponse
 from pydantic import BaseModel
-
+import secrets, string
 import io
 import sqlite3, os, shutil
 from xml.etree import ElementTree as ET
@@ -61,6 +61,7 @@ def _db():
     conn.row_factory = sqlite3.Row
     return conn
 
+# --- REPLACE the _ensure_schema() with this version ---
 def _ensure_schema():
     with _db() as c:
         c.executescript("""
@@ -83,19 +84,21 @@ def _ensure_schema():
             qty INTEGER NOT NULL,
             unit_cost REAL NOT NULL,
             note TEXT,
+            /* new columns will be added below if missing */
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(sku) REFERENCES products(sku) ON DELETE CASCADE
         );
         CREATE INDEX IF NOT EXISTS idx_batches_sku ON batches(sku);
-
-        CREATE TABLE IF NOT EXISTS categories(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT UNIQUE NOT NULL,
-            base_percent REAL DEFAULT 0,   -- комиссия Kaspi
-            extra_percent REAL DEFAULT 3,  -- +3% как просили
-            tax_percent REAL DEFAULT 0     -- прочие налоги/соц/пенс.
-        );
         """)
+        # --- migrate optional columns if they are missing ---
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(batches)")}
+        if "commission_pct" not in cols:
+            c.execute("ALTER TABLE batches ADD COLUMN commission_pct REAL")
+        if "batch_code" not in cols:
+            c.execute("ALTER TABLE batches ADD COLUMN batch_code TEXT")
+        # generate codes for old rows
+        for r in c.execute("SELECT id FROM batches WHERE batch_code IS NULL OR batch_code=''").fetchall():
+            c.execute("UPDATE batches SET batch_code=? WHERE id=?", (_gen_batch_code(c), r["id"]))
 
 def _seed_categories_if_empty():
     _ensure_schema()
@@ -377,11 +380,14 @@ def _collect_products(client: KaspiClient, active_only: Optional[bool]) -> Tuple
 # =============================================================================
 # Pydantic models
 # =============================================================================
+# --- REPLACE Pydantic models (add commission_pct & batch_code) ---
 class BatchIn(BaseModel):
     date: str
     qty: int
     unit_cost: float
     note: str | None = None
+    commission_pct: float | None = None
+    batch_code: str | None = None
 
 class BatchListIn(BaseModel):
     entries: List[BatchIn]
@@ -542,22 +548,29 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
     async def get_batches(sku: str):
         _ensure_schema()
         with _db() as c:
-            rows = [dict(r) for r in c.execute(
-                "SELECT id, date, qty, unit_cost, note FROM batches WHERE sku=? ORDER BY date,id",
-                (sku,)
-            )]
-        return {"batches": rows}
+        rows = [dict(r) for r in c.execute(
+            "SELECT id, date, qty, unit_cost, commission_pct, batch_code, note "
+            "FROM batches WHERE sku=? ORDER BY date",
+            (sku,)
+        )]
+       avgc = _avg_cost(sku)
+       return {"batches": rows, "avg_cost": round(avgc, 2) if avgc is not None else None}
 
     @router.post("/db/price-batches/{sku}")
     async def add_batches(sku: str, payload: BatchListIn = Body(...)):
         _ensure_schema()
         with _db() as c:
             for e in payload.entries:
-                c.execute(
-                    "INSERT INTO batches(sku,date,qty,unit_cost,note) VALUES(?,?,?,?,?)",
-                    (sku, e.date, int(e.qty), float(e.unit_cost), e.note)
-                )
-        return {"status": "ok"}
+            code = e.batch_code or _gen_batch_code(c)
+            c.execute(
+                "INSERT INTO batches(sku,date,qty,unit_cost,note,commission_pct,batch_code) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (sku, e.date, int(e.qty), float(e.unit_cost), e.note,
+                 float(e.commission_pct) if e.commission_pct is not None else None,
+                 code)
+            )
+        avgc = _avg_cost(sku)
+        return {"status": "ok", "avg_cost": round(avgc, 2) if avgc is not None else None}
 
     @router.delete("/db/price-batches/{sku}/{bid}")
     async def delete_batch(sku: str, bid: int):
