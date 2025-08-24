@@ -308,6 +308,18 @@ def _collect_products(client: KaspiClient, active_only: Optional[bool]) -> Tuple
     return items, total, note
 
 # =============================================================================
+# Pydantic models (module-level to avoid forward-ref issues in Pydantic v2)
+# =============================================================================
+class BatchIn(BaseModel):
+    date: str
+    qty: int
+    unit_cost: float
+    note: str | None = None
+
+class BatchListIn(BaseModel):
+    entries: List[BatchIn]
+
+# =============================================================================
 # Router factory
 # =============================================================================
 def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
@@ -452,16 +464,6 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
                     item["profit"] = round((price - avgc) * qty, 2)
             items.append(item)
         return {"count": len(items), "items": items}
-
-    # ---- модели для партий ----
-    class BatchIn(BaseModel):
-        date: str
-        qty: int
-        unit_cost: float
-        note: str | None = None
-
-    class BatchListIn(BaseModel):
-        entries: List[BatchIn]
 
     @router.get("/db/price-batches/{sku}")
     async def get_batches(sku: str):
