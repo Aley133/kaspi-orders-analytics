@@ -1,372 +1,293 @@
 <!doctype html>
 <html lang="ru">
 <head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Мой склад — Kaspi</title>
-  <link rel="stylesheet" href="style.css"/>
+  <style>
+    body{font:14px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Helvetica Neue",Arial;}
+    .wrap{max-width:1400px;margin:20px auto;padding:0 12px;}
+    .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    .btn{background:#1f7aee;color:#fff;border:0;border-radius:8px;padding:8px 12px;cursor:pointer}
+    .btn:disabled{opacity:.5;cursor:default}
+    .btn.secondary{background:#e9eef6;color:#1f2a37}
+    input[type="text"],input[type="number"],select{height:34px;padding:6px 8px;border:1px solid #cbd5e1;border-radius:8px}
+    .muted{color:#6b7280}
+    table{border-collapse:collapse;width:100%}
+    th,td{border-bottom:1px solid #e5e7eb;padding:8px 10px;text-align:left;vertical-align:middle}
+    thead th{position:sticky;top:0;background:#f8fafc;z-index:1}
+    .dot{display:inline-block;width:10px;height:10px;border-radius:50%;background:#9ca3af}
+    .dot.on{background:#10b981}
+    .detail{background:#f8fafc}
+    .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#eef2ff;color:#3730a3;font-size:12px}
+    .btn-link{background:transparent;color:#2563eb;border:0;cursor:pointer;padding:0}
+    .col-right{text-align:right}
+  </style>
 </head>
 <body>
-  <div class="toolbar">
-    <label class="chk"><input id="onlyActive" type="checkbox" checked> Только активные</label>
-    <input id="search" class="inp" placeholder="Название, код, бренд..."/>
-    <button id="btnLoad" class="btn"><span class="btn__label">Загрузить</span><span class="btn__spin"></span></button>
-    <label class="btn btn--ghost" for="fileInput">Импорт из файла (XML/XLSX)</label>
+<div class="wrap">
+  <h1>Мой склад</h1>
+
+  <div class="row" style="margin-bottom:10px">
+    <label><input id="onlyActive" type="checkbox" checked> Только активные</label>
+    <input id="search" type="text" placeholder="Название, код, бренд..." style="min-width:260px">
+    <button class="btn" id="btnLoadApi">Загрузить</button>
+    <label class="btn secondary" for="fileInput">Импорт из файла (XML/XLSX)</label>
     <input type="file" id="fileInput" accept=".xml,.xlsx,.xls" style="display:none">
-    <button id="btnLoadDB" class="btn btn--ghost">Загрузить из БД</button>
-    <button id="btnBackupDB" class="btn btn--ghost">Бэкап БД</button>
-    <label class="btn btn--ghost" for="restoreInput">Восстановить БД</label>
-    <input type="file" id="restoreInput" accept=".sqlite3,.db,.sqlite,application/octet-stream" style="display:none">
+    <button class="btn secondary" id="btnLoadDb">Загрузить из БД</button>
+    <button class="btn secondary" id="btnBackup">Бэкап БД</button>
+    <label class="btn secondary" for="restoreFile">Восстановить БД</label>
+    <input type="file" id="restoreFile" accept=".sqlite3" style="display:none">
   </div>
 
-  <div id="note" class="note"></div>
+  <div id="note" class="muted" style="margin:6px 0 12px"></div>
 
-  <div class="table-wrap">
-    <table class="table" id="tbl">
+  <div style="overflow:auto; max-height:70vh; border:1px solid #e5e7eb; border-radius:10px">
+    <table id="tbl">
       <thead>
         <tr>
-          <th>Код</th>
-          <th>Название</th>
+          <th style="min-width:160px">Код</th>
+          <th style="min-width:360px">Название</th>
           <th>Бренд</th>
           <th>Категория</th>
-          <th class="num">ШТ</th>
-          <th class="num">Цена, KZT</th>
-          <th class="num">Активен</th>
-          <th class="num">Партии</th>
+          <th>ШТ</th>
+          <th>Цена, KZT</th>
+          <th>Активен</th>
+          <th class="col-right">Партии</th>
         </tr>
       </thead>
       <tbody></tbody>
     </table>
   </div>
-
-  <!-- шаблон разворота под строкой -->
-  <template id="rowExpandTpl">
-    <tr class="row-expand">
-      <td colspan="8">
-        <div class="expand">
-          <div class="expand__header">
-            <div class="expand__title"></div>
-            <div class="expand__cat">
-              <select class="select select-cat"></select>
-              <button class="btn btn--sm btnSaveCat">Сохранить категорию</button>
-            </div>
-          </div>
-
-          <div class="expand__form">
-            <div class="grid">
-              <label>Дата
-                <input type="date" class="inp inp-date"/>
-              </label>
-              <label>Кол-во
-                <input type="number" min="1" step="1" class="inp inp-qty" value="1"/>
-              </label>
-              <label>Закуп., KZT
-                <input type="number" min="0" step="1" class="inp inp-cost" value="0"/>
-              </label>
-              <label>Примечание
-                <input type="text" class="inp inp-note" placeholder="Например: поставка от ..."/>
-              </label>
-            </div>
-            <div class="expand__summary">
-              <div class="summary__price">Цена товара: <b class="sPrice">0</b> KZT</div>
-              <div class="summary__margin">Маржа за 1 заказ: <b class="sMargin">0</b> KZT (<span class="sMarginPct">0</span>%)</div>
-            </div>
-            <div class="expand__actions">
-              <button class="btn btn--sm btnAddBatch">+ Добавить партию</button>
-            </div>
-            <div class="expand__batches">
-              <table class="table table--compact">
-                <thead><tr><th>№ партии</th><th>Дата</th><th>Кол-во</th><th>Закуп., KZT</th><th>Прим.</th><th></th></tr></thead>
-                <tbody class="batchesBody"></tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-      </td>
-    </tr>
-  </template>
+</div>
 
 <script>
+const qs=(s,el=document)=>el.querySelector(s);
+const qsa=(s,el=document)=>[...el.querySelectorAll(s)];
 const nf = new Intl.NumberFormat('ru-RU');
-const qs = (s, el=document) => el.querySelector(s);
-const qsa = (s, el=document) => [...el.querySelectorAll(s)];
+const fmt = n => nf.format(Number(n||0));
 
-let CATEGORIES = []; // {code,title,commission_percent,extra_percent,delivery_kzt}
+let CATEGORIES = [];
 
-function spin(btn, on) {
-  const label = btn.querySelector('.btn__label');
-  const sp = btn.querySelector('.btn__spin');
-  if (on) {
-    btn.classList.add('btn--spin');
-    if (label) label.textContent = 'Загрузка...';
-  } else {
-    btn.classList.remove('btn--spin');
-    if (label) label.textContent = 'Загрузить';
+async function fetchJSON(url, opts){
+  const r = await fetch(url, opts||{});
+  if(!r.ok) throw new Error((await r.text())||r.statusText);
+  return r.json();
+}
+
+function skuFromRow(tr){
+  let sku = tr?.dataset?.sku;
+  if(!sku){
+    const text = tr?.cells?.[0]?.textContent?.trim();
+    if(text) sku = text;
   }
+  return sku;
 }
 
-async function api(url, opts={}) {
-  const res = await fetch(url, opts);
-  if (!res.ok) {
-    let msg = 'HTTP '+res.status;
-    try { const d = await res.json(); if (d.detail) msg = d.detail; } catch(e){}
-    throw new Error(msg);
-  }
-  try { return await res.json(); } catch { return {}; }
+function clearDetails(){
+  qsa('tr.detail').forEach(tr => tr.remove());
 }
 
-function activeDot(qty) {
-  const span = document.createElement('span');
-  span.className = 'dot ' + (Number(qty)>0 ? 'dot--ok' : 'dot--off');
-  return span;
+function makeDetailRow(colspan){
+  const tr = document.createElement('tr');
+  tr.className = 'detail';
+  const td = document.createElement('td');
+  td.colSpan = colspan;
+  tr.appendChild(td);
+  return tr;
 }
 
-function trButton(label) {
-  const b = document.createElement('button');
-  b.className = 'btn btn--pill btn--sm';
-  b.textContent = label;
-  return b;
-}
-
-function setNote(text) {
-  qs('#note').textContent = text || '';
-}
-
-// -------- загрузки ----------
-async function loadCategories() {
-  const d = await api('/products/categories');
-  CATEGORIES = d.items || [];
-}
-
-// сохраняем категорию к товару
-async function saveProductCategory(sku, code) {
-  await api(`/products/db/product-category/${encodeURIComponent(sku)}`, {
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({category: code})
-  });
-}
-
-// синхронизируем из Kaspi в БД
-async function syncFromApi() {
-  const btn = qs('#btnLoad');
-  spin(btn, true);
-  try {
-    const onlyActive = qs('#onlyActive')?.checked ? 1 : 0;
-    const r = await api('/products/db/sync?active='+onlyActive, {method:'POST'});
-    setNote(`Сохранено в БД: ${r.saved}. ${r.note || ''}`);
-    await loadFromDB();
-  } catch(e) {
-    alert('Ошибка синхронизации: '+e.message);
-  } finally {
-    spin(btn, false);
-  }
-}
-
-// читаем из БД и показываем
-async function loadFromDB() {
-  const onlyActive = qs('#onlyActive')?.checked ? 1 : 0;
-  const q = qs('#search')?.value?.trim() || '';
-  const d = await api(`/products/db/list?active_only=${onlyActive}&search=${encodeURIComponent(q)}`);
-  renderTable(d.items || []);
-}
-
-function renderTable(items) {
+function renderProducts(items){
   const tb = qs('#tbl tbody');
   tb.innerHTML = '';
-  for (const it of items) {
+  items.forEach(it=>{
+    const tr = document.createElement('tr');
+    const sku = it.code || it.id || '';
+    tr.dataset.sku = sku;
+    tr.className = 'data-row';
+    const on = it.qty>0 || it.active===true;
+    tr.innerHTML = `
+      <td>${sku}</td>
+      <td>${it.name||''}</td>
+      <td>${it.brand||''}</td>
+      <td>${it.category||''}${it.commission_total!=null?` <span class="pill">${it.commission_total}%</span>`:''}</td>
+      <td>${fmt(it.qty||0)}</td>
+      <td>${fmt(it.price||0)}</td>
+      <td><span class="dot ${on?'on':''}"></span></td>
+      <td class="col-right"><button class="btn-link btn-parties">Партии</button></td>
+    `;
+    tb.appendChild(tr);
+  });
+}
+
+async function loadAPI(){
+  const p = new URLSearchParams();
+  p.set('active', qs('#onlyActive').checked ? '1' : '0');
+  const q = qs('#search').value.trim();
+  if(q) p.set('q', q);
+  p.set('page','1'); p.set('page_size','2000');
+  const data = await fetchJSON(`/products/list?${p.toString()}`);
+  if(data.note) qs('#note').textContent = data.note;
+  renderProducts(data.items||[]);
+}
+
+async function loadDB(){
+  const p = new URLSearchParams();
+  p.set('active_only', qs('#onlyActive').checked ? '1' : '0');
+  p.set('search', qs('#search').value.trim());
+  const data = await fetchJSON(`/products/db/list?${p.toString()}`);
+  renderProducts(data.items||[]);
+}
+
+async function importFile(file){
+  const fd = new FormData();
+  fd.append('file', file);
+  const res = await fetch(`/products/manual-upload`, {method:'POST', body:fd});
+  if(!res.ok){ const t = await res.text(); throw new Error(t||res.statusText); }
+  const data = await res.json();
+  qs('#note').textContent = `Файл загружен: ${file.name}. Позиции: ${data.count||0}`;
+  renderProducts(data.items||[]);
+}
+
+async function openDetail(row){
+  clearDetails();
+  const sku = skuFromRow(row);
+  if(!sku) { alert('У товара нет кода/sku — некуда сохранить партии.'); return; }
+
+  // загрузим категории (для селектора)
+  if(!CATEGORIES.length){
+    const c = await fetchJSON('/products/db/categories');
+    CATEGORIES = c.categories || [];
+  }
+
+  // вставляем строку ниже
+  const tr = makeDetailRow(row.children.length);
+  row.insertAdjacentElement('afterend', tr);
+  const mount = tr.firstChild;
+
+  // базовая разметка
+  mount.innerHTML = `
+    <div style="padding:12px">
+      <div class="row" style="align-items:flex-end; gap:12px; margin-bottom:8px">
+        <div>
+          <div class="muted" style="margin-bottom:4px">Категория / комиссия</div>
+          <div class="row" style="gap:6px">
+            <select id="catSel"></select>
+            <button class="btn secondary" id="btnSaveCat">Сохранить категорию</button>
+          </div>
+        </div>
+      </div>
+
+      <div style="margin:8px 0 6px; font-weight:600">Партии закупок — <span id="dTitle">${row.cells[1].textContent}</span></div>
+      <table class="table" style="width:100%">
+        <thead><tr><th>Дата</th><th>Кол-во</th><th>Закуп., KZT</th><th>Примечание</th><th></th></tr></thead>
+        <tbody id="btBody"></tbody>
+      </table>
+      <div class="row" style="margin-top:8px; gap:8px">
+        <button class="btn secondary" id="btnAddRow">+ Добавить</button>
+        <button class="btn" id="btnSaveRows">Сохранить</button>
+      </div>
+    </div>
+  `;
+
+  // заполнить селектор категорий
+  const sel = qs('#catSel', mount);
+  sel.innerHTML = CATEGORIES.map(c=>{
+    const total = (Number(c.base_percent||0)+Number(c.extra_percent||0)+Number(c.tax_percent||0)).toFixed(2);
+    return `<option value="${c.name}">${c.name} — ${total}%</option>`;
+  }).join('');
+  // установить текущую категорию из таблицы
+  const currentCat = row.cells[3].childNodes[0]?.nodeValue?.trim() || '';
+  if(currentCat) sel.value = currentCat;
+
+  qs('#btnSaveCat', mount).onclick = async ()=>{
+    const cat = sel.value || '';
+    await fetchJSON(`/products/db/product-category/${encodeURIComponent(sku)}`, {
+      method:'PUT',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({category: cat})
+    });
+    // перерисуем строку категории + плашку %
+    const match = CATEGORIES.find(x=>x.name===cat);
+    const total = match ? (Number(match.base_percent||0)+Number(match.extra_percent||0)+Number(match.tax_percent||0)).toFixed(2) : null;
+    row.cells[3].innerHTML = cat + (total?` <span class="pill">${total}%</span>`:'');
+  };
+
+  const tbody = qs('#btBody', mount);
+
+  function addRow(data){
     const tr = document.createElement('tr');
     tr.innerHTML = `
-      <td>${it.code||''}</td>
-      <td class="name">${it.name||''}</td>
-      <td>${it.brand||''}</td>
-      <td>${renderCategoryCell(it.category)}</td>
-      <td class="num">${nf.format(it.quantity||0)}</td>
-      <td class="num">${nf.format(it.price||0)}</td>
-      <td class="num"></td>
-      <td class="num"></td>
+      <td><input type="date" value="${data?.date || new Date().toISOString().slice(0,10)}"></td>
+      <td><input type="number" min="0" step="1" value="${data?.qty ?? ''}" style="width:90px"></td>
+      <td><input type="number" min="0" step="0.01" value="${data?.unit_cost ?? ''}" style="width:110px"></td>
+      <td><input type="text" value="${data?.note ?? ''}"></td>
+      <td>${data?.id ? `<button class="btn-link btnDel" data-id="${data.id}">Удалить</button>`:''}</td>
     `;
-    tr.cells[6].appendChild(activeDot(it.quantity||0));
-    const btn = trButton('Партии');
-    tr.cells[7].appendChild(btn);
-    btn.addEventListener('click', () => toggleExpand(tr, it));
-    tb.appendChild(tr);
+    tbody.appendChild(tr);
   }
-}
 
-function renderCategoryCell(code) {
-  if (!code) return '';
-  const cat = CATEGORIES.find(c => c.code===code) || {title: code, commission_percent: undefined};
-  if (cat.commission_percent != null) {
-    return `<span class="tag">${cat.title} <span class="tag__pct">${cat.commission_percent}%</span></span>`;
-  }
-  return cat.title;
-}
+  // текущие партии
+  const data = await fetchJSON(`/products/db/price-batches/${encodeURIComponent(sku)}`);
+  (data.batches||[]).forEach(addRow);
 
-function toggleExpand(tr, product) {
-  // уже раскрыта?
-  const next = tr.nextElementSibling;
-  if (next && next.classList.contains('row-expand')) {
-    next.remove();
-    return;
-  }
-  // закрыть другие
-  qsa('.row-expand').forEach(e=>e.remove());
-
-  const tpl = qs('#rowExpandTpl').content.cloneNode(true);
-  const row = tpl.querySelector('tr');
-  const block = tpl.querySelector('.expand');
-  tpl.querySelector('.expand__title').textContent = `${product.name} — ${product.code}`;
-  const sel = tpl.querySelector('.select-cat');
-  sel.innerHTML = CATEGORIES.map(c => `<option value="${c.code}" ${product.category===c.code?'selected':''}>
-      ${c.title} — ${c.commission_percent.toFixed(2)}%
-    </option>`).join('');
-  const sPrice = tpl.querySelector('.sPrice');
-  sPrice.textContent = nf.format(product.price||0);
-
-  const inpDate = tpl.querySelector('.inp-date');
-  const today = new Date().toISOString().slice(0,10);
-  inpDate.value = today;
-
-  const inpQty = tpl.querySelector('.inp-qty');
-  const inpCost = tpl.querySelector('.inp-cost');
-  const sMargin = tpl.querySelector('.sMargin');
-  const sMarginPct = tpl.querySelector('.sMarginPct');
-
-  function recomputeMargin() {
-    const cat = CATEGORIES.find(c => c.code===sel.value);
-    const price = Number(product.price)||0;
-    const cost = Number(inpCost.value)||0;
-    let commission = 0, extra = 0, delivery = 0;
-    if (cat) {
-      commission = price * (Number(cat.commission_percent)||0) / 100.0;
-      extra      = price * (Number(cat.extra_percent)||0) / 100.0;
-      delivery   = Number(cat.delivery_kzt)||0;
-    }
-    const margin = price - cost - commission - extra - delivery;
-    const pct = price ? (margin/price*100.0) : 0;
-    sMargin.textContent = nf.format(Math.round(margin));
-    sMarginPct.textContent = pct.toFixed(2);
-  }
-  inpCost.addEventListener('input', recomputeMargin);
-  sel.addEventListener('change', recomputeMargin);
-  recomputeMargin();
-
-  // Сохранить категорию
-  tpl.querySelector('.btnSaveCat').addEventListener('click', async () => {
-    try {
-      await saveProductCategory(product.code, sel.value);
-      product.category = sel.value;
-      // перерисовать строку
-      tr.cells[3].innerHTML = renderCategoryCell(sel.value);
-    } catch(e) { alert('Ошибка: '+e.message); }
+  qs('#btnAddRow', mount).onclick = ()=> addRow({});
+  tbody.addEventListener('click', async (e)=>{
+    const btn = e.target.closest('.btnDel');
+    if(!btn) return;
+    await fetchJSON(`/products/db/price-batches/${encodeURIComponent(sku)}/${btn.dataset.id}`, {method:'DELETE'});
+    btn.closest('tr').remove();
   });
 
-  // Добавить партию
-  tpl.querySelector('.btnAddBatch').addEventListener('click', async () => {
-    const payload = {
-      entries: [{
-        date: inpDate.value || today,
-        qty: Number(inpQty.value||0),
-        unit_cost: Number(inpCost.value||0),
-        note: (tpl.querySelector('.inp-note').value||'').trim() || null
-      }]
-    };
-    if (!product.code) { alert('У товара нет кода/sku — некуда сохранить партию.'); return; }
-    if (!(payload.entries[0].qty>0) || !(payload.entries[0].unit_cost>0)) {
-      alert('Укажите количество и закупочную цену'); return;
-    }
-    await api(`/products/db/price-batches/${encodeURIComponent(product.code)}`, {
-      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)
+  qs('#btnSaveRows', mount).onclick = async ()=>{
+    const entries = qsa('tr', tbody).map(tr=>{
+      const [d,q,c,n] = qsa('input', tr);
+      return {date:d.value, qty:Number(q.value||0), unit_cost:Number(c.value||0), note:n.value||null};
+    }).filter(e => e.qty>0 && e.unit_cost>0);
+    if(!entries.length){ alert('Добавьте хотя бы одну строку партии.'); return; }
+    await fetchJSON(`/products/db/price-batches/${encodeURIComponent(sku)}`, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({entries})
     });
-    await fillBatches(product.code, tpl.querySelector('.batchesBody'));
-  });
-
-  // список партий
-  fillBatches(product.code, tpl.querySelector('.batchesBody'));
-
-  tr.after(row);
-  // плавное появление
-  setTimeout(() => block.classList.add('expand--in'), 0);
+    alert('Сохранено.');
+    // перезагрузим детали, чтобы появились кнопки "Удалить"
+    openDetail(row);
+  };
 }
 
-async function fillBatches(sku, tbody) {
-  tbody.innerHTML = '<tr><td colspan="6">Загрузка…</td></tr>';
-  try {
-    const d = await api(`/products/db/price-batches/${encodeURIComponent(sku)}`);
-    tbody.innerHTML = '';
-    (d.batches || []).forEach(b => {
-      const tr = document.createElement('tr');
-      tr.innerHTML = `
-        <td>${b.batch_no}</td>
-        <td>${b.date}</td>
-        <td>${nf.format(b.qty||0)}</td>
-        <td>${nf.format(b.unit_cost||0)}</td>
-        <td>${b.note||''}</td>
-        <td class="num"><button class="btn btn--xs btn--ghost">Удалить</button></td>
-      `;
-      tr.querySelector('button').addEventListener('click', async () => {
-        await api(`/products/db/price-batches/${encodeURIComponent(sku)}/${b.id}`, {method:'DELETE'});
-        tr.remove();
-      });
-      tbody.appendChild(tr);
-    });
-    if (!tbody.children.length) {
-      tbody.innerHTML = '<tr><td colspan="6">Партии пока не добавлены.</td></tr>';
-    }
-  } catch(e) {
-    tbody.innerHTML = `<tr><td colspan="6">Ошибка: ${e.message}</td></tr>`;
-  }
-}
+// ---------- events ----------
+document.addEventListener('DOMContentLoaded', ()=>{
+  qs('#btnLoadApi').onclick = loadAPI;
+  qs('#btnLoadDb').onclick = loadDB;
 
-// ---------- события ----------
-document.addEventListener('DOMContentLoaded', async () => {
-  await loadCategories();
-  await loadFromDB();
-
-  qs('#btnLoad').addEventListener('click', syncFromApi);
-  qs('#btnLoadDB').addEventListener('click', loadFromDB);
-
-  qs('#onlyActive').addEventListener('change', loadFromDB);
-  qs('#search').addEventListener('keyup', e => { if (e.key==='Enter') loadFromDB(); });
-
-  // импорт XML/XLSX
-  const fi = qs('#fileInput');
-  fi.addEventListener('change', async () => {
-    if (!fi.files || !fi.files[0]) return;
-    const fd = new FormData(); fd.append('file', fi.files[0]);
-    try {
-      const d = await api('/products/manual-upload', {method:'POST', body:fd});
-      setNote(`Файл загружен: ${fi.files[0].name}. Позиции: ${d.count||0}`);
-      await loadFromDB();
-    } catch(e){ alert('Ошибка: '+e.message); }
-    fi.value='';
+  qs('#fileInput').addEventListener('change', async (e)=>{
+    const f = e.target.files?.[0]; if(!f) return;
+    try{ await importFile(f); } catch(err){ alert(err.message||err); }
+    e.target.value = '';
   });
 
-  // бэкап
-  qs('#btnBackupDB').addEventListener('click', async () => {
-    try {
-      const url = '/products/db/backup.sqlite3';
-      const a = document.createElement('a');
-      a.href = url; a.download = 'kaspi-db-backup.sqlite3';
-      document.body.appendChild(a); a.click(); a.remove();
-    } catch(e){ alert('Ошибка: '+e.message); }
+  qs('#restoreFile').addEventListener('change', async (e)=>{
+    const f = e.target.files?.[0]; if(!f) return;
+    const fd = new FormData(); fd.append('file', f);
+    try{
+      await fetchJSON('/products/db/restore', {method:'POST', body:fd});
+      alert('БД восстановлена.'); loadDB();
+    }catch(err){ alert(err.message||err); }
+    e.target.value = '';
   });
 
-  // восстановление
-  const rIn = qs('#restoreInput');
-  rIn.addEventListener('change', async () => {
-    if (!rIn.files || !rIn.files[0]) return;
-    if (!confirm('Заменить текущую БД на выбранный файл?')) { rIn.value=''; return; }
-    const fd = new FormData(); fd.append('file', rIn.files[0]);
-    try {
-      await api('/products/db/restore', {method:'POST', body:fd});
-      await loadCategories();
-      await loadFromDB();
-      alert('База восстановлена.');
-    } catch(e){ alert('Ошибка: '+e.message); }
-    rIn.value='';
+  qs('#btnBackup').onclick = ()=> { window.location = '/products/db/backup.sqlite3'; };
+
+  qs('#tbl').addEventListener('click', (e)=>{
+    const btn = e.target.closest('.btn-parties');
+    if(!btn) return;
+    const row = btn.closest('tr');
+    openDetail(row);
   });
+
+  // стартовый экран — подгружаем из БД
+  loadDB();
 });
 </script>
 </body>
