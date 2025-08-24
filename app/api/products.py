@@ -123,7 +123,13 @@ def _upsert_products(items: List[Dict[str, Any]]) -> None:
             price = _to_float(it.get("price"))
             qty = _to_int(it.get("qty") or it.get("quantity") or it.get("stock"))
             barcode = it.get("barcode") or it.get("Barcode")
-            active = 1 if str(it.get("active") or it.get("isActive") or "1").lower() in ("1","true","yes","on") else 0
+            active = it.get("active")
+            if isinstance(active, str):
+                active = 1 if active.lower() in ("1","true","yes","on") else 0
+            elif isinstance(active, bool):
+                active = 1 if active else 0
+            else:
+                active = 1
             c.execute("""
                 INSERT INTO products(sku,name,brand,category,price,quantity,active,barcode,updated_at)
                 VALUES(?,?,?,?,?,?,?,?,datetime('now'))
@@ -153,24 +159,91 @@ def _avg_cost(sku: str) -> float | None:
 # Parsers
 # =============================================================================
 def _parse_xml(content: bytes) -> List[Dict[str, Any]]:
+    """
+    Kaspi catalog XML (xmlns="kaspiShopping").
+    Берём:
+      code  <- @sku | @shop-sku | @code | @id
+      name  <- <model> | <name> | <title>
+      brand <- <brand>
+      qty   <- <availabilities>/<availability @stockCount>
+      price <- <cityprices>/<cityprice> (первый)
+      active<- <availability @available="yes">
+    """
     try:
         root = ET.fromstring(content)
     except ET.ParseError as e:
         raise HTTPException(status_code=400, detail=f"Некорректный XML: {e}")
+
+    def strip(tag: str) -> str:
+        # "{ns}offer" -> "offer"
+        return tag.split("}", 1)[-1] if "}" in tag else tag
+
+    def child_text(parent: ET.Element, *names: str) -> str:
+        for el in parent.iter():
+            if strip(el.tag) in names:
+                t = (el.text or "").strip()
+                if t:
+                    return t
+        return ""
+
     rows: List[Dict[str, Any]] = []
-    offers = root.findall(".//offer") or root.findall(".//item") or root.findall(".//product")
+
+    # находим все <offer> с учётом namespace
+    offers = [el for el in root.iter() if strip(el.tag) == "offer"]
     for off in offers:
-        row: Dict[str, Any] = {}
-        for attr in ("id","available","shop-sku","sku","offerid","code"):
-            if off.get(attr) is not None:
-                row[attr] = off.get(attr)
-        for tag in ["vendorCode","barcode","price","name","title","model",
-                    "quantity","qty","category","vendor","brand"]:
-            el = off.find(tag)
-            if el is not None and (el.text or "").strip():
-                row[tag] = (el.text or "").strip()
+        code = (
+            off.get("sku")
+            or off.get("shop-sku")
+            or off.get("code")
+            or off.get("id")
+            or ""
+        ).strip()
+
+        name = child_text(off, "model", "name", "title")
+        brand = child_text(off, "brand")
+
+        # qty / active
+        qty = 0
+        active: Optional[bool] = None
+        for el in off.iter():
+            if strip(el.tag) == "availability":
+                sc = el.get("stockCount")
+                if sc:
+                    try:
+                        qty = int(float(sc))
+                    except Exception:
+                        qty = 0
+                av = (el.get("available") or "").strip().lower()
+                if av in ("yes", "true", "1"):
+                    active = True
+                elif av in ("no", "false", "0"):
+                    active = False
+                break
+
+        # price
+        price = 0.0
+        for el in off.iter():
+            if strip(el.tag) == "cityprice":
+                txt = (el.text or "").strip()
+                if txt:
+                    try:
+                        price = float(txt.replace(" ", "").replace(",", "."))
+                    except Exception:
+                        price = 0.0
+                break
+
+        row = {
+            "code": code,
+            "name": name or code,   # чтобы не оставлять пустым
+            "brand": brand or None,
+            "qty": qty,
+            "price": price,
+            "active": active,
+        }
         rows.append(row)
+
     return rows
+
 
 def _parse_excel(file: UploadFile) -> List[Dict[str, Any]]:
     if not _OPENPYXL_AVAILABLE:
@@ -398,14 +471,26 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
 
         normalized: List[Dict[str, Any]] = []
         for r in raw_rows:
+            # пробуем пользовательскую нормализацию
             if normalize_row:
                 try:
                     ps = normalize_row(r)
-                    normalized.append(ps.to_dict())
+                    d = ps.to_dict()
                 except Exception:
-                    normalized.append(r)
+                    d = dict(r)
             else:
-                normalized.append(r)
+                d = dict(r)
+
+            # ГАРАНТИРУЕМ корректные поля для таблицы
+            d.setdefault("code", (d.get("sku") or d.get("vendorCode") or d.get("barcode") or d.get("id") or ""))
+            d["code"] = str(d["code"]).strip()
+            d.setdefault("name", d.get("model") or d.get("title") or d.get("Name") or d.get("name") or d["code"])
+            d["name"] = str(d["name"]).strip()
+            d["qty"] = _to_int(d.get("qty") or d.get("quantity") or d.get("stock"))
+            d["price"] = _to_float(d.get("price"))
+            d["brand"] = d.get("brand") or d.get("vendor")
+            d["barcode"] = d.get("barcode") or d.get("Barcode")
+            normalized.append(d)
 
         # сохраняем в БД
         _upsert_products(normalized)
