@@ -1,9 +1,36 @@
 from __future__ import annotations
 from typing import Callable, Optional, List, Dict, Any, Tuple
-from fastapi import APIRouter, HTTPException, Query, UploadFile, File
+from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Body
 from fastapi.responses import Response, JSONResponse
+from pydantic import BaseModel
 
 import io
+import sqlite3, os, shutil
+
+# === DB path (persistent disk first) ===
+def _resolve_db_path() -> str:
+    # 1) Explicit env var
+    target = os.getenv("DB_PATH", "/data/kaspi-orders.sqlite3")
+    target_dir = os.path.dirname(target)
+    try:
+        os.makedirs(target_dir, exist_ok=True)
+        if os.access(target_dir, os.W_OK):
+            return target
+    except Exception:
+        pass
+    # 2) Fallback near app
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data.sqlite3"))
+
+DB_PATH = _resolve_db_path()
+
+# Auto-migrate old local DB to /data on first run
+_OLD_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data.sqlite3"))
+if DB_PATH != _OLD_PATH and os.path.exists(_OLD_PATH) and not os.path.exists(DB_PATH):
+    try:
+        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+        shutil.copy2(_OLD_PATH, DB_PATH)
+    except Exception:
+        pass
 from xml.etree import ElementTree as ET
 try:
     import openpyxl  # optional for .xlsx/.xls
@@ -23,102 +50,121 @@ except Exception:
             ProductStock = None
             normalize_row = None  # will fallback
 
-def _parse_xml(content: bytes) -> List[Dict[str, Any]]:
-    """
-    Поддержка Kaspi XML c namespace (xmlns="kaspiShopping").
-    Берём:
-      - sku из атрибута <offer sku="...">
-      - name из <model>
-      - brand из <brand>
-      - quantity из атрибута stockCount в <availabilities>/<availability>
-      - price из текста первого <cityprices>/<cityprice>
-    """
+
+# === DB helpers ===
+DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data.sqlite3"))
+
+def _db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def _ensure_schema():
+    with _db() as c:
+        c.executescript("""
+        PRAGMA journal_mode=WAL;
+        CREATE TABLE IF NOT EXISTS products(
+            sku TEXT PRIMARY KEY,
+            name TEXT,
+            brand TEXT,
+            category TEXT,
+            price REAL,
+            quantity INTEGER,
+            active INTEGER DEFAULT 1,
+            barcode TEXT,
+            updated_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS batches(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sku TEXT NOT NULL,
+            date TEXT NOT NULL,
+            qty INTEGER NOT NULL,
+            unit_cost REAL NOT NULL,
+            note TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(sku) REFERENCES products(sku) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_batches_sku ON batches(sku);
+        """)
+
+def _to_float(v) -> float:
+    try:
+        return float(str(v).replace(" ", "").replace(",", "."))
+    except Exception:
+        return 0.0
+
+def _to_int(v) -> int:
+    try:
+        return int(float(str(v).replace(" ", "").replace(",", ".")))
+    except Exception:
+        return 0
+
+def _sku_of(row: dict) -> str:
+    return str(
+        row.get("code") or row.get("sku") or row.get("vendorCode")
+        or row.get("barcode") or row.get("Barcode") or row.get("id") or ""
+    ).strip()
+
+def _upsert_products(items: list[dict]) -> None:
+    _ensure_schema()
+    with _db() as c:
+        for it in items:
+            sku = _sku_of(it)
+            if not sku:
+                continue
+            name = it.get("name") or it.get("model") or it.get("title") or sku
+            brand = it.get("brand") or it.get("vendor")
+            category = it.get("category")
+            price = _to_float(it.get("price"))
+            qty = _to_int(it.get("qty") or it.get("quantity") or it.get("stock"))
+            barcode = it.get("barcode") or it.get("Barcode")
+            active = 1 if str(it.get("active") or it.get("isActive") or "1").lower() in ("1","true","yes","on") else 0
+            c.execute("""
+                INSERT INTO products(sku,name,brand,category,price,quantity,active,barcode,updated_at)
+                VALUES(?,?,?,?,?,?,?,?,datetime('now'))
+                ON CONFLICT(sku) DO UPDATE SET
+                    name=excluded.name,
+                    brand=excluded.brand,
+                    category=excluded.category,
+                    price=excluded.price,
+                    quantity=excluded.quantity,
+                    active=excluded.active,
+                    barcode=excluded.barcode,
+                    updated_at=excluded.updated_at
+            """, (sku, name, brand, category, price, qty, active, barcode))
+
+def _avg_cost(sku: str) -> float | None:
+    _ensure_schema()
+    with _db() as c:
+        r = c.execute(
+            "SELECT SUM(qty*unit_cost) AS tc, SUM(qty) AS tq FROM batches WHERE sku=?",
+            (sku,)
+        ).fetchone()
+        if not r or not r["tq"]:
+            return None
+        return float(r["tc"]) / float(r["tq"])
+
+
+def _parse_xml(content: bytes):
     try:
         root = ET.fromstring(content)
     except ET.ParseError as e:
         raise HTTPException(status_code=400, detail=f"Некорректный XML: {e}")
-
-    # Определяем дефолтный namespace, если он есть
-    ns = ""
-    if root.tag.startswith("{"):
-        ns = root.tag[1:root.tag.find("}")]
-
-    def q(tag: str) -> str:
-        # поиск с учётом ns
-        return f".//{{{ns}}}{tag}" if ns else f".//{tag}"
-
-    # Ищем офферы
-    offers = root.findall(q("offer"))
-    if not offers:
-        # запасной путь — на всякий случай
-        offers = root.findall(".//offer")
-
-    rows: List[Dict[str, Any]] = []
+    rows = []
+    offers = root.findall(".//offer") or root.findall(".//item") or root.findall(".//product")
     for off in offers:
-        row: Dict[str, Any] = {}
-
-        # Атрибуты offer (sku, id и т.п.)
-        for attr in ("id", "available", "shop-sku", "sku", "offerid", "code"):
-            v = off.get(attr)
-            if v is not None:
-                row[attr] = v
-
-        # Простые дочерние теги (с ns и без — на всякий случай)
-        def grab_text(tag: str) -> Optional[str]:
-            el = off.find(q(tag)) or off.find(tag)
+        row = {}
+        # attributes
+        for attr in ("id","available","shop-sku","sku","offerid","code"):
+            if off.get(attr) is not None:
+                row[attr] = off.get(attr)
+        # common child tags
+        for tag in ["vendorCode","barcode","price","name","title","model",
+                    "quantity","qty","category","vendor","brand"]:
+            el = off.find(tag)
             if el is not None and (el.text or "").strip():
-                return (el.text or "").strip()
-            return None
-
-        # Название
-        model = grab_text("model")
-        if model:
-            row["model"] = model
-            row["name"] = model  # нормализатор использует name
-
-        # Бренд
-        brand = grab_text("brand")
-        if brand:
-            row["brand"] = brand
-            row["vendor"] = brand  # нормализатор понимает vendor/brand
-
-        # Остаток: <availabilities>/<availability stockCount="...">
-        availability = (
-            off.find(q("availability"))
-            or (off.find(q("availabilities")) and off.find(q("availabilities")).find(q("availability")))
-            or off.find(".//availability")
-        )
-        if availability is not None:
-            sc = availability.get("stockCount") or availability.get("stockcount")
-            if sc:
-                row["quantity"] = sc  # нормализатор понимает quantity/qty/остаток/stock
-            av = availability.get("available")
-            if av is not None:
-                row["available"] = av
-
-        # Цена: берём первый <cityprices>/<cityprice>
-        cityprice = (
-            off.find(q("cityprice"))
-            or (off.find(q("cityprices")) and off.find(q("cityprices")).find(q("cityprice")))
-        )
-        if cityprice is None:
-            # полный обход на всякий случай
-            cps = off.findall(q("cityprice")) or off.findall(".//cityprice")
-            cityprice = cps[0] if cps else None
-        if cityprice is not None and (cityprice.text or "").strip():
-            row["price"] = (cityprice.text or "").strip()
-
-        # Доп. стандартные теги, если вдруг есть
-        for tag in ["vendorCode", "barcode", "title", "quantity", "qty", "category", "price"]:
-            v = grab_text(tag)
-            if v is not None:
-                row[tag] = v
-
-        if not row.get("name"):
-            row["name"] = row.get("sku") or row.get("model") or "Без названия"
-
+                row[tag] = (el.text or "").strip()
         rows.append(row)
-
     return rows
 
 def _parse_excel(file):
@@ -333,13 +379,92 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
 
         normalized = []
         for r in raw_rows:
-            try:
-                ps = normalize_row(r)  # -> ProductStock
+            if normalize_row:
+                ps = normalize_row(r)
                 normalized.append(ps.to_dict())
-            except Exception:
+            else:
                 normalized.append(r)
 
-        normalized.sort(key=lambda x: (x.get("name") or x.get("model") or x.get("Name") or '').lower())
-        return JSONResponse({"count": len(normalized), "items": normalized})
+        normalized.sort(key=lambda x: (x.get("name") or x.get("Name") or '').lower())
+        return JSONResponse({ "count": len(normalized), "items": normalized })
+    # ---- DB: список товаров ----
+    @router.get("/db/list")
+    async def db_list(active_only: int = 1, search: str = ""):
+        _ensure_schema()
+        with _db() as c:
+            sql = "SELECT * FROM products"
+            conds, params = [], []
+            if active_only:
+                conds.append("active=1")
+            if search:
+                conds.append("(sku LIKE ? OR name LIKE ?)")
+                params += [f"%{search}%", f"%{search}%"]
+            if conds:
+                sql += " WHERE " + " AND ".join(conds)
+            sql += " ORDER BY name COLLATE NOCASE"
+            rows = [dict(r) for r in c.execute(sql, params)]
+        items = []
+        for r in rows:
+            sku = r["sku"]
+            avgc = _avg_cost(sku)
+            price = float(r.get("price") or 0)
+            qty = int(r.get("quantity") or 0)
+            item = {
+                "code": sku,
+                "name": r.get("name"),
+                "brand": r.get("brand"),
+                "category": r.get("category"),
+                "qty": qty,
+                "price": price,
+                "barcode": r.get("barcode"),
+                "active": bool(r.get("active")),
+            }
+            if avgc is not None:
+                item["avg_cost"] = round(avgc, 2)
+                if price:
+                    item["margin"] = round((price - avgc) / price * 100.0, 2)
+                    item["profit"] = round((price - avgc) * qty, 2)
+            items.append(item)
+        return {"count": len(items), "items": items}
+
+    class BatchIn(BaseModel):
+        date: str
+        qty: int
+        unit_cost: float
+        note: str | None = None
+
+    class BatchListIn(BaseModel):
+        entries: List[BatchIn]
+
+    @router.get("/db/price-batches/{sku}")
+    async def get_batches(sku: str):
+        _ensure_schema()
+        with _db() as c:
+            rows = [dict(r) for r in c.execute(
+                "SELECT id, date, qty, unit_cost, note FROM batches WHERE sku=? ORDER BY date",
+                (sku,)
+            )]
+        avgc = _avg_cost(sku)
+        return {"batches": rows, "avg_cost": round(avgc, 2) if avgc is not None else None}
+
+    @router.post("/db/price-batches/{sku}")
+    async def add_batches(sku: str, payload: BatchListIn = Body(...)):
+        _ensure_schema()
+        with _db() as c:
+            for e in payload.entries:
+                c.execute(
+                    "INSERT INTO batches(sku,date,qty,unit_cost,note) VALUES(?,?,?,?,?)",
+                    (sku, e.date, int(e.qty), float(e.unit_cost), e.note)
+                )
+        avgc = _avg_cost(sku)
+        return {"status": "ok", "avg_cost": round(avgc, 2) if avgc is not None else None}
+
+    @router.delete("/db/price-batches/{sku}/{bid}")
+    async def delete_batch(sku: str, bid: int):
+        _ensure_schema()
+        with _db() as c:
+            c.execute("DELETE FROM batches WHERE id=? AND sku=?", (bid, sku))
+        avgc = _avg_cost(sku)
+        return {"status": "ok", "avg_cost": round(avgc, 2) if avgc is not None else None}
 
     return router
