@@ -5,61 +5,116 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Мой склад — Kaspi</title>
   <style>
-    body{font:14px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Helvetica Neue",Arial;}
-    .wrap{max-width:1400px;margin:20px auto;padding:0 12px;}
+    :root{
+      --bg:#ffffff; --fg:#0f172a; --muted:#6b7280; --card:#f8fafc;
+      --line:#e5e7eb; --pri:#1f7aee; --pri-weak:#e9eef6; --pill-bg:#eef2ff; --pill-fg:#3730a3;
+    }
+    body[data-theme="dark"]{
+      --bg:#0b1220; --fg:#e5e7eb; --muted:#94a3b8; --card:#0f1829;
+      --line:#1f2a37; --pri:#3b82f6; --pri-weak:#132036; --pill-bg:#1e293b; --pill-fg:#bfdbfe;
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Helvetica Neue",Arial;transition:background .2s,color .2s}
+    a{color:inherit;text-decoration:none}
+
+    .layout{display:grid;grid-template-columns:220px 1fr;min-height:100vh}
+    .sidebar{border-right:1px solid var(--line);padding:16px 12px;position:sticky;top:0;height:100vh}
+    .brand{font-weight:800;font-size:18px;margin:4px 0 12px}
+    .nav{display:flex;flex-direction:column;gap:6px;margin-bottom:16px}
+    .nav a{padding:8px 10px;border-radius:10px;color:var(--fg);opacity:.9;transition:background .15s,opacity .15s}
+    .nav a:hover{background:var(--card);opacity:1}
+    .switch{display:flex;gap:8px;align-items:center;margin-top:auto;padding-top:12px;border-top:1px solid var(--line)}
+    .switch input{width:40px;height:22px;appearance:none;background:var(--line);border-radius:999px;position:relative;cursor:pointer;outline:none;transition:background .2s}
+    .switch input:checked{background:var(--pri)}
+    .switch input::after{content:"";position:absolute;inset:3px auto auto 3px;width:16px;height:16px;background:#fff;border-radius:50%;transition:left .2s}
+    .switch input:checked::after{left:21px}
+
+    .content{padding:20px 16px}
+    h1{margin:0 0 12px}
+
     .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-    .btn{background:#1f7aee;color:#fff;border:0;border-radius:8px;padding:8px 12px;cursor:pointer}
-    .btn:disabled{opacity:.5;cursor:default}
-    .btn.secondary{background:#e9eef6;color:#1f2a37}
-    input[type="text"],input[type="number"],select{height:34px;padding:6px 8px;border:1px solid #cbd5e1;border-radius:8px}
-    .muted{color:#6b7280}
+    .btn{background:var(--pri);color:#fff;border:0;border-radius:10px;padding:8px 12px;cursor:pointer;transition:transform .04s ease, filter .15s}
+    .btn:hover{filter:brightness(1.05)}
+    .btn:active{transform:translateY(1px)}
+    .btn.secondary{background:var(--pri-weak);color:var(--fg)}
+    .btn-link{background:transparent;border:0;color:var(--pri);cursor:pointer;padding:0}
+    input[type="text"],input[type="number"],select{height:34px;padding:6px 8px;border:1px solid var(--line);border-radius:10px;background:transparent;color:var(--fg)}
+    input[type="date"]{height:34px;padding:6px 8px;border:1px solid var(--line);border-radius:10px;background:transparent;color:var(--fg)}
     table{border-collapse:collapse;width:100%}
-    th,td{border-bottom:1px solid #e5e7eb;padding:8px 10px;text-align:left;vertical-align:middle}
-    thead th{position:sticky;top:0;background:#f8fafc;z-index:1}
-    .dot{display:inline-block;width:10px;height:10px;border-radius:50%;background:#9ca3af}
+    th,td{border-bottom:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:middle}
+    thead th{position:sticky;top:0;background:var(--card);z-index:1}
+    .muted{color:var(--muted)}
+    .dot{display:inline-block;width:10px;height:10px;border-radius:50%;background:#9ca3af;position:relative}
     .dot.on{background:#10b981}
-    .detail{background:#f8fafc}
-    .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#eef2ff;color:#3730a3;font-size:12px}
-    .btn-link{background:transparent;color:#2563eb;border:0;cursor:pointer;padding:0}
+    .dot.on::after{
+      content:"";position:absolute;inset:-5px; border-radius:50%; border:2px solid rgba(16,185,129,.4);
+      animation:pulse 1.8s ease-out infinite;
+    }
+    @keyframes pulse{0%{transform:scale(.6);opacity:1}70%{transform:scale(1.4);opacity:0}100%{opacity:0}}
+    .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:var(--pill-bg);color:var(--pill-fg);font-size:12px}
     .col-right{text-align:right}
+    .detail{background:var(--card)}
+    .block{padding:12px}
+    .shell{border:1px solid var(--line);border-radius:12px;overflow:hidden}
+    .gap8{gap:8px}
   </style>
 </head>
-<body>
-<div class="wrap">
-  <h1>Мой склад</h1>
+<body data-theme="light">
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="brand">⚡ LeoXpress</div>
+      <nav class="nav">
+        <a href="index.html">Главная</a>
+        <a href="stock.html" style="background:var(--card)">Мой склад</a>
+        <a href="#">Предзаказ</a>
+        <a href="#">Демпинг</a>
+        <a href="#">WhatsApp-рассылка</a>
+      </nav>
+      <div class="switch">
+        <input id="themeToggle" type="checkbox" />
+        <label for="themeToggle">Тёмная тема</label>
+      </div>
+    </aside>
 
-  <div class="row" style="margin-bottom:10px">
-    <label><input id="onlyActive" type="checkbox" checked> Только активные</label>
-    <input id="search" type="text" placeholder="Название, код, бренд..." style="min-width:260px">
-    <button class="btn" id="btnLoadApi">Загрузить</button>
-    <label class="btn secondary" for="fileInput">Импорт из файла (XML/XLSX)</label>
-    <input type="file" id="fileInput" accept=".xml,.xlsx,.xls" style="display:none">
-    <button class="btn secondary" id="btnLoadDb">Загрузить из БД</button>
-    <button class="btn secondary" id="btnBackup">Бэкап БД</button>
-    <label class="btn secondary" for="restoreFile">Восстановить БД</label>
-    <input type="file" id="restoreFile" accept=".sqlite3" style="display:none">
+    <main class="content">
+      <h1>Мой склад</h1>
+
+      <div class="row" style="margin-bottom:10px">
+        <label><input id="onlyActive" type="checkbox" checked> Только активные</label>
+        <input id="search" type="text" placeholder="Название, код, бренд..." style="min-width:260px">
+        <button class="btn" id="btnLoadApi">Загрузить</button>
+        <label class="btn secondary" for="fileInput">Импорт из файла (XML/XLSX)</label>
+        <input type="file" id="fileInput" accept=".xml,.xlsx,.xls" style="display:none">
+        <button class="btn secondary" id="btnLoadDb">Загрузить из БД</button>
+        <button class="btn secondary" id="btnBackup">Бэкап БД</button>
+        <label class="btn secondary" for="restoreFile">Восстановить БД</label>
+        <input type="file" id="restoreFile" accept=".sqlite3" style="display:none">
+      </div>
+
+      <div id="note" class="muted" style="margin:6px 0 12px"></div>
+
+      <div class="shell">
+        <div style="overflow:auto; max-height:70vh">
+          <table id="tbl">
+            <thead>
+              <tr>
+                <th style="min-width:160px">Код</th>
+                <th style="min-width:360px">Название</th>
+                <th>Бренд</th>
+                <th>Категория</th>
+                <th>ШТ</th>
+                <th>Цена, KZT</th>
+                <th>Активен</th>
+                <th class="col-right">Партии</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </main>
   </div>
-
-  <div id="note" class="muted" style="margin:6px 0 12px"></div>
-
-  <div style="overflow:auto; max-height:70vh; border:1px solid #e5e7eb; border-radius:10px">
-    <table id="tbl">
-      <thead>
-        <tr>
-          <th style="min-width:160px">Код</th>
-          <th style="min-width:360px">Название</th>
-          <th>Бренд</th>
-          <th>Категория</th>
-          <th>ШТ</th>
-          <th>Цена, KZT</th>
-          <th>Активен</th>
-          <th class="col-right">Партии</th>
-        </tr>
-      </thead>
-      <tbody></tbody>
-    </table>
-  </div>
-</div>
 
 <script>
 const qs=(s,el=document)=>el.querySelector(s);
@@ -68,6 +123,18 @@ const nf = new Intl.NumberFormat('ru-RU');
 const fmt = n => nf.format(Number(n||0));
 
 let CATEGORIES = [];
+
+// ----- Theme -----
+(function initTheme(){
+  const saved = localStorage.getItem('theme') || 'light';
+  document.body.setAttribute('data-theme', saved);
+  qs('#themeToggle').checked = saved === 'dark';
+  qs('#themeToggle').addEventListener('change', e=>{
+    const t = e.target.checked ? 'dark' : 'light';
+    document.body.setAttribute('data-theme', t);
+    localStorage.setItem('theme', t);
+  });
+})();
 
 async function fetchJSON(url, opts){
   const r = await fetch(url, opts||{});
@@ -84,9 +151,7 @@ function skuFromRow(tr){
   return sku;
 }
 
-function clearDetails(){
-  qsa('tr.detail').forEach(tr => tr.remove());
-}
+function clearDetails(){ qsa('tr.detail').forEach(tr => tr.remove()); }
 
 function makeDetailRow(colspan){
   const tr = document.createElement('tr');
@@ -149,25 +214,68 @@ async function importFile(file){
   renderProducts(data.items||[]);
 }
 
+function parsePriceCell(cell){ return Number((cell?.textContent||'0').toString().replace(/\s/g,'')); }
+
+// ---- Маржа (калькулятор в «Партиях») ----
+function renderMarginPreview(host, priceKZT, commissionTotalGetter, rowGetter){
+  const wrap = document.createElement('div');
+  wrap.className = 'block shell';
+  wrap.style.marginTop = '10px';
+  wrap.innerHTML = `
+    <div class="row gap8" style="align-items:flex-end">
+      <div><div class="muted">Ритейл-цена (из таблицы)</div><div style="font-weight:700" id="mpPrice">${fmt(priceKZT)}</div></div>
+      <div>
+        <div class="muted">Доп. расходы/комиссия, %</div>
+        <input id="mpExtra" type="number" step="0.1" min="0" value="0" style="width:120px">
+      </div>
+      <div>
+        <div class="muted">Итоговая комиссия, %</div>
+        <div id="mpComm" style="font-weight:700">—</div>
+      </div>
+      <div style="margin-left:auto;text-align:right">
+        <div class="muted">Чистая прибыль / 1 шт</div>
+        <div id="mpNet" style="font-weight:800;font-size:18px">—</div>
+      </div>
+    </div>
+  `;
+  host.appendChild(wrap);
+
+  const mpExtra = qs('#mpExtra', wrap), mpComm = qs('#mpComm', wrap), mpNet = qs('#mpNet', wrap);
+
+  const recalc = ()=>{
+    const comBase = Number(commissionTotalGetter()||0);
+    const extra = Number(mpExtra.value||0);
+    mpComm.textContent = (comBase+extra).toFixed(2) + '%';
+    // из активной строки партий берём unit_cost первой непустой
+    const row = rowGetter();
+    const uc = row ? Number(row.querySelector('input[data-role="uc"]').value||0) : 0;
+    const commissionAmount = priceKZT * (comBase+extra)/100;
+    const net = priceKZT - commissionAmount - uc;
+    mpNet.textContent = fmt(net);
+  };
+
+  wrap.addEventListener('input', recalc);
+  recalc();
+}
+
 async function openDetail(row){
   clearDetails();
   const sku = skuFromRow(row);
   if(!sku) { alert('У товара нет кода/sku — некуда сохранить партии.'); return; }
 
-  // загрузим категории (для селектора)
+  // категории для селектора
   if(!CATEGORIES.length){
     const c = await fetchJSON('/products/db/categories');
     CATEGORIES = c.categories || [];
   }
 
-  // вставляем строку ниже
+  // ставим строку-деталь
   const tr = makeDetailRow(row.children.length);
   row.insertAdjacentElement('afterend', tr);
   const mount = tr.firstChild;
 
-  // базовая разметка
   mount.innerHTML = `
-    <div style="padding:12px">
+    <div class="block">
       <div class="row" style="align-items:flex-end; gap:12px; margin-bottom:8px">
         <div>
           <div class="muted" style="margin-bottom:4px">Категория / комиссия</div>
@@ -179,7 +287,7 @@ async function openDetail(row){
       </div>
 
       <div style="margin:8px 0 6px; font-weight:600">Партии закупок — <span id="dTitle">${row.cells[1].textContent}</span></div>
-      <table class="table" style="width:100%">
+      <table style="width:100%">
         <thead><tr><th>Дата</th><th>Кол-во</th><th>Закуп., KZT</th><th>Примечание</th><th></th></tr></thead>
         <tbody id="btBody"></tbody>
       </table>
@@ -187,16 +295,16 @@ async function openDetail(row){
         <button class="btn secondary" id="btnAddRow">+ Добавить</button>
         <button class="btn" id="btnSaveRows">Сохранить</button>
       </div>
+      <div id="marginMount"></div>
     </div>
   `;
 
-  // заполнить селектор категорий
+  // селектор категорий
   const sel = qs('#catSel', mount);
   sel.innerHTML = CATEGORIES.map(c=>{
     const total = (Number(c.base_percent||0)+Number(c.extra_percent||0)+Number(c.tax_percent||0)).toFixed(2);
-    return `<option value="${c.name}">${c.name} — ${total}%</option>`;
+    return `<option value="${c.name}" data-total="${total}">${c.name} — ${total}%</option>`;
   }).join('');
-  // установить текущую категорию из таблицы
   const currentCat = row.cells[3].childNodes[0]?.nodeValue?.trim() || '';
   if(currentCat) sel.value = currentCat;
 
@@ -207,7 +315,6 @@ async function openDetail(row){
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({category: cat})
     });
-    // перерисуем строку категории + плашку %
     const match = CATEGORIES.find(x=>x.name===cat);
     const total = match ? (Number(match.base_percent||0)+Number(match.extra_percent||0)+Number(match.tax_percent||0)).toFixed(2) : null;
     row.cells[3].innerHTML = cat + (total?` <span class="pill">${total}%</span>`:'');
@@ -220,9 +327,9 @@ async function openDetail(row){
     tr.innerHTML = `
       <td><input type="date" value="${data?.date || new Date().toISOString().slice(0,10)}"></td>
       <td><input type="number" min="0" step="1" value="${data?.qty ?? ''}" style="width:90px"></td>
-      <td><input type="number" min="0" step="0.01" value="${data?.unit_cost ?? ''}" style="width:110px"></td>
+      <td><input data-role="uc" type="number" min="0" step="0.01" value="${data?.unit_cost ?? ''}" style="width:110px"></td>
       <td><input type="text" value="${data?.note ?? ''}"></td>
-      <td>${data?.id ? `<button class="btn-link btnDel" data-id="${data.id}">Удалить</button>`:''}</td>
+      <td>${data?.id ? `<button class="btn-link btnDel" data-id="${data.id}">Удалить</button>` : ''}</td>
     `;
     tbody.appendChild(tr);
   }
@@ -251,12 +358,21 @@ async function openDetail(row){
       body: JSON.stringify({entries})
     });
     alert('Сохранено.');
-    // перезагрузим детали, чтобы появились кнопки "Удалить"
-    openDetail(row);
+    openDetail(row); // перерисуем, чтобы появились кнопки "Удалить"
   };
+
+  // калькулятор маржи (preview)
+  const price = parsePriceCell(row.cells[5]);
+  const commissionGetter = ()=>{
+    const opt = sel.options[sel.selectedIndex];
+    const ds = opt ? Number(opt.dataset.total||0) : 0;
+    return ds;
+  };
+  const rowGetter = ()=> qs('#btBody tr');
+  renderMarginPreview(qs('#marginMount', mount), price, commissionGetter, rowGetter);
 }
 
-// ---------- events ----------
+// ----- events -----
 document.addEventListener('DOMContentLoaded', ()=>{
   qs('#btnLoadApi').onclick = loadAPI;
   qs('#btnLoadDb').onclick = loadDB;
@@ -286,7 +402,7 @@ document.addEventListener('DOMContentLoaded', ()=>{
     openDetail(row);
   });
 
-  // стартовый экран — подгружаем из БД
+  // автозагрузка из БД
   loadDB();
 });
 </script>
