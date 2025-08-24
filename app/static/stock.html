@@ -5,6 +5,15 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Мой склад — Kaspi</title>
   <link rel="stylesheet" href="style.css" />
+  <style>
+    /* мини-стили для раскрывающейся панели под строкой */
+    .details-row td { background: var(--surface-2,#fafafa); padding: 12px 16px; }
+    .mini-table { width:100%; border-collapse: collapse; }
+    .mini-table th, .mini-table td { border-bottom: 1px solid rgba(0,0,0,.06); padding:6px 8px; }
+    .chip { display:inline-block; padding:2px 8px; border-radius:999px; background:#eef; font-size:12px; }
+    .clickable { cursor: pointer; }
+    .btn.small { padding: 4px 8px; font-size: 12px; }
+  </style>
 </head>
 <body data-theme="light">
   <div class="layout">
@@ -12,7 +21,7 @@
       <div class="brand">⚡ LeoXpress</div>
       <nav class="nav">
         <a class="nav-item" href="index.html">Главная</a>
-        <a class="nav-item active" href="stock.html">Мой склад</a>
+        <a class="nav-item" href="stock.html">Мой склад</a>
         <a class="nav-item" href="#">Предзаказ</a>
         <a class="nav-item" href="#">Демпинг</a>
         <a class="nav-item" href="#">WhatsApp Рассылка</a>
@@ -31,15 +40,13 @@
 
       <section class="shell">
         <div class="filters">
-          <div class="row" style="gap:8px; flex-wrap:wrap">
+          <div class="row">
             <label class="chk"><input type="checkbox" id="onlyActive" checked> Только активные</label>
             <label>Поиск</label>
-            <input type="text" id="search" placeholder="Название или код..." style="min-width:260px">
+            <input type="text" id="search" placeholder="Название или код...">
             <button class="btn" id="btnLoad">Загрузить</button>
-            <button class="btn" id="btnLoadDB">Загрузить из БД</button>
             <label class="btn" for="fileInput">Импорт из файла (XML/XLSX)</label>
             <input type="file" id="fileInput" accept=".xml,.xlsx,.xls" style="display:none">
-            <button class="btn" id="btnSaveToDB">Сохранить в БД</button>
             <button class="btn" id="btnExport">Экспорт CSV (из таблицы)</button>
           </div>
         </div>
@@ -47,8 +54,7 @@
         <div id="note" class="muted" style="margin:6px 0 10px"></div>
 
         <div class="muted" style="margin:6px 0 10px">
-          Для расчёта прибыли укажи закупочную цену (KZT). Теперь можно хранить <b>несколько партий</b> для позиции
-          (дата, кол-во, закупка). Средняя закупочная считается автоматически.
+          Для расчёта прибыли укажи партии закупок (под строкой товара). Средняя закупочная берётся из БД.
         </div>
 
         <div class="shell" style="padding:0">
@@ -57,7 +63,7 @@
               <thead>
                 <tr>
                   <th style="min-width:110px">Код</th>
-                  <th style="min-width:360px">Название</th>
+                  <th style="min-width:260px">Название</th>
                   <th>Бренд</th>
                   <th>Категория</th>
                   <th>ШТ</th>
@@ -84,19 +90,8 @@
   </div>
 
 <script>
-let currentItems = []; // что сейчас в таблице
 const nf = new Intl.NumberFormat('ru-RU');
 const fmt = n => nf.format(Math.round((Number(n)||0)*100)/100);
-
-function getCostLocal(id){
-  const m = JSON.parse(localStorage.getItem('purchase_costs') || '{}');
-  return Number(m[id] || 0);
-}
-function setCostLocal(id, v){
-  const m = JSON.parse(localStorage.getItem('purchase_costs') || '{}');
-  m[id] = Number(v)||0;
-  localStorage.setItem('purchase_costs', JSON.stringify(m));
-}
 
 async function loadProducts(){
   const onlyActive = document.getElementById('onlyActive').checked;
@@ -105,99 +100,199 @@ async function loadProducts(){
   p.set('active', onlyActive ? '1' : '0');
   if(q) p.set('q', q);
   p.set('page', '1'); p.set('page_size', '2000');
-  const r = await fetch(`/products/list?${p.toString()}`);
-  const data = await r.json();
-  if(data.note){ document.getElementById('note').textContent = data.note; }
-  currentItems = data.items || [];
-  renderTable(currentItems);
-  // подхватить средние закупочные из БД
-  try { await hydrateAvgCostsFromDB(currentItems); } catch(e){}
+
+  const [catalogRes, dbRes] = await Promise.all([
+    fetch(`/products/list?${p.toString()}`),
+    fetch(`/products/db/list?active_only=${onlyActive?1:0}&search=${encodeURIComponent(q)}`)
+  ]);
+
+  const catalog = await catalogRes.json();
+  const db = await dbRes.json();
+
+  const avgMap = {};
+  (db.items || []).forEach(it => { if (it.avg_cost != null) avgMap[it.code] = it.avg_cost; });
+
+  if(catalog.note){ document.getElementById('note').textContent = catalog.note; }
+  renderTable(catalog.items || [], avgMap);
 }
 
-async function hydrateAvgCostsFromDB(items){
-  // тянем список из БД и маппим avg_cost по sku
-  const res = await fetch(`/products/db/list?active_only=0&search=`);
-  const db = await res.json();
-  const set = new Set(items.map(it => (it.code || it.id || '').toString()));
-  const map = {};
-  (db.items || []).forEach(it => {
-    if (it.avg_cost != null && set.has((it.code||'').toString())) {
-      map[it.code] = it.avg_cost;
-    }
-  });
-  applyAvgCostsToTable(map);
+function marginPercent(price, cost){
+  price = Number(price)||0; cost = Number(cost)||0;
+  if(!price) return 0;
+  return ((price - cost) / price) * 100.0;
 }
 
-function renderTable(items){
+function renderTable(items, avgMap){
   const tb = document.querySelector('#tbl tbody');
   tb.innerHTML = '';
   let sumProfit = 0;
 
   for(const it of items){
-    const sku = (it.code || it.id || '').toString();
-    const cost = getCostLocal(sku);
-    const price = Number(it.price)||0;
-    const qty = Number(it.qty)||0;
-    const profitOne = price - cost;
-    const totalProfit = qty * profitOne;
+    const avg = avgMap[it.code] ?? 0;
+    const profit = (Number(it.price)||0) - avg;
+    const totalProfit = (Number(it.qty)||0) * profit;
     sumProfit += totalProfit;
 
     const tr = document.createElement('tr');
+    tr.setAttribute('data-sku', it.code || '');
+    tr.setAttribute('data-name', it.name || '');
+    tr.classList.add('clickable');
     tr.innerHTML = `
-      <td>${sku}</td>
-      <td>${(it.name||'').toString()}</td>
+      <td>${it.code||''}</td>
+      <td>${it.name||''}</td>
       <td>${it.brand||''}</td>
       <td>${it.category||''}</td>
-      <td>${fmt(qty)}</td>
-      <td>${fmt(price)}</td>
+      <td>${fmt(it.qty||0)}</td>
+      <td>${fmt(it.price||0)}</td>
       <td>${it.active===true ? 'Да' : it.active===false ? 'Нет' : ''}</td>
       <td>${it.barcode||''}</td>
-      <td>
-        <div style="display:flex;align-items:center;gap:6px">
-          <input data-sku="${sku}" class="cost-input" type="number" min="0" step="1" value="${cost}" style="width:120px">
-          <button class="btn btn-batches" data-sku="${sku}">Цены</button>
-        </div>
-      </td>
-      <td>${fmt(price ? ((price - cost)/price*100) : 0)}</td>
-      <td>${fmt(totalProfit)}</td>
+      <td><input data-role="avg" type="number" value="${avg}" step="0.01" readonly style="width:120px"><span class="chip" style="margin-left:6px">цены</span></td>
+      <td data-role="margin">${fmt(marginPercent(it.price, avg))}</td>
+      <td data-role="profit">${fmt(totalProfit)}</td>
     `;
     tb.appendChild(tr);
   }
 
   document.getElementById('sumProfit').textContent = fmt(sumProfit);
 
-  // события
-  tb.querySelectorAll('input.cost-input').forEach(inp => {
-    inp.addEventListener('change', () => {
-      const sku = inp.getAttribute('data-sku');
-      setCostLocal(sku, Number(inp.value)||0);
-      renderTable(currentItems); // пересчитать строку и итог
-    });
+  // раскрытие панели по клику на строку (кроме клика по input)
+  tb.addEventListener('click', onRowClick, { once: true });
+}
+
+function onRowClick(e){
+  const tr = e.target.closest('tr[data-sku]');
+  if(!tr) return;
+  if(e.target.closest('input')) return; // не раскрываем при клике по инпуту
+  toggleDetails(tr);
+  // делегирование продолжаем слушать
+  tr.parentElement.addEventListener('click', onRowClick, { once: true });
+}
+
+function closeDetails(tr){
+  const next = tr.nextElementSibling;
+  if(next && next.classList.contains('details-row')){
+    next.remove();
+  }
+}
+
+async function toggleDetails(tr){
+  const sku = tr.getAttribute('data-sku');
+  const name = tr.getAttribute('data-name') || sku;
+
+  const already = tr.nextElementSibling;
+  if(already && already.classList.contains('details-row')){
+    already.remove();
+    return;
+  }
+  closeDetails(tr);
+
+  // контейнер
+  const det = document.createElement('tr');
+  det.className = 'details-row';
+  det.innerHTML = `<td colspan="11"><div id="d-body">Загрузка партий...</div></td>`;
+  tr.after(det);
+
+  // загрузим партии
+  const data = await fetch(`/products/db/price-batches/${encodeURIComponent(sku)}`).then(r=>r.json());
+  renderDetails(det.querySelector('#d-body'), sku, name, data);
+}
+
+function renderDetails(container, sku, name, data){
+  container.innerHTML = `
+    <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+      <div style="font-weight:700;">Партии закупок — ${name}</div>
+      <div style="font-size:12px; color:#666;">Средняя закупочная: <b id="avgVal">${data.avg_cost ?? '—'}</b></div>
+    </div>
+    <table class="mini-table" id="mini-${sku}">
+      <thead><tr><th>№ партии</th><th>Дата</th><th>Кол-во</th><th>Закуп., KZT</th><th>Прим.</th><th style="width:80px"></th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div style="display:flex; gap:8px; margin-top:8px;">
+      <button class="btn small" data-action="add">+ Добавить</button>
+      <button class="btn small" data-action="save">Сохранить</button>
+    </div>
+  `;
+
+  const tbody = container.querySelector('tbody');
+  const rows = data.batches || [];
+  for(const r of rows){
+    tbody.appendChild(makeMiniRow(r.batch_no || '', r.date, r.qty, r.unit_cost, r.note));
+  }
+
+  container.addEventListener('click', async (e)=>{
+    const action = e.target.getAttribute('data-action');
+    if(action === 'add'){
+      // попытка предсказать следующий номер
+      const maxNo = [...tbody.querySelectorAll('tr')].reduce((m,tr)=>{
+        const v = Number(tr.querySelector('[name="batch_no"]').value||0);
+        return Math.max(m, v);
+      }, 0);
+      tbody.appendChild(makeMiniRow(maxNo ? maxNo+1 : '', new Date().toISOString().slice(0,10), '', '', ''));
+    }
+    if(action === 'del'){
+      e.target.closest('tr').remove();
+    }
+    if(action === 'save'){
+      const payload = gatherMini(tbody);
+      const res = await fetch(`/products/db/price-batches/${encodeURIComponent(sku)}`, {
+        method: 'PUT',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify(payload)
+      }).then(r=>r.json());
+      container.querySelector('#avgVal').textContent = res.avg_cost ?? '—';
+      // проставим среднюю закупочную в строке таблицы
+      const hostRow = container.closest('tr.details-row').previousElementSibling;
+      const avgInput = hostRow.querySelector('input[data-role="avg"]');
+      avgInput.value = res.avg_cost ?? 0;
+      // пересчёт маржи/прибыли
+      const price = Number(hostRow.children[5].textContent.replace(/\s/g,'') || 0);
+      const qty   = Number(hostRow.children[4].textContent.replace(/\s/g,'') || 0);
+      hostRow.querySelector('[data-role="margin"]').textContent = fmt(marginPercent(price, res.avg_cost||0));
+      hostRow.querySelector('[data-role="profit"]').textContent = fmt((price - (res.avg_cost||0)) * qty);
+    }
   });
-  tb.querySelectorAll('.btn-batches').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const sku = btn.getAttribute('data-sku');
-      const row = btn.closest('tr');
-      const title = row?.children?.[1]?.textContent?.trim() || sku;
-      openBatchesModal(sku, title);
-    });
-  });
+}
+
+function makeMiniRow(batch_no, date, qty, unit_cost, note){
+  const tr = document.createElement('tr');
+  tr.innerHTML = `
+    <td><input name="batch_no" type="number" step="1" value="${batch_no ?? ''}" style="width:90px"></td>
+    <td><input name="date" type="date" value="${date || new Date().toISOString().slice(0,10)}"></td>
+    <td><input name="qty"  type="number" min="0" step="1" value="${qty ?? ''}" style="width:90px"></td>
+    <td><input name="unit_cost" type="number" min="0" step="0.01" value="${unit_cost ?? ''}" style="width:110px"></td>
+    <td><input name="note" type="text" value="${note ?? ''}"></td>
+    <td><button class="btn small" data-action="del">Удалить</button></td>
+  `;
+  return tr;
+}
+
+function gatherMini(tbody){
+  const entries = [...tbody.querySelectorAll('tr')].map(tr=>{
+    const g = n => tr.querySelector(`[name="${n}"]`).value;
+    return {
+      batch_no: Number(g('batch_no')||0) || null,
+      date: g('date') || new Date().toISOString().slice(0,10),
+      qty: Number(g('qty')||0),
+      unit_cost: Number(g('unit_cost')||0),
+      note: g('note') || null
+    };
+  }).filter(e => e.qty>0 && e.unit_cost>0);
+  return { entries };
 }
 
 function exportCsvFromTable(){
   const rows = [];
-  const header = ["code","name","brand","category","qty","price","active","barcode","cost","margin_percent","profit_total"];
+  const header = ["code","name","brand","category","qty","price","active","barcode","avg_cost","margin_percent","profit_total"];
   rows.push(header);
   const tb = document.querySelector('#tbl tbody');
-  tb.querySelectorAll('tr').forEach(tr => {
+  tb.querySelectorAll('tr[data-sku]').forEach(tr => {
     const td = Array.from(tr.children).map(x => x.textContent);
-    const input = tr.querySelector('input.cost-input');
-    const cost = input ? Number(input.value||0) : 0;
-    const price = Number((td[5]||'0').replace(/\s/g,'')); // Цена
-    const qty   = Number((td[4]||'0').replace(/\s/g,'')); // ШТ
-    const margin = price ? ((price - cost)/price*100) : 0;
-    const profit = (price - cost) * qty;
-    rows.push([td[0],td[1],td[2],td[3],qty,price,td[6],td[7],cost,margin,profit]);
+    const avg = Number(tr.querySelector('input[data-role="avg"]').value||0);
+    const price = Number((td[5]||'0').replace(/\s/g,''));
+    const qty   = Number((td[4]||'0').replace(/\s/g,''));
+    const margin = marginPercent(price, avg);
+    const profit = (price - avg) * qty;
+    rows.push([td[0],td[1],td[2],td[3],qty,price,td[6],td[7],avg,margin,profit]);
   });
   const esc = s => { s=(s??'').toString(); return /[",\n,]/.test(s) ? '"' + s.replace(/"/g,'""') + '"' : s; };
   const csv = rows.map(r => r.map(esc).join(',')).join('\n');
@@ -213,175 +308,24 @@ async function uploadManual(file){
   const res = await fetch('/products/manual-upload', { method: 'POST', body: fd });
   if(!res.ok){
     const err = await res.json().catch(()=>({}));
-    throw new Error(err.detail || ('HTTP '+res.status));
+    alert('Ошибка: '+(err.detail || ('HTTP '+res.status)));
+    return;
   }
   const data = await res.json();
-  currentItems = data.items || [];
-  renderTable(currentItems);
-  try { await hydrateAvgCostsFromDB(currentItems); } catch(e){}
+  renderTable(data.items || [], {}); // после импорта можно нажать "Загрузить" чтобы подмешать avg из БД
   const note = document.getElementById('note');
   if(note){ note.textContent = `Файл загружен: ${file.name}. Позиций: ${data.count||0}`; }
-}
-
-async function saveCurrentTableToDB(){
-  if (!currentItems.length) return alert('Нет данных для сохранения');
-  const payload = { items: currentItems.map(x => ({
-    code: x.code || x.id || '',
-    name: x.name || x.model || x.title || '',
-    brand: x.brand || x.vendor || null,
-    category: x.category || null,
-    price: x.price || 0,
-    quantity: x.qty || x.quantity || 0,
-    active: (x.active===true) ? 1 : (x.active===false ? 0 : 1),
-    barcode: x.barcode || null,
-  })) };
-  const r = await fetch('/products/db/upsert', {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify(payload)
-  });
-  const data = await r.json();
-  if(r.ok){ alert(`Сохранено в БД: ${data.count||0}`); }
-  else { alert('Ошибка: ' + (data.detail||r.status)); }
 }
 
 document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('btnLoad').addEventListener('click', loadProducts);
   document.getElementById('btnExport').addEventListener('click', exportCsvFromTable);
-  document.getElementById('btnSaveToDB').addEventListener('click', saveCurrentTableToDB);
-  document.getElementById('btnLoadDB').addEventListener('click', async () => {
-    const onlyActive = document.getElementById('onlyActive').checked ? 1 : 0;
-    const search = document.getElementById('search').value.trim();
-    const r = await fetch(`/products/db/list?active_only=${onlyActive}&search=${encodeURIComponent(search)}`);
-    const data = await r.json();
-    currentItems = data.items || [];
-    renderTable(currentItems);
-  });
-
   const fi = document.getElementById('fileInput');
-  fi.addEventListener('change', async ()=>{ if(fi.files && fi.files[0]){ try{ await uploadManual(fi.files[0]); } catch(e){ alert('Ошибка: '+e.message); } fi.value=''; }});
-
+  fi.addEventListener('change', async ()=>{ if(fi.files && fi.files[0]){ await uploadManual(fi.files[0]); fi.value=''; } });
   const t = document.getElementById('themeToggle');
   if(t){ t.addEventListener('change', (e)=> document.body.setAttribute('data-theme', e.target.checked ? 'dark' : 'light')); }
-
   loadProducts();
 });
-
-/* ======== Модалка партий закупок ======== */
-const qs = (s, el=document) => el.querySelector(s);
-const qsa = (s, el=document) => [...el.querySelectorAll(s)];
-const modal = document.createElement('div');
-modal.id = 'batchesModal';
-modal.style.cssText = 'display:none; position:fixed; inset:0; background:rgba(0,0,0,.45); align-items:center; justify-content:center; z-index:9999;';
-modal.innerHTML = `
-  <div style="background:var(--bg,#fff); padding:16px; border-radius:10px; width:640px; max-height:80vh; overflow:auto;">
-    <div style="display:flex; align-items:center; justify-content:space-between;">
-      <h3 id="bmTitle" style="margin:0;">Партии закупок</h3>
-      <button id="bmClose" class="btn">×</button>
-    </div>
-    <div id="bmBody" style="margin-top:12px;">
-      <table id="bmTable" class="table">
-        <thead><tr><th>Дата</th><th>Кол-во</th><th>Закуп., KZT</th><th>Прим.</th><th></th></tr></thead>
-        <tbody></tbody>
-      </table>
-      <button id="bmAddRow" class="btn">+ Добавить</button>
-      <div style="margin-top:8px; font-size:12px; color:#666;">Средняя закупочная: <b id="bmAvg">—</b></div>
-    </div>
-    <div style="margin-top:12px; display:flex; gap:8px; justify-content:flex-end;">
-      <button id="bmSave" class="btn">Сохранить</button>
-    </div>
-  </div>`;
-document.body.appendChild(modal);
-
-let currentSKU = null;
-function openBatchesModal(sku, title){
-  currentSKU = sku;
-  qs('#bmTitle').textContent = `Партии закупок — ${title || sku}`;
-  const tbody = qs('#bmTable tbody'); tbody.innerHTML = '';
-  qs('#bmAvg').textContent = '—';
-  modal.style.display = 'flex';
-  fetch(`/products/db/price-batches/${encodeURIComponent(sku)}`)
-    .then(r => r.json())
-    .then(data => {
-      (data.batches||[]).forEach(addRowFromData);
-      qs('#bmAvg').textContent = (data.avg_cost != null) ? data.avg_cost : '—';
-    })
-    .catch(console.error);
-}
-function closeBatchesModal(){ modal.style.display='none'; currentSKU=null; }
-qs('#bmClose').onclick = closeBatchesModal;
-qs('#bmAddRow').onclick = () => addRowFromData({});
-
-function addRowFromData(row){
-  const tr = document.createElement('tr');
-  tr.innerHTML = `
-    <td><input type="date" value="${row.date || new Date().toISOString().slice(0,10)}" /></td>
-    <td><input type="number" min="0" step="1" value="${row.qty ?? ''}" style="width:90px"/></td>
-    <td><input type="number" min="0" step="0.01" value="${row.unit_cost ?? ''}" style="width:110px"/></td>
-    <td><input type="text" value="${row.note ?? ''}" /></td>
-    <td>${row.id ? `<button class="btn btn-del" data-id="${row.id}">Удалить</button>` : ''}</td>
-  `;
-  qs('#bmTable tbody').appendChild(tr);
-}
-
-function gatherPayload(){
-  const entries = qsa('#bmTable tbody tr').map(tr => {
-    const [dEl,qEl,cEl,nEl] = qsa('input', tr);
-    return {
-      date: dEl.value || new Date().toISOString().slice(0,10),
-      qty: Number(qEl.value||0),
-      unit_cost: Number(cEl.value||0),
-      note: nEl.value || null,
-    };
-  }).filter(e => e.qty>0 && e.unit_cost>0);
-  return { entries };
-}
-qs('#bmSave').onclick = () => {
-  if(!currentSKU) return;
-  fetch(`/products/db/price-batches/${encodeURIComponent(currentSKU)}`, {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify(gatherPayload())
-  })
-  .then(r=>r.json())
-  .then(data=>{
-    const avg = data.avg_cost != null ? Number(data.avg_cost) : 0;
-    // применим новую среднюю закупочную в таблице
-    const map = {}; map[currentSKU] = avg;
-    applyAvgCostsToTable(map);
-    closeBatchesModal();
-  })
-  .catch(console.error);
-};
-
-qs('#bmTable tbody').addEventListener('click', (e)=>{
-  const btn = e.target.closest('.btn-del');
-  if(!btn || !currentSKU) return;
-  const id = btn.dataset.id;
-  fetch(`/products/db/price-batches/${encodeURIComponent(currentSKU)}/${id}`, { method:'DELETE' })
-    .then(r=>r.json())
-    .then(data=>{
-      btn.closest('tr').remove();
-      const map = {}; map[currentSKU] = (data.avg_cost!=null?Number(data.avg_cost):0);
-      applyAvgCostsToTable(map);
-      qs('#bmAvg').textContent = (data.avg_cost!=null)?data.avg_cost:'—';
-    })
-    .catch(console.error);
-});
-
-function applyAvgCostsToTable(avgMap){
-  const rows = qsa('#tbl tbody tr');
-  rows.forEach(tr => {
-    const sku = tr.cells?.[0]?.textContent?.trim();
-    const input = tr.querySelector('input.cost-input');
-    if(!sku || !input) return;
-    if(avgMap[sku] != null){
-      input.value = avgMap[sku];
-      setCostLocal(sku, avgMap[sku]);
-    }
-  });
-  // пересчитать маржу/прибыль
-  renderTable(currentItems);
-}
 </script>
 </body>
 </html>
