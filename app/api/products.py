@@ -28,6 +28,7 @@ except Exception:
             ProductStock = None
             normalize_row = None  # fallback ниже обрабатывается
 
+
 # =============================================================================
 # DB path (persistent disk first, fallback to local) + auto-migration
 # =============================================================================
@@ -86,11 +87,19 @@ def _ensure_schema():
             qty INTEGER NOT NULL,
             unit_cost REAL NOT NULL,
             note TEXT,
+            batch_no INTEGER,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(sku) REFERENCES products(sku) ON DELETE CASCADE
         );
         CREATE INDEX IF NOT EXISTS idx_batches_sku ON batches(sku);
         """)
+        # Миграции (на случай старой таблицы без batch_no)
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(batches)")}
+        if "batch_no" not in cols:
+            try:
+                c.execute("ALTER TABLE batches ADD COLUMN batch_no INTEGER")
+            except Exception:
+                pass
 
 def _to_float(v) -> float:
     try:
@@ -123,13 +132,7 @@ def _upsert_products(items: List[Dict[str, Any]]) -> None:
             price = _to_float(it.get("price"))
             qty = _to_int(it.get("qty") or it.get("quantity") or it.get("stock"))
             barcode = it.get("barcode") or it.get("Barcode")
-            active = it.get("active")
-            if isinstance(active, str):
-                active = 1 if active.lower() in ("1","true","yes","on") else 0
-            elif isinstance(active, bool):
-                active = 1 if active else 0
-            else:
-                active = 1
+            active = 1 if str(it.get("active") or it.get("isActive") or "1").lower() in ("1","true","yes","on") else 0
             c.execute("""
                 INSERT INTO products(sku,name,brand,category,price,quantity,active,barcode,updated_at)
                 VALUES(?,?,?,?,?,?,?,?,datetime('now'))
@@ -155,6 +158,10 @@ def _avg_cost(sku: str) -> float | None:
             return None
         return float(r["tc"]) / float(r["tq"])
 
+def _next_batch_no(c: sqlite3.Connection, sku: str) -> int:
+    row = c.execute("SELECT COALESCE(MAX(batch_no),0) AS m FROM batches WHERE sku=?", (sku,)).fetchone()
+    return int(row["m"] or 0) + 1
+
 # =============================================================================
 # Parsers
 # =============================================================================
@@ -175,7 +182,6 @@ def _parse_xml(content: bytes) -> List[Dict[str, Any]]:
         raise HTTPException(status_code=400, detail=f"Некорректный XML: {e}")
 
     def strip(tag: str) -> str:
-        # "{ns}offer" -> "offer"
         return tag.split("}", 1)[-1] if "}" in tag else tag
 
     def child_text(parent: ET.Element, *names: str) -> str:
@@ -188,7 +194,6 @@ def _parse_xml(content: bytes) -> List[Dict[str, Any]]:
 
     rows: List[Dict[str, Any]] = []
 
-    # находим все <offer> с учётом namespace
     offers = [el for el in root.iter() if strip(el.tag) == "offer"]
     for off in offers:
         code = (
@@ -202,9 +207,8 @@ def _parse_xml(content: bytes) -> List[Dict[str, Any]]:
         name = child_text(off, "model", "name", "title")
         brand = child_text(off, "brand")
 
-        # qty / active
         qty = 0
-        active: Optional[bool] = None
+        active = None
         for el in off.iter():
             if strip(el.tag) == "availability":
                 sc = el.get("stockCount")
@@ -220,7 +224,6 @@ def _parse_xml(content: bytes) -> List[Dict[str, Any]]:
                     active = False
                 break
 
-        # price
         price = 0.0
         for el in off.iter():
             if strip(el.tag) == "cityprice":
@@ -234,7 +237,7 @@ def _parse_xml(content: bytes) -> List[Dict[str, Any]]:
 
         row = {
             "code": code,
-            "name": name or code,   # чтобы не оставлять пустым
+            "name": name or code,
             "brand": brand or None,
             "qty": qty,
             "price": price,
@@ -381,13 +384,14 @@ def _collect_products(client: KaspiClient, active_only: Optional[bool]) -> Tuple
     return items, total, note
 
 # =============================================================================
-# Pydantic models (module-level to avoid forward-ref issues in Pydantic v2)
+# Pydantic models (module-level)
 # =============================================================================
 class BatchIn(BaseModel):
     date: str
     qty: int
     unit_cost: float
     note: str | None = None
+    batch_no: int | None = None  # для отображения/сохранения (необяз.)
 
 class BatchListIn(BaseModel):
     entries: List[BatchIn]
@@ -420,20 +424,6 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
 
         return JSONResponse({"items": page_items, "total": len(items), "note": note})
 
-
-    @router.post("/db/upsert")
-    async def db_upsert(payload: Dict[str, List[Dict[str, Any]]] = Body(...)):
-        """
-        Сохраняет/обновляет товары в таблице products.
-        Ожидает JSON вида: {"items":[{code,name,brand,category,price,quantity,active,barcode}, ...]}
-        """
-        items = payload.get("items") or []
-        if not isinstance(items, list):
-            raise HTTPException(status_code=400, detail="Поле 'items' должно быть списком.")
-        _upsert_products(items)
-        return {"status": "ok", "count": len(items)}
-
-    
     @router.get("/export.csv")
     async def export_products_csv(active: int = Query(1)):
         if client is None:
@@ -485,31 +475,17 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
 
         normalized: List[Dict[str, Any]] = []
         for r in raw_rows:
-            # пробуем пользовательскую нормализацию
             if normalize_row:
                 try:
                     ps = normalize_row(r)
-                    d = ps.to_dict()
+                    normalized.append(ps.to_dict())
                 except Exception:
-                    d = dict(r)
+                    normalized.append(r)
             else:
-                d = dict(r)
+                normalized.append(r)
 
-            # ГАРАНТИРУЕМ корректные поля для таблицы
-            d.setdefault("code", (d.get("sku") or d.get("vendorCode") or d.get("barcode") or d.get("id") or ""))
-            d["code"] = str(d["code"]).strip()
-            d.setdefault("name", d.get("model") or d.get("title") or d.get("Name") or d.get("name") or d["code"])
-            d["name"] = str(d["name"]).strip()
-            d["qty"] = _to_int(d.get("qty") or d.get("quantity") or d.get("stock"))
-            d["price"] = _to_float(d.get("price"))
-            d["brand"] = d.get("brand") or d.get("vendor")
-            d["barcode"] = d.get("barcode") or d.get("Barcode")
-            normalized.append(d)
-
-        # сохраняем в БД
         _upsert_products(normalized)
 
-        # добавим среднюю закупочную/маржу/прибыль, если есть партии
         for it in normalized:
             sku = _sku_of(it)
             avgc = _avg_cost(sku)
@@ -524,7 +500,7 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
         normalized.sort(key=lambda x: (x.get("name") or x.get("Name") or x.get("model") or x.get("title") or '').lower())
         return JSONResponse({"count": len(normalized), "items": normalized})
 
-    # ---- DB: список товаров ----
+    # ---- DB: список товаров с усреднённой закупочной ----
     @router.get("/db/list")
     async def db_list(active_only: int = 1, search: str = ""):
         _ensure_schema()
@@ -564,26 +540,36 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
             items.append(item)
         return {"count": len(items), "items": items}
 
+    # ---- Партии закупок ----
     @router.get("/db/price-batches/{sku}")
     async def get_batches(sku: str):
         _ensure_schema()
         with _db() as c:
             rows = [dict(r) for r in c.execute(
-                "SELECT id, date, qty, unit_cost, note FROM batches WHERE sku=? ORDER BY date",
+                "SELECT id, date, qty, unit_cost, note, batch_no FROM batches WHERE sku=? ORDER BY date, id",
                 (sku,)
             )]
         avgc = _avg_cost(sku)
         return {"batches": rows, "avg_cost": round(avgc, 2) if avgc is not None else None}
 
-    @router.post("/db/price-batches/{sku}")
-    async def add_batches(sku: str, payload: BatchListIn = Body(...)):
+    @router.put("/db/price-batches/{sku}")
+    async def replace_batches(sku: str, payload: BatchListIn = Body(...)):
+        """
+        Сохраняем СНИМОК партий: сначала удаляем все существующие для sku,
+        затем вставляем присланные. Это устраняет дубли при повторных сохранениях.
+        Номер партии (batch_no) генерируется автоматически по возрастанию.
+        """
         _ensure_schema()
         with _db() as c:
+            c.execute("DELETE FROM batches WHERE sku=?", (sku,))
+            next_no = _next_batch_no(c, sku)
             for e in payload.entries:
+                bn = e.batch_no if e.batch_no and e.batch_no > 0 else next_no
                 c.execute(
-                    "INSERT INTO batches(sku,date,qty,unit_cost,note) VALUES(?,?,?,?,?)",
-                    (sku, e.date, int(e.qty), float(e.unit_cost), e.note)
+                    "INSERT INTO batches(sku,date,qty,unit_cost,note,batch_no) VALUES(?,?,?,?,?,?)",
+                    (sku, e.date, int(e.qty), float(e.unit_cost), e.note, int(bn))
                 )
+                next_no = bn + 1
         avgc = _avg_cost(sku)
         return {"status": "ok", "avg_cost": round(avgc, 2) if avgc is not None else None}
 
@@ -595,7 +581,7 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
         avgc = _avg_cost(sku)
         return {"status": "ok", "avg_cost": round(avgc, 2) if avgc is not None else None}
 
-    # ---- Бэкап / восстановление БД (без диска) ----
+    # ---- Бэкап / восстановление БД ----
     @router.get("/db/backup.sqlite3")
     async def backup_db():
         _ensure_schema()
@@ -605,7 +591,6 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
     @router.post("/db/restore")
     async def restore_db(file: UploadFile = File(...)):
         content = await file.read()
-        # На всякий случай — сброс WAL, если включён
         try:
             with _db() as c:
                 c.execute("PRAGMA wal_checkpoint(TRUNCATE);")
