@@ -1,11 +1,36 @@
 from __future__ import annotations
 from typing import Callable, Optional, List, Dict, Any, Tuple
 from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Body
-from fastapi.responses import Response, JSONResponse
+from fastapi.responses import Response, JSONResponse, FileResponse
 from pydantic import BaseModel
 
 import io
-import sqlite3, os
+import sqlite3, os, shutil
+
+# === DB path (persistent disk first) ===
+def _resolve_db_path() -> str:
+    # 1) Explicit env var
+    target = os.getenv("DB_PATH", "/data/kaspi-orders.sqlite3")
+    target_dir = os.path.dirname(target)
+    try:
+        os.makedirs(target_dir, exist_ok=True)
+        if os.access(target_dir, os.W_OK):
+            return target
+    except Exception:
+        pass
+    # 2) Fallback near app
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data.sqlite3"))
+
+DB_PATH = _resolve_db_path()
+
+# Auto-migrate old local DB to /data on first run
+_OLD_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data.sqlite3"))
+if DB_PATH != _OLD_PATH and os.path.exists(_OLD_PATH) and not os.path.exists(DB_PATH):
+    try:
+        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+        shutil.copy2(_OLD_PATH, DB_PATH)
+    except Exception:
+        pass
 from xml.etree import ElementTree as ET
 try:
     import openpyxl  # optional for .xlsx/.xls
@@ -441,5 +466,28 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
             c.execute("DELETE FROM batches WHERE id=? AND sku=?", (bid, sku))
         avgc = _avg_cost(sku)
         return {"status": "ok", "avg_cost": round(avgc, 2) if avgc is not None else None}
+# ---- DB: backup/restore (для ручной персистентности без диска) ----
+@router.get("/db/backup.sqlite3")
+async def backup_db():
+    _ensure_schema()
+    fname = os.path.basename(DB_PATH) or "data.sqlite3"
+    return FileResponse(DB_PATH, media_type="application/octet-stream", filename=fname)
+
+@router.post("/db/restore")
+async def restore_db(file: UploadFile = File(...)):
+    content = await file.read()
+    # Закроем все соединения (мы используем короткоживущие, но на всякий)
+    try:
+        with _db() as c:
+            c.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+    except Exception:
+        pass
+    # Запишем файл
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    with open(DB_PATH, "wb") as f:
+        f.write(content)
+    # Проверим/создадим схему (если пустой)
+    _ensure_schema()
+    return {"status": "ok"}
 
     return router
