@@ -9,7 +9,7 @@
     .details-row td{background:var(--surface-2,#fafafa);padding:12px 16px}
     .mini-table{width:100%;border-collapse:collapse}
     .mini-table th,.mini-table td{border-bottom:1px solid rgba(0,0,0,.06);padding:6px 8px}
-    .chip{display:inline-block;padding:2px 8px;border-radius:999px;background:#eef;font-size:12px}
+    .chip{display:inline-block;padding:4px 10px;border-radius:999px;background:#eef;font-size:12px;cursor:pointer}
     .clickable{cursor:pointer}
     .btn.small{padding:4px 8px;font-size:12px}
   </style>
@@ -48,7 +48,6 @@
             <input type="file" id="fileInput" accept=".xml,.xlsx,.xls" style="display:none">
             <button class="btn" id="btnExport">Экспорт CSV (из таблицы)</button>
 
-            <!-- работа с локальной БД -->
             <button class="btn" id="btnLoadDB">Загрузить из БД</button>
             <a class="btn" id="btnBackup" href="/products/db/backup.sqlite3">Бэкап БД</a>
             <label class="btn" for="restoreInput">Восстановить БД</label>
@@ -57,10 +56,6 @@
         </div>
 
         <div id="note" class="muted" style="margin:6px 0 10px"></div>
-
-        <div class="muted" style="margin:6px 0 10px">
-          Для расчёта прибыли укажи партии закупок (под строкой товара). Средняя закупочная берётся из БД.
-        </div>
 
         <div class="shell" style="padding:0">
           <div style="overflow:auto; max-height:70vh">
@@ -75,18 +70,10 @@
                   <th>Цена, KZT</th>
                   <th>Активен</th>
                   <th>ШК</th>
-                  <th>Закупочная, KZT</th>
-                  <th>Маржа, %</th>
-                  <th>Прибыль, KZT</th>
+                  <th style="min-width:110px">Партии</th>
                 </tr>
               </thead>
               <tbody></tbody>
-              <tfoot>
-                <tr>
-                  <td colspan="10" style="text-align:right;font-weight:700">Итого прибыль:</td>
-                  <td id="sumProfit" style="font-weight:800">0</td>
-                </tr>
-              </tfoot>
             </table>
           </div>
         </div>
@@ -97,10 +84,6 @@
 <script>
 const nf = new Intl.NumberFormat('ru-RU');
 const fmt = n => nf.format(Math.round((Number(n)||0)*100)/100);
-const marginPercent = (price, cost) => {
-  price = Number(price)||0; cost = Number(cost)||0;
-  return price ? ((price - cost)/price*100) : 0;
-};
 
 async function loadProducts(){
   const onlyActive = document.getElementById('onlyActive').checked;
@@ -108,55 +91,30 @@ async function loadProducts(){
   const qs = new URLSearchParams({active: (onlyActive?1:0), page: 1, page_size: 2000});
   if(q) qs.set('q', q);
 
-  const [catalogRes, dbRes] = await Promise.all([
-    fetch(`/products/list?${qs.toString()}`),
-    fetch(`/products/db/list?active_only=${onlyActive?1:0}&search=${encodeURIComponent(q)}`)
-  ]);
-  const catalog = await catalogRes.json();
-  const db = await dbRes.json();
-
-  const avgMap = {};
-  (db.items || []).forEach(it => { if (it.avg_cost != null) avgMap[it.code] = it.avg_cost; });
-
-  if(catalog.note){ document.getElementById('note').textContent = catalog.note; }
-  renderTable(catalog.items || [], avgMap);
+  const res = await fetch(`/products/list?${qs.toString()}`);
+  const data = await res.json();
+  if(data.note){ document.getElementById('note').textContent = data.note; }
+  renderTable(data.items || []);
 }
 
 async function loadFromDB(){
   const onlyActive = document.getElementById('onlyActive').checked;
   const q = document.getElementById('search').value.trim();
   const data = await fetch(`/products/db/list?active_only=${onlyActive?1:0}&search=${encodeURIComponent(q)}`).then(r=>r.json());
-  const avgMap = {};
-  (data.items || []).forEach(it => { if (it.avg_cost != null) avgMap[it.code] = it.avg_cost; });
-  // преобразуем к единому формату
   const items = (data.items||[]).map(it => ({
-    id: it.code,
-    code: it.code,
-    name: it.name,
-    brand: it.brand,
-    category: it.category,
-    qty: it.qty,
-    price: it.price,
-    active: it.active,
-    barcode: it.barcode
+    id: it.code, code: it.code, name: it.name, brand: it.brand, category: it.category,
+    qty: it.qty, price: it.price, active: it.active, barcode: it.barcode
   }));
-  renderTable(items, avgMap);
+  renderTable(items);
 }
 
-function renderTable(items, avgMap){
+function renderTable(items){
   const tb = document.querySelector('#tbl tbody');
   tb.innerHTML = '';
-  let sumProfit = 0;
 
   for(const it of items){
-    // ключ: code -> id -> barcode (чтобы не было пустых SKU)
-    const key = it.code || it.id || it.barcode || '';
-    const shownCode = it.code || it.id || '';
-
-    const avg = avgMap[key] ?? 0;
-    const profit = (Number(it.price)||0) - avg;
-    const totalProfit = (Number(it.qty)||0) * profit;
-    sumProfit += totalProfit;
+    const key = (it.code ?? it.id ?? it.barcode ?? '').toString().trim();
+    const shownCode = (it.code ?? it.id ?? it.barcode ?? '').toString();
 
     const tr = document.createElement('tr');
     tr.setAttribute('data-sku', key);
@@ -171,21 +129,16 @@ function renderTable(items, avgMap){
       <td>${fmt(it.price||0)}</td>
       <td>${it.active===true ? 'Да' : it.active===false ? 'Нет' : ''}</td>
       <td>${it.barcode||''}</td>
-      <td><input data-role="avg" type="number" value="${avg}" step="0.01" readonly style="width:120px"><span class="chip" style="margin-left:6px">цены</span></td>
-      <td data-role="margin">${fmt(marginPercent(it.price, avg))}</td>
-      <td data-role="profit">${fmt(totalProfit)}</td>
+      <td><span class="chip">Партии</span></td>
     `;
     tb.appendChild(tr);
   }
-
-  document.getElementById('sumProfit').textContent = fmt(sumProfit);
 }
 
-// постоянный делегированный обработчик
+// делегированный обработчик: клик по строке или по чипу «Партии»
 document.querySelector('#tbl tbody').addEventListener('click', async (e)=>{
   const tr = e.target.closest('tr[data-sku]');
   if(!tr) return;
-  if(e.target.closest('input')) return;
   await toggleDetails(tr);
 });
 
@@ -195,9 +148,13 @@ function closeDetails(tr){
 }
 
 async function toggleDetails(tr){
-  const sku = (tr.getAttribute('data-sku')||'').trim();
+  let sku = (tr.getAttribute('data-sku')||'').trim();
   const name = tr.getAttribute('data-name') || sku;
-  if(!sku){ alert('У товара нет кода/sku — некуда сохранять партии.'); return; }
+  if(!sku){
+    // последний форс-фолбэк: берем текст первой ячейки
+    sku = tr.cells?.[0]?.textContent?.trim() || '';
+  }
+  if(!sku){ alert('У товара нет кода/sku — некуда сохранить партии.'); return; }
 
   const already = tr.nextElementSibling;
   if(already && already.classList.contains('details-row')){ already.remove(); return; }
@@ -205,18 +162,17 @@ async function toggleDetails(tr){
 
   const det = document.createElement('tr');
   det.className = 'details-row';
-  det.innerHTML = `<td colspan="11"><div id="d-body">Загрузка партий...</div></td>`;
+  det.innerHTML = `<td colspan="9"><div id="d-body">Загрузка партий...</div></td>`;
   tr.after(det);
 
   const data = await fetch(`/products/db/price-batches/${encodeURIComponent(sku)}`).then(r=>r.json());
-  renderDetails(det.querySelector('#d-body'), sku, name, data, tr);
+  renderDetails(det.querySelector('#d-body'), sku, name, data);
 }
 
-function renderDetails(container, sku, name, data, hostRow){
+function renderDetails(container, sku, name, data){
   container.innerHTML = `
     <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
       <div style="font-weight:700;">Партии закупок — ${name}</div>
-      <div style="font-size:12px; color:#666;">Средняя закупочная: <b id="avgVal">${data.avg_cost ?? '—'}</b></div>
     </div>
     <table class="mini-table">
       <thead><tr><th>№ партии</th><th>Дата</th><th>Кол-во</th><th>Закуп., KZT</th><th>Прим.</th><th style="width:80px"></th></tr></thead>
@@ -230,7 +186,7 @@ function renderDetails(container, sku, name, data, hostRow){
 
   const tbody = container.querySelector('tbody');
   for(const r of (data.batches||[])){
-    tbody.appendChild(makeMiniRow(r.batch_no || '', r.date, r.qty, r.unit_cost, r.note));
+    tbody.appendChild(makeMiniRow(r.batch_no ?? '', r.date, r.qty, r.unit_cost, r.note));
   }
 
   container.addEventListener('click', async (e)=>{
@@ -248,19 +204,12 @@ function renderDetails(container, sku, name, data, hostRow){
     if(action === 'save'){
       const payload = gatherMini(tbody);
       if(!payload.entries.length){ alert('Заполните хотя бы одну партию'); return; }
-      const res = await fetch(`/products/db/price-batches/${encodeURIComponent(sku)}`, {
+      await fetch(`/products/db/price-batches/${encodeURIComponent(sku)}`, {
         method: 'PUT',
         headers: {'Content-Type':'application/json'},
         body: JSON.stringify(payload)
       }).then(r=>r.json());
-      container.querySelector('#avgVal').textContent = res.avg_cost ?? '—';
-      // обновим строку таблицы
-      const avgInput = hostRow.querySelector('input[data-role="avg"]');
-      avgInput.value = res.avg_cost ?? 0;
-      const price = Number(hostRow.children[5].textContent.replace(/\s/g,'') || 0);
-      const qty   = Number(hostRow.children[4].textContent.replace(/\s/g,'') || 0);
-      hostRow.querySelector('[data-role="margin"]').textContent = fmt(marginPercent(price, res.avg_cost||0));
-      hostRow.querySelector('[data-role="profit"]').textContent = fmt((price - (res.avg_cost||0)) * qty);
+      closeDetails(container.closest('tr').previousElementSibling); // свернуть после сохранения
     }
   });
 }
@@ -281,8 +230,9 @@ function makeMiniRow(batch_no, date, qty, unit_cost, note){
 function gatherMini(tbody){
   const entries = [...tbody.querySelectorAll('tr')].map(tr=>{
     const g = n => tr.querySelector(`[name="${n}"]`).value;
+    const bn = g('batch_no');
     return {
-      batch_no: Number(g('batch_no')||0) || null,
+      batch_no: bn ? Number(bn) : null,
       date: g('date') || new Date().toISOString().slice(0,10),
       qty: Number(g('qty')||0),
       unit_cost: Number(g('unit_cost')||0),
@@ -302,24 +252,19 @@ async function uploadManual(file){
     return;
   }
   const data = await res.json();
-  renderTable(data.items || [], {}); // среднюю можно подмешать после кнопки "Загрузить из БД"
+  renderTable(data.items || []);
   const note = document.getElementById('note');
   if(note){ note.textContent = `Файл загружен: ${file.name}. Позиций: ${data.count||0}`; }
 }
 
 function exportCsvFromTable(){
   const rows = [];
-  const header = ["code","name","brand","category","qty","price","active","barcode","avg_cost","margin_percent","profit_total"];
+  const header = ["code","name","brand","category","qty","price","active","barcode"];
   rows.push(header);
   const tb = document.querySelector('#tbl tbody');
   tb.querySelectorAll('tr[data-sku]').forEach(tr => {
     const td = Array.from(tr.children).map(x => x.textContent);
-    const avg = Number(tr.querySelector('input[data-role="avg"]').value||0);
-    const price = Number((td[5]||'0').replace(/\s/g,''));
-    const qty   = Number((td[4]||'0').replace(/\s/g,''));
-    const margin = marginPercent(price, avg);
-    const profit = (price - avg) * qty;
-    rows.push([td[0],td[1],td[2],td[3],qty,price,td[6],td[7],avg,margin,profit]);
+    rows.push([td[0],td[1],td[2],td[3],Number((td[4]||'0').replace(/\s/g,'')),Number((td[5]||'0').replace(/\s/g,'')),td[6],td[7]]);
   });
   const esc = s => { s=(s??'').toString(); return /[",\n,]/.test(s) ? '"' + s.replace(/"/g,'""') + '"' : s; };
   const csv = rows.map(r => r.map(esc).join(',')).join('\n');
