@@ -1,5 +1,3 @@
-# app/api/products.py  (или products.py если у тебя другая структура)
-
 from __future__ import annotations
 from typing import Callable, Optional, List, Dict, Any, Tuple
 from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Body
@@ -14,22 +12,27 @@ from xml.etree import ElementTree as ET
 try:
     import openpyxl  # for .xlsx
     _OPENPYXL_AVAILABLE = True
-except Exception:
+except Exception:  # pragma: no cover
     _OPENPYXL_AVAILABLE = False
 
 # ===== optional imports from kaspi_client =====
 try:
-    from app.kaspi_client import normalize_row  # type: ignore
+    from app.kaspi_client import ProductStock, normalize_row  # type: ignore
 except Exception:
     try:
-        from ..kaspi_client import normalize_row  # type: ignore
+        from ..kaspi_client import ProductStock, normalize_row  # type: ignore
     except Exception:
-        normalize_row = None
+        try:
+            from kaspi_client import ProductStock, normalize_row  # type: ignore
+        except Exception:
+            ProductStock = None
+            normalize_row = None  # fallback ниже обрабатывается
 
 # =============================================================================
-# DB path
+# DB path (persistent disk first, fallback to local) + auto-migration
 # =============================================================================
 def _resolve_db_path() -> str:
+    # Render persistent disk is mounted at /data
     target = os.getenv("DB_PATH", "/data/kaspi-orders.sqlite3")
     target_dir = os.path.dirname(target)
     try:
@@ -38,11 +41,12 @@ def _resolve_db_path() -> str:
             return target
     except Exception:
         pass
+    # fallback to repo-local
     return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data.sqlite3"))
 
 DB_PATH = _resolve_db_path()
 
-# migrate old file into /data once
+# migrate old local DB into /data once
 _OLD_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data.sqlite3"))
 if DB_PATH != _OLD_PATH and os.path.exists(_OLD_PATH) and not os.path.exists(DB_PATH):
     try:
@@ -60,6 +64,7 @@ def _db():
     return conn
 
 def _gen_batch_code(conn: sqlite3.Connection) -> str:
+    """Генератор уникального 6-символьного кода партии."""
     alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
     while True:
         code = "".join(secrets.choice(alphabet) for _ in range(6))
@@ -102,6 +107,7 @@ def _ensure_schema():
             tax_percent REAL DEFAULT 0.0
         );
         """)
+        # migrations for batches optional fields
         cols = {r["name"] for r in c.execute("PRAGMA table_info(batches)")}
         if "commission_pct" not in cols:
             c.execute("ALTER TABLE batches ADD COLUMN commission_pct REAL")
@@ -190,8 +196,34 @@ def _avg_cost(sku: str) -> float | None:
             return None
         return float(r["tc"]) / float(r["tq"])
 
+def _commission_total_for_category(cat: str | None) -> float | None:
+    if not cat:
+        return None
+    with _db() as c:
+        r = c.execute("SELECT base_percent,extra_percent,tax_percent FROM categories WHERE name=?", (cat,)).fetchone()
+    if not r:
+        return None
+    return float(r["base_percent"]) + float(r["extra_percent"]) + float(r["tax_percent"])
+
+def _compute_last_margin(sku: str, price: float, category: str | None) -> float | None:
+    with _db() as c:
+        r = c.execute(
+            "SELECT unit_cost, commission_pct FROM batches WHERE sku=? ORDER BY date DESC, id DESC LIMIT 1",
+            (sku,)
+        ).fetchone()
+    if not r:
+        return None
+    unit_cost = float(r["unit_cost"])
+    commission = r["commission_pct"]
+    if commission is None:
+        commission = _commission_total_for_category(category) or 0.0
+    try:
+        return round(price - (price * float(commission)/100.0) - unit_cost, 2)
+    except Exception:
+        return None
+
 # =============================================================================
-# Parsers
+# Parsers (XML/Excel)
 # =============================================================================
 def _parse_xml(content: bytes) -> List[Dict[str, Any]]:
     try:
@@ -213,7 +245,14 @@ def _parse_xml(content: bytes) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     offers = [el for el in root.iter() if strip(el.tag) == "offer"]
     for off in offers:
-        code = (off.get("sku") or off.get("shop-sku") or off.get("code") or off.get("id") or "").strip()
+        code = (
+            off.get("sku")
+            or off.get("shop-sku")
+            or off.get("code")
+            or off.get("id")
+            or ""
+        ).strip()
+
         name = child_text(off, "model", "name", "title")
         brand = child_text(off, "brand")
 
@@ -223,11 +262,15 @@ def _parse_xml(content: bytes) -> List[Dict[str, Any]]:
             if strip(el.tag) == "availability":
                 sc = el.get("stockCount")
                 if sc:
-                    try: qty = int(float(sc))
-                    except Exception: qty = 0
+                    try:
+                        qty = int(float(sc))
+                    except Exception:
+                        qty = 0
                 av = (el.get("available") or "").strip().lower()
-                if av in ("yes","true","1"): active = True
-                elif av in ("no","false","0"): active = False
+                if av in ("yes", "true", "1"):
+                    active = True
+                elif av in ("no", "false", "0"):
+                    active = False
                 break
 
         price = 0.0
@@ -235,8 +278,10 @@ def _parse_xml(content: bytes) -> List[Dict[str, Any]]:
             if strip(el.tag) == "cityprice":
                 txt = (el.text or "").strip()
                 if txt:
-                    try: price = float(txt.replace(" ", "").replace(",", "."))
-                    except Exception: price = 0.0
+                    try:
+                        price = float(txt.replace(" ", "").replace(",", "."))
+                    except Exception:
+                        price = 0.0
                 break
 
         rows.append({
@@ -268,7 +313,126 @@ def _parse_excel(file: UploadFile) -> List[Dict[str, Any]]:
     return rows
 
 # =============================================================================
-# Pydantic
+# Kaspi client
+# =============================================================================
+try:
+    from app.kaspi_client import KaspiClient  # type: ignore
+except Exception:  # pragma: no cover
+    try:
+        from ..kaspi_client import KaspiClient  # type: ignore
+    except Exception:
+        from kaspi_client import KaspiClient  # type: ignore
+
+# =============================================================================
+# Utils to normalize products coming from API
+# =============================================================================
+def _pick(attrs: Dict[str, Any], *keys: str) -> str:
+    for k in keys:
+        v = attrs.get(k)
+        if v not in (None, ""):
+            return str(v)
+    return ""
+
+def _normalize_active(val: Any) -> Optional[bool]:
+    if val is None or val == "":
+        return None
+    if isinstance(val, bool):
+        return val
+    s = str(val).strip().lower()
+    if s in ("1", "true", "yes", "on", "published", "active"):
+        return True
+    if s in ("0", "false", "no", "off", "unpublished", "inactive"):
+        return False
+    return None
+
+def _num(x: Any) -> float:
+    try:
+        return float(x)
+    except Exception:
+        try:
+            return float(str(x).replace(" ", "").replace(",", "."))
+        except Exception:
+            return 0.0
+
+def _find_iter_fn(client: Any) -> Optional[Callable]:
+    for name in ("iter_products", "iter_offers", "iter_catalog"):
+        if hasattr(client, name):
+            return getattr(client, name)
+    return None
+
+def _collect_products(client: KaspiClient, active_only: Optional[bool]) -> Tuple[List[Dict[str, Any]], int, Optional[str]]:
+    iter_fn = _find_iter_fn(client)
+    if iter_fn is None:
+        raise HTTPException(
+            status_code=501,
+            detail="В kaspi_client нет метода каталога. Ожидается iter_products/iter_offers/iter_catalog."
+        )
+
+    items: List[Dict[str, Any]] = []
+    seen = set()
+    total = 0
+    note: Optional[str] = None
+
+    def add_row(item: Dict[str, Any]):
+        nonlocal total
+        attrs = item.get("attributes", {}) or {}
+        pid = item.get("id") or _pick(attrs, "id", "sku", "code", "offerId") or _pick(attrs, "name")
+        if not pid or pid in seen:
+            return
+        seen.add(pid)
+        total += 1
+
+        code = _pick(attrs, "code", "sku", "offerId", "article", "barcode")
+        name = _pick(attrs, "name", "title", "productName", "offerName")
+        price = _num(_pick(attrs, "price", "basePrice", "salePrice", "currentPrice", "totalPrice"))
+        qty = int(_num(_pick(attrs, "quantity", "availableAmount", "stockQuantity", "qty")))
+        brand = _pick(attrs, "brand", "producer", "manufacturer")
+        category = _pick(attrs, "category", "categoryName", "group")
+        barcode = _pick(attrs, "barcode", "ean")
+        active_val = _normalize_active(_pick(attrs, "active", "isActive", "isPublished", "visible", "isVisible", "status"))
+
+        if active_only is not None and active_val is not None and active_only and active_val is False:
+            return
+
+        iid = code or pid
+        items.append({
+            "id": iid,
+            "code": iid,
+            "name": name,
+            "price": price,
+            "qty": qty,
+            "active": True if qty > 0 else False if active_val is False else None,
+            "brand": brand,
+            "category": category,
+            "barcode": barcode,
+        })
+
+    # 1) основной каталог
+    try:
+        try:
+            for it in iter_fn(active_only=bool(active_only) if active_only is not None else True):
+                add_row(it)
+        except TypeError:
+            for it in iter_fn():
+                add_row(it)
+    except Exception:
+        items = []
+        total = 0
+
+    # 2) резерв: из заказов
+    if not items:
+        try:
+            for it in client.iter_products_from_orders(days=60):
+                add_row(it)
+            note = "Каталог по API недоступен, показаны товары, собранные из последних заказов (60 дней)."
+        except Exception:
+            note = "Каталог по API недоступен."
+            items, total = [], 0
+
+    return items, total, note
+
+# =============================================================================
+# Pydantic models
 # =============================================================================
 class BatchIn(BaseModel):
     date: str
@@ -288,12 +452,12 @@ class CategoryIn(BaseModel):
     tax_percent: float = 0.0
 
 # =============================================================================
-# Router
+# Router factory
 # =============================================================================
-def get_products_router(client=None) -> APIRouter:
+def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
     router = APIRouter(tags=["products"])
 
-    # ---------- Каталог (через API — опционально) ----------
+    # ---------- Каталог с Kaspi API ----------
     @router.get("/list")
     async def list_products(
         active: int = Query(1, description="1 — только активные, 0 — все"),
@@ -304,15 +468,68 @@ def get_products_router(client=None) -> APIRouter:
         if client is None:
             raise HTTPException(status_code=500, detail="KASPI_TOKEN is not set")
 
-        # если используешь клиент — здесь его обход; пропущу ради краткости
-        return JSONResponse({"items": [], "total": 0, "note": "API client не сконфигурирован."})
+        items, total, note = _collect_products(client, active_only=bool(active))
 
-    # ---------- Экспорт CSV из API (необязательно) ----------
+        if q:
+            ql = q.strip().lower()
+            items = [r for r in items if ql in (r["name"] or "").lower() or ql in (r["code"] or "").lower()]
+
+        start = (page - 1) * page_size
+        end = start + page_size
+        page_items = items[start:end]
+
+        return JSONResponse({"items": page_items, "total": len(items), "note": note})
+
     @router.get("/export.csv")
     async def export_products_csv(active: int = Query(1)):
-        return Response(content="id,code,name,price,qty,active,brand,category,barcode\n",
-                        media_type="text/csv; charset=utf-8",
-                        headers={"Content-Disposition": 'attachment; filename="products.csv"'})
+        if client is None:
+            raise HTTPException(status_code=500, detail="KASPI_TOKEN is not set")
+
+        items, _, _ = _collect_products(client, active_only=bool(active))
+
+        def esc(s: str) -> str:
+            s = "" if s is None else str(s)
+            if any(c in s for c in [",", '"', "\n"]):
+                s = '"' + s.replace('"', '""') + '"'
+            return s
+
+        header = "id,code,name,price,qty,active,brand,category,barcode\n"
+        body = "".join(
+            [
+                ",".join(
+                    esc(x)
+                    for x in [
+                        r["id"],
+                        r["code"],
+                        r["name"],
+                        r["price"],
+                        r["qty"],
+                        1 if r["active"] else 0 if r["active"] is False else "",
+                        r["brand"],
+                        r["category"],
+                        r["barcode"],
+                    ]
+                )
+                + "\n"
+                for r in items
+            ]
+        )
+        csv = header + body
+        return Response(
+            content=csv,
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": 'attachment; filename="products.csv"'},
+        )
+
+    @router.get("/probe")
+    async def probe_products(active: int = Query(1)):
+        if client is None:
+            raise HTTPException(status_code=500, detail="KASPI_TOKEN is not set")
+        try:
+            res = client.probe_catalog(sample_size=2, active_only=bool(active))
+            return JSONResponse({"attempts": res})
+        except Exception as e:
+            return JSONResponse({"attempts": [], "error": str(e)})
 
     # ---------- Ручная загрузка (XML/Excel) с записью в БД ----------
     @router.post("/manual-upload")
@@ -330,7 +547,15 @@ def get_products_router(client=None) -> APIRouter:
 
         normalized: List[Dict[str, Any]] = []
         for r in raw_rows:
-            d = dict(r)
+            if normalize_row:
+                try:
+                    ps = normalize_row(r)
+                    d = ps.to_dict()
+                except Exception:
+                    d = dict(r)
+            else:
+                d = dict(r)
+
             d.setdefault("code", (d.get("sku") or d.get("vendorCode") or d.get("barcode") or d.get("id") or ""))
             d["code"] = str(d["code"]).strip()
             d.setdefault("id", d["code"])
@@ -343,41 +568,21 @@ def get_products_router(client=None) -> APIRouter:
             normalized.append(d)
 
         _upsert_products(normalized)
-        normalized.sort(key=lambda x: (x.get("name") or '').lower())
+
+        normalized.sort(key=lambda x: (x.get("name") or x.get("Name") or x.get("model") or x.get("title") or '').lower())
         return JSONResponse({"count": len(normalized), "items": normalized})
 
-    # ---------- BULK UPSERT из таблицы (сохранить в БД) ----------
-    @router.post("/db/bulk-upsert")
-    async def bulk_upsert(rows: List[Dict[str, Any]] = Body(...)):
-        if not isinstance(rows, list):
-            raise HTTPException(status_code=400, detail="Ожидается список объектов.")
-
-        # нормализуем и сохраняем
-        items: List[Dict[str, Any]] = []
-        for r in rows:
-            items.append({
-                "code": r.get("code"),
-                "name": r.get("name"),
-                "brand": r.get("brand"),
-                "category": r.get("category"),
-                "price": r.get("price"),
-                "quantity": r.get("qty") if r.get("qty") is not None else r.get("quantity"),
-                "qty": r.get("qty"),
-                "active": r.get("active"),
-                "barcode": r.get("barcode"),
-            })
-        _upsert_products(items)
-        return {"status": "ok", "saved": len(items)}
-
-    # ---------- Экспорт CSV из БД ----------
-    @router.get("/db/export.csv")
-    async def export_db(active_only: int = 1, search: str = ""):
+    # ---------- DB: список товаров ----------
+    @router.get("/db/list")
+    async def db_list(active_only: int = 1, search: str = ""):
         _ensure_schema()
+        _seed_categories_if_empty()
         with _db() as c:
+            cats = {r["name"]: dict(r) for r in c.execute("SELECT * FROM categories")}
             sql = "SELECT * FROM products"
             conds, params = [], []
             if active_only:
-                conds.append("(active=1 OR quantity>0)")
+                conds.append("active=1")
             if search:
                 conds.append("(sku LIKE ? OR name LIKE ?)")
                 params += [f"%{search}%", f"%{search}%"]
@@ -386,69 +591,15 @@ def get_products_router(client=None) -> APIRouter:
             sql += " ORDER BY name COLLATE NOCASE"
             rows = [dict(r) for r in c.execute(sql, params)]
 
-        def esc(s: Any) -> str:
-            s = "" if s is None else str(s)
-            if any(ch in s for ch in [",", '"', "\n"]):
-                s = '"' + s.replace('"', '""') + '"'
-            return s
-
-        header = "code,name,brand,category,qty,price,active,barcode\n"
-        body = "".join(",".join(esc(x) for x in [
-            r["sku"], r["name"], r["brand"], r["category"], r["quantity"], r["price"], r["active"], r["barcode"]
-        ]) + "\n" for r in rows)
-        return Response(content=header + body,
-                        media_type="text/csv; charset=utf-8",
-                        headers={"Content-Disposition": 'attachment; filename="products_db.csv"'})
-
-    # ---------- Список из БД (с агрегацией по партиям) ----------
-    @router.get("/db/list")
-    async def db_list(active_only: int = 1, search: str = ""):
-        _ensure_schema()
-        _seed_categories_if_empty()
-        with _db() as c:
-            # категории в память
-            cats = {r["name"]: dict(r) for r in c.execute("SELECT * FROM categories")}
-            # продукты
-            sql = "SELECT * FROM products"
-            conds, params = [], []
-            if active_only:
-                conds.append("(active=1 OR quantity>0)")
-            if search:
-                conds.append("(sku LIKE ? OR name LIKE ?)")
-                params += [f"%{search}%", f"%{search}%"]
-            if conds:
-                sql += " WHERE " + " AND ".join(conds)
-            sql += " ORDER BY name COLLATE NOCASE"
-            prows = [dict(r) for r in c.execute(sql, params)]
-
-            # кол-во партий
-            counts = {r["sku"]: r["cnt"] for r in c.execute(
-                "SELECT sku, COUNT(*) AS cnt FROM batches GROUP BY sku"
-            )}
-
-            # последняя партия по id
-            last = {r["sku"]: dict(r) for r in c.execute(
-                "SELECT b.sku, b.unit_cost, b.commission_pct FROM batches b "
-                "JOIN (SELECT sku, MAX(id) AS mid FROM batches GROUP BY sku) m ON m.mid=b.id"
-            )}
-
         items: List[Dict[str, Any]] = []
-        for r in prows:
+        for r in rows:
             sku = r["sku"]
-            price = float(r.get("price") or 0.0)
+            price = float(r.get("price") or 0)
             qty = int(r.get("quantity") or 0)
             cat = r.get("category") or ""
-            # комиссия из категории
-            base_comm = None
-            if cat in cats:
-                base_comm = float(cats[cat]["base_percent"]) + float(cats[cat]["extra_percent"]) + float(cats[cat]["tax_percent"])
-            # маржа по последней партии
-            lm = last.get(sku)
-            last_margin = None
-            if lm is not None and price:
-                eff_comm = float(lm["commission_pct"]) if lm["commission_pct"] is not None else (base_comm or 0.0)
-                last_margin = round(price - (price * eff_comm / 100.0) - float(lm["unit_cost"]), 2)
-
+            with _db() as c:
+                bc = c.execute("SELECT COUNT(*) AS c FROM batches WHERE sku=?", (sku,)).fetchone()["c"]
+            last_margin = _compute_last_margin(sku, price, cat)
             items.append({
                 "code": sku,
                 "id": sku,
@@ -458,34 +609,50 @@ def get_products_router(client=None) -> APIRouter:
                 "qty": qty,
                 "price": price,
                 "active": bool(r.get("active")),
-                "batch_count": int(counts.get(sku, 0)),
-                "last_margin": last_margin
+                "batch_count": bc,
+                "last_margin": last_margin,
             })
         return {"count": len(items), "items": items}
 
-    # ---------- Партии ----------
+    # ---------- DB: bulk upsert from UI ----------
+    @router.post("/db/bulk-upsert")
+    async def bulk_upsert(payload: List[Dict[str, Any]] = Body(...)):
+        if not isinstance(payload, list):
+            raise HTTPException(status_code=400, detail="Ожидается список объектов.")
+        # normalize keys like in manual upload
+        items = []
+        for it in payload:
+            d = dict(it)
+            d["code"] = str(d.get("code") or d.get("id") or "").strip()
+            if not d["code"]:
+                # skip rows without key
+                continue
+            d["name"] = str(d.get("name") or d["code"]).strip()
+            d["brand"] = d.get("brand")
+            d["category"] = d.get("category")
+            d["price"] = _to_float(d.get("price"))
+            d["qty"] = _to_int(d.get("qty") or d.get("quantity"))
+            act = d.get("active")
+            if isinstance(act, bool):
+                d["active"] = 1 if act else 0
+            elif isinstance(act, str):
+                d["active"] = 1 if act.lower() in ("1","true","yes","on") else 0
+            else:
+                d["active"] = 1 if d["qty"]>0 else 0
+            items.append(d)
+        _upsert_products(items)
+        return {"status": "ok", "saved": len(items)}
+
+    # ---------- DB: партии закупок ----------
     @router.get("/db/price-batches/{sku}")
     async def get_batches(sku: str):
         _ensure_schema()
         with _db() as c:
             rows = [dict(r) for r in c.execute(
                 "SELECT id, date, qty, unit_cost, commission_pct, batch_code, note "
-                "FROM batches WHERE sku=? ORDER BY id", (sku,)
+                "FROM batches WHERE sku=? ORDER BY date",
+                (sku,)
             )]
-            # возьмём текущую цену для расчёта на лету
-            pr = c.execute("SELECT price, category FROM products WHERE sku=?", (sku,)).fetchone()
-            price = float(pr["price"] if pr else 0)
-            cat = pr["category"] if pr else None
-            comm_cat = None
-            if cat:
-                cr = c.execute("SELECT base_percent, extra_percent, tax_percent FROM categories WHERE name=?", (cat,)).fetchone()
-                if cr:
-                    comm_cat = float(cr["base_percent"]) + float(cr["extra_percent"]) + float(cr["tax_percent"])
-
-        # добавим расчёт маржи/шт в каждую партию
-        for r in rows:
-            eff_comm = float(r["commission_pct"]) if r["commission_pct"] is not None else (comm_cat or 0.0)
-            r["net_per_unit"] = round(price - (price * eff_comm / 100.0) - float(r["unit_cost"]), 2) if price else None
         avgc = _avg_cost(sku)
         return {"batches": rows, "avg_cost": round(avgc, 2) if avgc is not None else None}
 
@@ -512,11 +679,29 @@ def get_products_router(client=None) -> APIRouter:
             c.execute("DELETE FROM batches WHERE id=? AND sku=?", (bid, sku))
         return {"status": "ok"}
 
-    # ---------- Категории/комиссии ----------
+    # ---------- DB: экспорт из БД ----------
+    @router.get("/db/export.csv")
+    async def export_db(active_only: int = 1, search: str = ""):
+        data = await db_list(active_only, search)  # type: ignore
+        items = data["items"]
+        def esc(s: Any) -> str:
+            s = "" if s is None else str(s)
+            if any(c in s for c in [",", '"', "\n"]):
+                s = '"' + s.replace('"', '""') + '"'
+            return s
+        header = "code,name,brand,category,qty,price,active,batch_count,last_margin\n"
+        body = "".join([",".join(esc(x) for x in [
+            r["code"], r["name"], r["brand"], r["category"], r["qty"], r["price"],
+            1 if r["active"] else 0, r.get("batch_count") or 0, r.get("last_margin") if r.get("last_margin") is not None else ""
+        ]) + "\n" for r in items])
+        csv = header + body
+        return Response(content=csv, media_type="text/csv; charset=utf-8",
+                        headers={"Content-Disposition": 'attachment; filename="products_db.csv"'})
+
+    # ---------- DB: категории/комиссии ----------
     @router.get("/db/categories")
     async def list_categories():
-        _seed_candidates_if_empty = _seed_categories_if_empty  # alias (чтобы не ругался линтер)
-        _seed_candidates_if_empty()
+        _seed_categories_if_empty()
         with _db() as c:
             rows = [dict(r) for r in c.execute("SELECT * FROM categories ORDER BY name")]
         return {"categories": rows}
@@ -544,7 +729,7 @@ def get_products_router(client=None) -> APIRouter:
             c.execute("UPDATE products SET category=?, updated_at=datetime('now') WHERE sku=?", (category, sku))
         return {"status": "ok", "sku": sku, "category": category}
 
-    # ---------- Бэкап / восстановление ----------
+    # ---------- Бэкап / восстановление БД ----------
     @router.get("/db/backup.sqlite3")
     async def backup_db():
         _ensure_schema()
