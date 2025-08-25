@@ -5,56 +5,36 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Мой склад — Kaspi</title>
   <style>
-    :root{
-      --bg:#ffffff; --fg:#0f172a; --muted:#6b7280; --card:#f8fafc;
-      --line:#e5e7eb; --pri:#1f7aee; --pri-weak:#e9eef6; --pill-bg:#eef2ff; --pill-fg:#3730a3;
-      --ok:#10b981; --bad:#ef4444;
-    }
-    body[data-theme="dark"]{
-      --bg:#0b1220; --fg:#e5e7eb; --muted:#94a3b8; --card:#0f1829;
-      --line:#1f2a37; --pri:#3b82f6; --pri-weak:#132036; --pill-bg:#1e293b; --pill-fg:#bfdbfe;
-      --ok:#34d399; --bad:#f87171;
-    }
-    *{box-sizing:border-box}
-    html,body{height:100%}
-    body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Helvetica Neue",Arial;transition:background .2s,color .2s}
-    a{color:inherit;text-decoration:none}
+    :root{ --bg:#ffffff; --fg:#0f172a; --muted:#6b7280; --card:#f8fafc; --line:#e5e7eb; --pri:#1f7aee; --pri-weak:#e9eef6; --pill-bg:#eef2ff; --pill-fg:#3730a3; }
+    body[data-theme="dark"]{ --bg:#0b1220; --fg:#e5e7eb; --muted:#94a3b8; --card:#0f1829; --line:#1f2a37; --pri:#3b82f6; --pri-weak:#132036; --pill-bg:#1e293b; --pill-fg:#bfdbfe; }
+    *{box-sizing:border-box} html,body{height:100%} body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Helvetica Neue",Arial}
     .layout{display:grid;grid-template-columns:220px 1fr;min-height:100vh}
     .sidebar{border-right:1px solid var(--line);padding:16px 12px;position:sticky;top:0;height:100vh}
     .brand{font-weight:800;font-size:18px;margin:4px 0 12px}
     .nav{display:flex;flex-direction:column;gap:6px;margin-bottom:16px}
-    .nav a{padding:8px 10px;border-radius:10px;color:var(--fg);opacity:.9;transition:background .15s,opacity .15s}
+    .nav a{padding:8px 10px;border-radius:10px;color:var(--fg);opacity:.9}
     .nav a:hover{background:var(--card);opacity:1}
     .switch{display:flex;gap:8px;align-items:center;margin-top:auto;padding-top:12px;border-top:1px solid var(--line)}
-    .switch input{width:40px;height:22px;appearance:none;background:var(--line);border-radius:999px;position:relative;cursor:pointer;outline:none;transition:background .2s}
+    .switch input{width:40px;height:22px;appearance:none;background:var(--line);border-radius:999px;position:relative}
     .switch input:checked{background:var(--pri)}
     .switch input::after{content:"";position:absolute;inset:3px auto auto 3px;width:16px;height:16px;background:#fff;border-radius:50%;transition:left .2s}
     .switch input:checked::after{left:21px}
     .content{padding:20px 16px}
-    h1{margin:0 0 12px}
     .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-    .btn{background:var(--pri);color:#fff;border:0;border-radius:10px;padding:8px 12px;cursor:pointer;transition:transform .04s ease, filter .15s}
-    .btn:hover{filter:brightness(1.05)}
-    .btn:active{transform:translateY(1px)}
+    .btn{background:var(--pri);color:#fff;border:0;border-radius:10px;padding:8px 12px;cursor:pointer}
     .btn.secondary{background:var(--pri-weak);color:var(--fg)}
     .btn-link{background:transparent;border:0;color:var(--pri);cursor:pointer;padding:0}
-    input[type="text"],input[type="number"],select{height:34px;padding:6px 8px;border:1px solid var(--line);border-radius:10px;background:transparent;color:var(--fg)}
-    input[type="date"]{height:34px;padding:6px 8px;border:1px solid var(--line);border-radius:10px;background:transparent;color:var(--fg)}
+    input[type="text"],input[type="number"],input[type="date"],select{height:34px;padding:6px 8px;border:1px solid var(--line);border-radius:10px;background:transparent;color:var(--fg)}
     table{border-collapse:collapse;width:100%}
     th,td{border-bottom:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:middle}
     thead th{position:sticky;top:0;background:var(--card);z-index:1}
     .muted{color:var(--muted)}
-    .dot{display:inline-block;width:10px;height:10px;border-radius:50%;background:#9ca3af;position:relative}
+    .dot{display:inline-block;width:10px;height:10px;border-radius:50%;background:#9ca3af}
     .dot.on{background:#10b981}
-    .dot.on::after{content:"";position:absolute;inset:-5px;border-radius:50%;border:2px solid rgba(16,185,129,.4);animation:pulse 1.8s ease-out infinite;}
-    @keyframes pulse{0%{transform:scale(.6);opacity:1}70%{transform:scale(1.4);opacity:0}100%{opacity:0}}
-    .col-right{text-align:right}
-    .detail{background:var(--card)}
-    .block{padding:12px}
-    .shell{border:1px solid var(--line);border-radius:12px;overflow:hidden}
-    .status{margin:8px 0 0;padding:8px 10px;border-radius:10px;background:var(--card);border:1px solid var(--line);font-size:13px}
-    .status.ok{border-color:var(--ok);color:var(--ok)}
-    .status.bad{border-color:var(--bad);color:var(--bad)}
+    .note{margin:8px 0 12px; padding:8px 10px;border-radius:8px;display:none}
+    .note.ok{display:block;background:#ecfdf5;color:#065f46;border:1px solid #a7f3d0}
+    .note.err{display:block;background:#fef2f2;color:#991b1b;border:1px solid #fecaca}
+    .detail{background:var(--card)} .block{padding:12px}
   </style>
 </head>
 <body data-theme="light">
@@ -90,8 +70,7 @@
         <input type="file" id="restoreFile" accept=".sqlite3" style="display:none">
       </div>
 
-      <div id="note" class="muted"></div>
-      <div id="status" class="status" style="display:none"></div>
+      <div id="note" class="note"></div>
 
       <div class="shell">
         <div style="overflow:auto; max-height:70vh">
@@ -123,6 +102,12 @@ const qsa=(s,el=document)=>[...el.querySelectorAll(s)];
 const nf = new Intl.NumberFormat('ru-RU');
 const fmt = n => nf.format(Number(n||0));
 
+function setNote(msg, ok=false){
+  const el = qs('#note');
+  el.textContent = msg;
+  el.className = 'note ' + (ok ? 'ok':'err');
+}
+
 (function initTheme(){
   const saved = localStorage.getItem('theme') || 'light';
   document.body.setAttribute('data-theme', saved);
@@ -134,193 +119,175 @@ const fmt = n => nf.format(Number(n||0));
   });
 })();
 
-function setStatus(text, ok=true){
-  const el = qs('#status');
-  el.textContent = text;
-  el.className = 'status ' + (ok ? 'ok' : 'bad');
-  el.style.display = 'block';
-}
-
 async function fetchJSON(url, opts){
-  try {
-    const r = await fetch(url, opts||{});
-    const text = await r.text();
-    let data = null;
-    try { data = text ? JSON.parse(text) : null; } catch(e) { /* not json */ }
-    if(!r.ok){
-      setStatus('Ошибка ' + r.status + ': ' + (data?.detail || text || r.statusText), false);
-      throw new Error(data?.detail || text || r.statusText);
-    }
-    return data;
-  } catch(err){
-    setStatus('Сеть: ' + (err?.message || err), false);
-    throw err;
+  const r = await fetch(url, opts||{});
+  if(!r.ok){
+    const txt = await r.text();
+    throw new Error(txt || r.statusText || 'HTTP ' + r.status);
   }
+  return r.json();
 }
 
-function parsePriceCell(cell){ return Number((cell?.textContent||'0').toString().replace(/\\s/g,'')); }
+function parsePriceCell(cell){ return Number((cell?.textContent||'0').toString().replace(/\s/g,'')); }
 
 function renderProducts(items){
   const tb = qs('#tbl tbody');
   tb.innerHTML = '';
-  for(const it of (items||[])){
+  items.forEach(it=>{
     const tr = document.createElement('tr');
     const sku = it.code || it.id || '';
     tr.dataset.sku = sku;
-    tr.className = 'data-row';
-    const on = (it.qty||0)>0 || it.active===true;
-    tr.innerHTML =
-      '<td>'+sku+'</td>' +
-      '<td>'+(it.name||'')+'</td>' +
-      '<td>'+(it.brand||'')+'</td>' +
-      '<td>'+(it.category||'')+'</td>' +
-      '<td>'+fmt(it.qty||0)+'</td>' +
-      '<td>'+fmt(it.price||0)+'</td>' +
-      '<td><span class="dot '+(on?'on':'')+'"></span></td>' +
-      '<td>'+fmt(it.batch_count||0)+'</td>' +
-      '<td>'+(it.last_margin!=null ? fmt(it.last_margin) : '—')+'</td>' +
-      '<td class="col-right"><button class="btn-link btn-parties">Партии</button></td>';
+    tr.innerHTML = `
+      <td>${sku}</td>
+      <td>${it.name||''}</td>
+      <td>${it.brand||''}</td>
+      <td>${it.category||''}</td>
+      <td>${fmt(it.qty||0)}</td>
+      <td>${fmt(it.price||0)}</td>
+      <td><span class="dot ${((it.qty||0)>0 || it.active===true) ? 'on':''}"></span></td>
+      <td>${fmt(it.batch_count||0)}</td>
+      <td>${it.last_margin!=null ? fmt(it.last_margin) : '—'}</td>
+      <td class="col-right"><button class="btn-link btn-parties">Партии</button></td>
+    `;
     tb.appendChild(tr);
-  }
+  });
 }
 
 async function loadAPI(){
-  const p = new URLSearchParams();
-  p.set('active', qs('#onlyActive').checked ? '1' : '0');
-  const q = qs('#search').value.trim();
-  if(q) p.set('q', q);
-  p.set('page','1'); p.set('page_size','2000');
-  const data = await fetchJSON('/products/list?'+p.toString());
-  if(data?.note) qs('#note').textContent = data.note;
-  renderProducts(data?.items||[]);
-  setStatus('Загружено из API: ' + (data?.items?.length || 0) + ' поз.', true);
+  try{
+    const p = new URLSearchParams();
+    p.set('active', qs('#onlyActive').checked ? '1' : '0');
+    const q = qs('#search').value.trim(); if(q) p.set('q', q);
+    p.set('page','1'); p.set('page_size','2000');
+    const data = await fetchJSON('/products/list?'+p.toString());
+    setNote('Каталог из API загружен: ' + (data.items?.length||0) + ' поз.', true);
+    renderProducts(data.items||[]);
+  }catch(e){ setNote('Ошибка загрузки из API: ' + e.message); }
 }
 
 async function loadDB(){
-  const p = new URLSearchParams();
-  p.set('active_only', qs('#onlyActive').checked ? '1' : '0');
-  const q = qs('#search').value.trim(); if(q) p.set('search', q);
-  const data = await fetchJSON('/products/db/list?'+p.toString());
-  renderProducts(data?.items||[]);
-  setStatus('Загружено из БД: ' + (data?.items?.length || 0) + ' поз.', true);
+  try{
+    const p = new URLSearchParams();
+    p.set('active_only', qs('#onlyActive').checked ? '1' : '0');
+    const q = qs('#search').value.trim(); if(q) p.set('search', q);
+    const data = await fetchJSON('/products/db/list?'+p.toString());
+    setNote('Загружено строк из БД: ' + (data.items?.length||0), true);
+    renderProducts(data.items||[]);
+  }catch(e){ setNote('Сеть: ' + e.message); }
 }
 
 async function importFile(file){
-  const fd = new FormData();
-  fd.append('file', file);
-  const data = await fetchJSON('/products/manual-upload', {method:'POST', body:fd});
-  qs('#note').textContent = 'Файл загружен: ' + file.name + '. Вставлено: ' + (data?.inserted||0) + ', обновлено: ' + (data?.updated||0);
-  renderProducts(data?.items||[]);
-  setStatus('Импорт завершён: ' + (data?.count||0) + ' поз.', true);
+  const fd = new FormData(); fd.append('file', file);
+  try{
+    const data = await fetchJSON('/products/manual-upload', {method:'POST', body:fd});
+    setNote(`Файл загружен: ${file.name}. Позиции: ${data.count||0}. Вставлено: ${data.inserted||0}, обновлено: ${data.updated||0}`, true);
+    renderProducts(data.items||[]);
+  }catch(e){ setNote('Импорт не удался: ' + e.message); }
 }
 
 function clearDetails(){ qsa('tr.detail').forEach(tr => tr.remove()); }
 function makeDetailRow(colspan){
-  const tr = document.createElement('tr');
-  tr.className = 'detail';
-  const td = document.createElement('td');
-  td.colSpan = colspan;
-  tr.appendChild(td);
-  return tr;
+  const tr = document.createElement('tr'); tr.className='detail';
+  const td = document.createElement('td'); td.colSpan = colspan; tr.appendChild(td); return tr;
 }
 
 async function openDetail(row){
   clearDetails();
   const sku = row?.dataset?.sku || row.cells?.[0]?.textContent?.trim();
-  if(!sku) { setStatus('У товара нет кода/sku — некуда сохранить партии.', false); return; }
+  if(!sku){ setNote('У товара нет кода/sku — некуда сохранять партии.'); return; }
 
   const tr = makeDetailRow(row.children.length);
   row.insertAdjacentElement('afterend', tr);
   const mount = tr.firstChild;
 
-  mount.innerHTML =
-    '<div class="block">' +
-      '<div style="margin:8px 0 6px; font-weight:600">Партии закупок — <span id="dTitle">'+ row.cells[1].textContent +'</span></div>' +
-      '<table style="width:100%" id="btTable">' +
-        '<thead><tr>' +
-          '<th>Дата</th><th>Кол-во</th><th>Закуп., KZT</th><th>Комиссия, %</th><th>Маржа / шт</th><th>Код</th><th>Прим.</th><th></th>' +
-        '</tr></thead>' +
-        '<tbody id="btBody"></tbody>' +
-      '</table>' +
-      '<div class="row" style="margin-top:8px; gap:8px">' +
-        '<button class="btn secondary" id="btnAddRow">+ Добавить</button>' +
-        '<button class="btn" id="btnSaveRows">Сохранить</button>' +
-      '</div>' +
-    '</div>';
+  mount.innerHTML = `
+    <div class="block">
+      <div style="margin:8px 0 6px; font-weight:600">Партии — <span id="dTitle">${row.cells[1].textContent}</span></div>
+      <table style="width:100%" id="btTable">
+        <thead>
+          <tr><th>Дата</th><th>Кол-во</th><th>Закуп., KZT</th><th>Комиссия, %</th><th>Маржа / шт</th><th>Код</th><th>Прим.</th><th></th></tr>
+        </thead>
+        <tbody id="btBody"></tbody>
+      </table>
+      <div class="row" style="margin-top:8px; gap:8px">
+        <button class="btn secondary" id="btnAddRow">+ Добавить</button>
+        <button class="btn" id="btnSaveRows">Сохранить</button>
+      </div>
+    </div>
+  `;
 
   const tbody = qs('#btBody', mount);
   const priceKZT = parsePriceCell(row.cells[5]);
 
   function recalc(tr){
-    const inputs = qsa('input', tr);
-    const uc = Number((inputs[2]?.value)||0);
-    const comm = Number((inputs[3]?.value)||0);
+    const inputs = tr.querySelectorAll('input');
+    const uc = Number(inputs[2].value||0);
+    const comm = Number(inputs[3].value||0);
     const net = priceKZT - (priceKZT * comm/100) - uc;
-    const cell = tr.querySelector('.net');
-    if(cell) cell.textContent = isFinite(net) ? fmt(net) : '—';
+    tr.querySelector('.net').textContent = isFinite(net) ? fmt(net) : '—';
   }
 
-  function addRow(data){
+  function addRow(data={}){
     const tr = document.createElement('tr');
-    tr.innerHTML =
-      '<td><input type="date" value="'+ (data?.date || new Date().toISOString().slice(0,10)) +'"></td>' +
-      '<td><input type="number" min="0" step="1" value="'+ (data?.qty ?? '') +'" style="width:90px"></td>' +
-      '<td><input type="number" min="0" step="0.01" value="'+ (data?.unit_cost ?? '') +'" style="width:110px"></td>' +
-      '<td><input type="number" min="0" step="0.01" value="'+ (data?.commission_pct ?? '') +'" style="width:100px"></td>' +
-      '<td class="net">—</td>' +
-      '<td class="code">'+ (data?.batch_code || '<span class="muted">— генерируется</span>') +'</td>' +
-      '<td><input type="text" value="'+ (data?.note ?? '') +'"></td>' +
-      '<td>'+ (data?.id ? ('<button class="btn-link btnDel" data-id="'+data.id+'">Удалить</button>') : '') +'</td>';
+    const codeCell = (data && data.batch_code) ? data.batch_code : '<span class="muted">— генерируется</span>';
+    const delBtn = (data && data.id) ? `<button class="btn-link btnDel" data-id="${data.id}">Удалить</button>` : '';
+    tr.innerHTML = `
+      <td><input type="date" value="${data.date || new Date().toISOString().slice(0,10)}"></td>
+      <td><input type="number" min="0" step="1" value="${data.qty ?? ''}" style="width:90px"></td>
+      <td><input type="number" min="0" step="0.01" value="${data.unit_cost ?? ''}" style="width:110px"></td>
+      <td><input type="number" min="0" step="0.01" value="${data.commission_pct ?? ''}" style="width:100px"></td>
+      <td class="net">—</td>
+      <td class="code">${codeCell}</td>
+      <td><input type="text" value="${data.note ?? ''}"></td>
+      <td>${delBtn}</td>
+    `;
     tbody.appendChild(tr);
     recalc(tr);
   }
 
-  const data = await fetchJSON('/products/db/price-batches/'+encodeURIComponent(sku));
-  for(const r of (data?.batches||[])){ addRow(r); }
+  try{
+    const data = await fetchJSON('/products/db/price-batches/'+encodeURIComponent(sku));
+    (data.batches||[]).forEach(addRow);
+  }catch(e){ setNote('Не удалось загрузить партии: ' + e.message); }
+
   qs('#btnAddRow', mount).onclick = ()=> addRow({});
-
-  tbody.addEventListener('input', e=>{
-    const tr = e.target.closest('tr'); if(!tr) return;
-    recalc(tr);
-  });
-
+  tbody.addEventListener('input', e=>{ const tr = e.target.closest('tr'); if(tr) recalc(tr); });
   tbody.addEventListener('click', async (e)=>{
-    const btn = e.target.closest('.btnDel');
-    if(!btn) return;
-    await fetchJSON('/products/db/price-batches/'+encodeURIComponent(sku)+'/'+btn.dataset.id, {method:'DELETE'});
-    btn.closest('tr').remove();
-    setStatus('Партия удалена', true);
+    const btn = e.target.closest('.btnDel'); if(!btn) return;
+    try{
+      await fetchJSON('/products/db/price-batches/'+encodeURIComponent(sku)+'/'+btn.dataset.id, {method:'DELETE'});
+      btn.closest('tr').remove();
+      setNote('Партия удалена.', true);
+    }catch(err){ setNote('Удаление не удалось: ' + err.message); }
   });
 
   qs('#btnSaveRows', mount).onclick = async ()=>{
-    const rows = qsa('tr', tbody).map(tr=>{
-      const inputs = qsa('input', tr);
-      const codeCell = tr.children[5];
-      const text = (codeCell?.textContent||'').trim();
-      const batch_code = (text.startsWith('—') || text==='') ? null : text;
+    const entries = qsa('tr', tbody).map(tr=>{
+      const ins = tr.querySelectorAll('input');
+      const codeText = tr.querySelector('.code')?.textContent?.trim() || '';
+      const gen = codeText.startsWith('—') ? null : codeText;
       return {
-        date: inputs[0]?.value || '',
-        qty: Number(inputs[1]?.value || 0),
-        unit_cost: Number(inputs[2]?.value || 0),
-        commission_pct: (inputs[3]?.value ? Number(inputs[3].value) : null),
-        note: inputs[4]?.value || null,
-        batch_code
+        date: ins[0].value,
+        qty: Number(ins[1].value||0),
+        unit_cost: Number(ins[2].value||0),
+        commission_pct: Number(ins[3].value||0) || null,
+        note: ins[4].value || null,
+        batch_code: gen
       };
     }).filter(e => e.qty>0 && e.unit_cost>0);
-
-    if(!rows.length){ setStatus('Добавьте хотя бы одну строку партии.', false); return; }
-
-    const res = await fetchJSON('/products/db/price-batches/'+encodeURIComponent(sku), {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({entries: rows})
-    });
-    setStatus('Партии сохранены. Средняя себестоимость: ' + (res?.avg_cost!=null ? fmt(res.avg_cost) : '—'), true);
-    openDetail(row); // перезагрузим, чтобы серверные коды появились
+    if(!entries.length){ setNote('Добавьте хотя бы одну строку партии.'); return; }
+    try{
+      await fetchJSON('/products/db/price-batches/'+encodeURIComponent(sku), {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({entries})
+      });
+      setNote('Партии сохранены.', true);
+      openDetail(row); // перезагрузим
+    }catch(e){ setNote('Сохранение партий не удалось: ' + e.message); }
   };
 }
 
-// helpers for save/export
 function tableToRows(){
   return qsa('#tbl tbody tr').map(tr=>{
     const t = tr.children;
@@ -328,21 +295,28 @@ function tableToRows(){
     const name = t[1].textContent.trim();
     const brand = t[2].textContent.trim() || null;
     const category = t[3].textContent.trim() || null;
-    const qty = parseInt(t[4].textContent.replace(/\\s/g,'')) || 0;
-    const price = parseFloat(t[5].textContent.replace(/\\s/g,'')) || 0;
+    const qty = parseInt(t[4].textContent.replace(/\s/g,'')) || 0;
+    const price = parseFloat(t[5].textContent.replace(/\s/g,'')) || 0;
     const active = t[6].querySelector('.dot')?.classList.contains('on') || false;
     return { code, name, brand, category, qty, price, active };
   });
 }
 
-document.addEventListener('DOMContentLoaded', ()=>{
+document.addEventListener('DOMContentLoaded', async ()=>{
+  // проверка, что роутер действительно под /products
+  try{
+    const ping = await fetchJSON('/products/db/ping');
+    setNote('Бэкенд OK (integrity_check=' + (ping.ok ? 'ok':'fail') + ', ' + ping.db_path + ')', true);
+  }catch(e){
+    setNote('Не найден /products/db/ping. Вероятно, роутер подключён НЕ под префиксом /products. Проверь main.py -> include_router(..., prefix="/products").');
+  }
+
   qs('#btnLoadApi').onclick = loadAPI;
   qs('#btnLoadDb').onclick = loadDB;
 
   qs('#fileInput').addEventListener('change', async (e)=>{
     const f = e.target.files?.[0]; if(!f) return;
-    try{ await importFile(f); } catch(err){ /* setStatus уже показал */ }
-    e.target.value = '';
+    await importFile(f); e.target.value = '';
   });
 
   qs('#restoreFile').addEventListener('change', async (e)=>{
@@ -350,31 +324,30 @@ document.addEventListener('DOMContentLoaded', ()=>{
     const fd = new FormData(); fd.append('file', f);
     try{
       const res = await fetchJSON('/products/db/restore', {method:'POST', body:fd});
-      setStatus('БД восстановлена. integrity_check=' + (res?.integrity||'unknown'), true);
+      if(res?.integrity === 'ok') setNote('БД восстановлена (integrity=ok).', true);
+      else setNote('БД загружена, но integrity_check != ok.');
       await loadDB();
-    }catch(err){}
+    }catch(err){ setNote('Восстановление БД не удалось: ' + err.message); }
     e.target.value = '';
   });
 
   qs('#btnBackup').onclick = ()=> { window.location = '/products/db/backup.sqlite3'; };
 
   qs('#tbl').addEventListener('click', (e)=>{
-    const btn = e.target.closest('.btn-parties');
-    if(!btn) return;
-    const row = btn.closest('tr');
-    openDetail(row);
+    const btn = e.target.closest('.btn-parties'); if(!btn) return;
+    openDetail(btn.closest('tr'));
   });
 
   qs('#btnSaveDb').onclick = async ()=>{
     const rows = tableToRows();
-    if(!rows.length){ setStatus('Нет строк для сохранения', false); return; }
-    const res = await fetchJSON('/products/db/bulk-upsert', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(rows)
-    });
-    setStatus('Сохранено в БД. Добавлено: '+(res?.inserted||0)+', обновлено: '+(res?.updated||0), true);
-    await loadDB();
+    if(!rows.length){ setNote('Нет строк для сохранения. Сначала загрузите товары из API/файла.'); return; }
+    try{
+      const res = await fetchJSON('/products/db/bulk-upsert', {
+        method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(rows)
+      });
+      setNote(`Сохранено в БД: вставлено ${res.inserted||0}, обновлено ${res.updated||0}`, true);
+      await loadDB();
+    }catch(e){ setNote('Сохранение в БД не удалось: ' + e.message); }
   };
 
   qs('#btnExportDb').onclick = ()=>{
@@ -384,6 +357,7 @@ document.addEventListener('DOMContentLoaded', ()=>{
     window.location = '/products/db/export.csv?' + p.toString();
   };
 
+  // авто-загрузка из БД
   loadDB();
 });
 </script>
