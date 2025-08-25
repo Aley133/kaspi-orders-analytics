@@ -8,10 +8,12 @@
     :root{
       --bg:#ffffff; --fg:#0f172a; --muted:#6b7280; --card:#f8fafc;
       --line:#e5e7eb; --pri:#1f7aee; --pri-weak:#e9eef6; --pill-bg:#eef2ff; --pill-fg:#3730a3;
+      --ok:#10b981; --bad:#ef4444;
     }
     body[data-theme="dark"]{
       --bg:#0b1220; --fg:#e5e7eb; --muted:#94a3b8; --card:#0f1829;
       --line:#1f2a37; --pri:#3b82f6; --pri-weak:#132036; --pill-bg:#1e293b; --pill-fg:#bfdbfe;
+      --ok:#34d399; --bad:#f87171;
     }
     *{box-sizing:border-box}
     html,body{height:100%}
@@ -50,8 +52,9 @@
     .detail{background:var(--card)}
     .block{padding:12px}
     .shell{border:1px solid var(--line);border-radius:12px;overflow:hidden}
-    .toast{position:fixed;right:16px;bottom:16px;background:var(--card);border:1px solid var(--line);padding:10px 12px;border-radius:10px;box-shadow:0 6px 16px rgba(0,0,0,.08);display:none}
-    .toast.show{display:block}
+    .status{margin:8px 0 0;padding:8px 10px;border-radius:10px;background:var(--card);border:1px solid var(--line);font-size:13px}
+    .status.ok{border-color:var(--ok);color:var(--ok)}
+    .status.bad{border-color:var(--bad);color:var(--bad)}
   </style>
 </head>
 <body data-theme="light">
@@ -87,7 +90,8 @@
         <input type="file" id="restoreFile" accept=".sqlite3" style="display:none">
       </div>
 
-      <div id="note" class="muted" style="margin:6px 0 12px"></div>
+      <div id="note" class="muted"></div>
+      <div id="status" class="status" style="display:none"></div>
 
       <div class="shell">
         <div style="overflow:auto; max-height:70vh">
@@ -113,20 +117,11 @@
     </main>
   </div>
 
-  <div id="toast" class="toast"></div>
-
-<script>
+<script type="module">
 const qs=(s,el=document)=>el.querySelector(s);
 const qsa=(s,el=document)=>[...el.querySelectorAll(s)];
 const nf = new Intl.NumberFormat('ru-RU');
 const fmt = n => nf.format(Number(n||0));
-
-function toast(msg){
-  const el = qs('#toast');
-  el.textContent = msg;
-  el.classList.add('show');
-  setTimeout(()=>el.classList.remove('show'), 3000);
-}
 
 (function initTheme(){
   const saved = localStorage.getItem('theme') || 'light';
@@ -139,42 +134,54 @@ function toast(msg){
   });
 })();
 
-async function fetchJSON(url, opts){
-  const r = await fetch(url, opts||{});
-  const text = await r.text();
-  let data = null;
-  try { data = text ? JSON.parse(text) : null; } catch(e){ /* not json */ }
-  if(!r.ok){
-    const msg = (data && (data.detail || data.message)) || text || r.statusText;
-    throw new Error(msg);
-  }
-  return data;
+function setStatus(text, ok=true){
+  const el = qs('#status');
+  el.textContent = text;
+  el.className = 'status ' + (ok ? 'ok' : 'bad');
+  el.style.display = 'block';
 }
 
-function parsePriceCell(cell){ return Number((cell?.textContent||'0').toString().replace(/\s/g,'')); }
+async function fetchJSON(url, opts){
+  try {
+    const r = await fetch(url, opts||{});
+    const text = await r.text();
+    let data = null;
+    try { data = text ? JSON.parse(text) : null; } catch(e) { /* not json */ }
+    if(!r.ok){
+      setStatus('Ошибка ' + r.status + ': ' + (data?.detail || text || r.statusText), false);
+      throw new Error(data?.detail || text || r.statusText);
+    }
+    return data;
+  } catch(err){
+    setStatus('Сеть: ' + (err?.message || err), false);
+    throw err;
+  }
+}
+
+function parsePriceCell(cell){ return Number((cell?.textContent||'0').toString().replace(/\\s/g,'')); }
 
 function renderProducts(items){
   const tb = qs('#tbl tbody');
   tb.innerHTML = '';
-  items.forEach(it=>{
+  for(const it of (items||[])){
     const tr = document.createElement('tr');
     const sku = it.code || it.id || '';
     tr.dataset.sku = sku;
     tr.className = 'data-row';
     const on = (it.qty||0)>0 || it.active===true;
     tr.innerHTML =
-      '<td>'+sku+'</td>'+
-      '<td>'+(it.name||'')+'</td>'+
-      '<td>'+(it.brand||'')+'</td>'+
-      '<td>'+(it.category||'')+'</td>'+
-      '<td>'+fmt(it.qty||0)+'</td>'+
-      '<td>'+fmt(it.price||0)+'</td>'+
-      '<td><span class="dot '+(on?'on':'')+'"></span></td>'+
-      '<td>'+fmt(it.batch_count||0)+'</td>'+
-      '<td>'+(it.last_margin!=null ? fmt(it.last_margin) : '—')+'</td>'+
+      '<td>'+sku+'</td>' +
+      '<td>'+(it.name||'')+'</td>' +
+      '<td>'+(it.brand||'')+'</td>' +
+      '<td>'+(it.category||'')+'</td>' +
+      '<td>'+fmt(it.qty||0)+'</td>' +
+      '<td>'+fmt(it.price||0)+'</td>' +
+      '<td><span class="dot '+(on?'on':'')+'"></span></td>' +
+      '<td>'+fmt(it.batch_count||0)+'</td>' +
+      '<td>'+(it.last_margin!=null ? fmt(it.last_margin) : '—')+'</td>' +
       '<td class="col-right"><button class="btn-link btn-parties">Партии</button></td>';
     tb.appendChild(tr);
-  });
+  }
 }
 
 async function loadAPI(){
@@ -184,9 +191,9 @@ async function loadAPI(){
   if(q) p.set('q', q);
   p.set('page','1'); p.set('page_size','2000');
   const data = await fetchJSON('/products/list?'+p.toString());
-  if(data.note) qs('#note').textContent = data.note;
-  renderProducts(data.items||[]);
-  toast('Загружено из API: '+(data.items?.length||0)+' позиций');
+  if(data?.note) qs('#note').textContent = data.note;
+  renderProducts(data?.items||[]);
+  setStatus('Загружено из API: ' + (data?.items?.length || 0) + ' поз.', true);
 }
 
 async function loadDB(){
@@ -194,17 +201,17 @@ async function loadDB(){
   p.set('active_only', qs('#onlyActive').checked ? '1' : '0');
   const q = qs('#search').value.trim(); if(q) p.set('search', q);
   const data = await fetchJSON('/products/db/list?'+p.toString());
-  renderProducts(data.items||[]);
-  toast('Загружено из БД: '+(data.count||0)+' позиций (файл: '+(data.db_path||'—')+')');
+  renderProducts(data?.items||[]);
+  setStatus('Загружено из БД: ' + (data?.items?.length || 0) + ' поз.', true);
 }
 
 async function importFile(file){
   const fd = new FormData();
   fd.append('file', file);
   const data = await fetchJSON('/products/manual-upload', {method:'POST', body:fd});
-  qs('#note').textContent = 'Файл загружен: '+file.name+'. Позиции: '+(data.count||0)+'. Вставлено: '+data.inserted+'; Обновлено: '+data.updated;
-  renderProducts(data.items||[]);
-  toast('Импорт из файла: '+(data.count||0)+' позиций сохранены в БД');
+  qs('#note').textContent = 'Файл загружен: ' + file.name + '. Вставлено: ' + (data?.inserted||0) + ', обновлено: ' + (data?.updated||0);
+  renderProducts(data?.items||[]);
+  setStatus('Импорт завершён: ' + (data?.count||0) + ' поз.', true);
 }
 
 function clearDetails(){ qsa('tr.detail').forEach(tr => tr.remove()); }
@@ -220,58 +227,56 @@ function makeDetailRow(colspan){
 async function openDetail(row){
   clearDetails();
   const sku = row?.dataset?.sku || row.cells?.[0]?.textContent?.trim();
-  if(!sku) { alert('У товара нет кода/sku — некуда сохранить партии.'); return; }
+  if(!sku) { setStatus('У товара нет кода/sku — некуда сохранить партии.', false); return; }
 
   const tr = makeDetailRow(row.children.length);
   row.insertAdjacentElement('afterend', tr);
   const mount = tr.firstChild;
 
   mount.innerHTML =
-    '<div class="block">'+
-      '<div style="margin:8px 0 6px; font-weight:600">Партии закупок — <span id="dTitle">'+row.cells[1].textContent+'</span></div>'+
-      '<table style="width:100%" id="btTable">'+
-        '<thead><tr>'+
-          '<th>Дата</th><th>Кол-во</th><th>Закуп., KZT</th><th>Комиссия, %</th><th>Маржа / шт</th><th>Код</th><th>Прим.</th><th></th>'+
-        '</tr></thead>'+
-        '<tbody id="btBody"></tbody>'+
-      '</table>'+
-      '<div class="row" style="margin-top:8px; gap:8px">'+
-        '<button class="btn secondary" id="btnAddRow">+ Добавить</button>'+
-        '<button class="btn" id="btnSaveRows">Сохранить</button>'+
-      '</div>'+
+    '<div class="block">' +
+      '<div style="margin:8px 0 6px; font-weight:600">Партии закупок — <span id="dTitle">'+ row.cells[1].textContent +'</span></div>' +
+      '<table style="width:100%" id="btTable">' +
+        '<thead><tr>' +
+          '<th>Дата</th><th>Кол-во</th><th>Закуп., KZT</th><th>Комиссия, %</th><th>Маржа / шт</th><th>Код</th><th>Прим.</th><th></th>' +
+        '</tr></thead>' +
+        '<tbody id="btBody"></tbody>' +
+      '</table>' +
+      '<div class="row" style="margin-top:8px; gap:8px">' +
+        '<button class="btn secondary" id="btnAddRow">+ Добавить</button>' +
+        '<button class="btn" id="btnSaveRows">Сохранить</button>' +
+      '</div>' +
     '</div>';
 
   const tbody = qs('#btBody', mount);
   const priceKZT = parsePriceCell(row.cells[5]);
 
   function recalc(tr){
-    const inputs = tr.querySelectorAll('input');
-    const uc = Number(inputs[2].value||0);
-    const comm = Number(inputs[3].value||0);
+    const inputs = qsa('input', tr);
+    const uc = Number((inputs[2]?.value)||0);
+    const comm = Number((inputs[3]?.value)||0);
     const net = priceKZT - (priceKZT * comm/100) - uc;
-    tr.querySelector('.net').textContent = isFinite(net) ? fmt(net) : '—';
+    const cell = tr.querySelector('.net');
+    if(cell) cell.textContent = isFinite(net) ? fmt(net) : '—';
   }
 
   function addRow(data){
-    const delBtnHTML = (data && data.id) ? ('<button class="btn-link btnDel" data-id="'+data.id+'">Удалить</button>') : '';
-    const rowHTML =
-      '<td><input type="date" value="'+(data?.date || new Date().toISOString().slice(0,10))+'"></td>'+
-      '<td><input type="number" min="0" step="1" value="'+(data?.qty ?? '')+'" style="width:90px"></td>'+
-      '<td><input type="number" min="0" step="0.01" value="'+(data?.unit_cost ?? '')+'" style="width:110px"></td>'+
-      '<td><input type="number" min="0" step="0.01" value="'+(data?.commission_pct ?? '')+'" style="width:100px"></td>'+
-      '<td class="net">—</td>'+
-      '<td class="code">'+(data?.batch_code || '<span class="muted">— генерируется</span>')+'</td>'+
-      '<td><input type="text" value="'+(data?.note ?? '')+'"></td>'+
-      '<td>'+delBtnHTML+'</td>';
     const tr = document.createElement('tr');
-    tr.innerHTML = rowHTML;
+    tr.innerHTML =
+      '<td><input type="date" value="'+ (data?.date || new Date().toISOString().slice(0,10)) +'"></td>' +
+      '<td><input type="number" min="0" step="1" value="'+ (data?.qty ?? '') +'" style="width:90px"></td>' +
+      '<td><input type="number" min="0" step="0.01" value="'+ (data?.unit_cost ?? '') +'" style="width:110px"></td>' +
+      '<td><input type="number" min="0" step="0.01" value="'+ (data?.commission_pct ?? '') +'" style="width:100px"></td>' +
+      '<td class="net">—</td>' +
+      '<td class="code">'+ (data?.batch_code || '<span class="muted">— генерируется</span>') +'</td>' +
+      '<td><input type="text" value="'+ (data?.note ?? '') +'"></td>' +
+      '<td>'+ (data?.id ? ('<button class="btn-link btnDel" data-id="'+data.id+'">Удалить</button>') : '') +'</td>';
     tbody.appendChild(tr);
     recalc(tr);
   }
 
   const data = await fetchJSON('/products/db/price-batches/'+encodeURIComponent(sku));
-  (data.batches||[]).forEach(addRow);
-
+  for(const r of (data?.batches||[])){ addRow(r); }
   qs('#btnAddRow', mount).onclick = ()=> addRow({});
 
   tbody.addEventListener('input', e=>{
@@ -284,32 +289,34 @@ async function openDetail(row){
     if(!btn) return;
     await fetchJSON('/products/db/price-batches/'+encodeURIComponent(sku)+'/'+btn.dataset.id, {method:'DELETE'});
     btn.closest('tr').remove();
+    setStatus('Партия удалена', true);
   });
 
   qs('#btnSaveRows', mount).onclick = async ()=>{
-    const entries = qsa('tr', tbody).map(tr=>{
-      const inputs = tr.querySelectorAll('input');
+    const rows = qsa('tr', tbody).map(tr=>{
+      const inputs = qsa('input', tr);
       const codeCell = tr.children[5];
-      const rawCode = codeCell.textContent || '';
-      const hasCode = rawCode.trim().length && rawCode.indexOf('—') !== 0;
+      const text = (codeCell?.textContent||'').trim();
+      const batch_code = (text.startsWith('—') || text==='') ? null : text;
       return {
-        date: inputs[0].value,
-        qty: Number(inputs[1].value||0),
-        unit_cost: Number(inputs[2].value||0),
-        commission_pct: inputs[3].value ? Number(inputs[3].value) : null,
-        note: inputs[5].value || null,
-        batch_code: hasCode ? rawCode.trim() : null
+        date: inputs[0]?.value || '',
+        qty: Number(inputs[1]?.value || 0),
+        unit_cost: Number(inputs[2]?.value || 0),
+        commission_pct: (inputs[3]?.value ? Number(inputs[3].value) : null),
+        note: inputs[4]?.value || null,
+        batch_code
       };
     }).filter(e => e.qty>0 && e.unit_cost>0);
-    if(!entries.length){ alert('Добавьте хотя бы одну строку партии.'); return; }
 
-    await fetchJSON('/products/db/price-batches/'+encodeURIComponent(sku), {
+    if(!rows.length){ setStatus('Добавьте хотя бы одну строку партии.', false); return; }
+
+    const res = await fetchJSON('/products/db/price-batches/'+encodeURIComponent(sku), {
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({entries})
+      body: JSON.stringify({entries: rows})
     });
-    toast('Партии сохранены');
-    openDetail(row);
+    setStatus('Партии сохранены. Средняя себестоимость: ' + (res?.avg_cost!=null ? fmt(res.avg_cost) : '—'), true);
+    openDetail(row); // перезагрузим, чтобы серверные коды появились
   };
 }
 
@@ -321,20 +328,20 @@ function tableToRows(){
     const name = t[1].textContent.trim();
     const brand = t[2].textContent.trim() || null;
     const category = t[3].textContent.trim() || null;
-    const qty = parseInt(t[4].textContent.replace(/\s/g,'')) || 0;
-    const price = parseFloat(t[5].textContent.replace(/\s/g,'')) || 0;
+    const qty = parseInt(t[4].textContent.replace(/\\s/g,'')) || 0;
+    const price = parseFloat(t[5].textContent.replace(/\\s/g,'')) || 0;
     const active = t[6].querySelector('.dot')?.classList.contains('on') || false;
     return { code, name, brand, category, qty, price, active };
   });
 }
 
 document.addEventListener('DOMContentLoaded', ()=>{
-  qs('#btnLoadApi').onclick = ()=> loadAPI().catch(err=>toast('Ошибка API: '+err.message));
-  qs('#btnLoadDb').onclick  = ()=> loadDB().catch(err=>toast('Ошибка загрузки БД: '+err.message));
+  qs('#btnLoadApi').onclick = loadAPI;
+  qs('#btnLoadDb').onclick = loadDB;
 
   qs('#fileInput').addEventListener('change', async (e)=>{
     const f = e.target.files?.[0]; if(!f) return;
-    try{ await importFile(f); } catch(err){ toast('Ошибка импорта: '+err.message); }
+    try{ await importFile(f); } catch(err){ /* setStatus уже показал */ }
     e.target.value = '';
   });
 
@@ -343,9 +350,9 @@ document.addEventListener('DOMContentLoaded', ()=>{
     const fd = new FormData(); fd.append('file', f);
     try{
       const res = await fetchJSON('/products/db/restore', {method:'POST', body:fd});
-      toast('БД восстановлена ('+(res.products||0)+' товаров, '+(res.batches||0)+' партий)');
+      setStatus('БД восстановлена. integrity_check=' + (res?.integrity||'unknown'), true);
       await loadDB();
-    }catch(err){ toast('Ошибка восстановления: '+err.message); }
+    }catch(err){}
     e.target.value = '';
   });
 
@@ -355,21 +362,19 @@ document.addEventListener('DOMContentLoaded', ()=>{
     const btn = e.target.closest('.btn-parties');
     if(!btn) return;
     const row = btn.closest('tr');
-    openDetail(row).catch(err=>toast('Ошибка партий: '+err.message));
+    openDetail(row);
   });
 
   qs('#btnSaveDb').onclick = async ()=>{
-    try{
-      const rows = tableToRows();
-      if(!rows.length){ alert('Нет строк для сохранения'); return; }
-      const res = await fetchJSON('/products/db/bulk-upsert', {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify(rows)
-      });
-      toast('Записано в БД. inserted='+res.inserted+', updated='+res.updated+', total='+res.total);
-      await loadDB();
-    }catch(err){ toast('Ошибка сохранения БД: '+err.message); }
+    const rows = tableToRows();
+    if(!rows.length){ setStatus('Нет строк для сохранения', false); return; }
+    const res = await fetchJSON('/products/db/bulk-upsert', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(rows)
+    });
+    setStatus('Сохранено в БД. Добавлено: '+(res?.inserted||0)+', обновлено: '+(res?.updated||0), true);
+    await loadDB();
   };
 
   qs('#btnExportDb').onclick = ()=>{
@@ -379,8 +384,7 @@ document.addEventListener('DOMContentLoaded', ()=>{
     window.location = '/products/db/export.csv?' + p.toString();
   };
 
-  // автозагрузка
-  loadDB().catch(err=>toast('Ошибка старта: '+err.message));
+  loadDB();
 });
 </script>
 </body>
