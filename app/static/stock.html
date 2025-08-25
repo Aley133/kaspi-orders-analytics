@@ -138,9 +138,7 @@ async function fetchJSON(url, opts){
   return r.json();
 }
 
-function parsePriceCell(cell){
-  return Number((cell?.textContent||'0').toString().replace(/\s/g,''));
-}
+function parsePriceCell(cell){ return Number((cell?.textContent||'0').toString().replace(/\s/g,'')); }
 
 function renderProducts(items){
   const tb = qs('#tbl tbody');
@@ -168,22 +166,35 @@ function renderProducts(items){
 }
 
 async function loadAPI(){
-  const p = new URLSearchParams();
-  p.set('active', qs('#onlyActive').checked ? '1' : '0');
-  const q = qs('#search').value.trim();
-  if(q) p.set('q', q);
-  p.set('page','1'); p.set('page_size','2000');
-  const data = await fetchJSON('/products/list?'+p.toString());
-  if(data.note) qs('#note').textContent = data.note;
-  renderProducts(data.items||[]);
+  try{
+    const p = new URLSearchParams();
+    p.set('active', qs('#onlyActive').checked ? '1' : '0');
+    const q = qs('#search').value.trim();
+    if(q) p.set('q', q);
+    p.set('page','1'); p.set('page_size','2000');
+    const data = await fetchJSON('/products/list?'+p.toString());
+    if(data.note) qs('#note').textContent = data.note;
+    renderProducts(data.items||[]);
+  }catch(e){
+    qs('#note').textContent = 'Ошибка загрузки из API: '+(e.message||e);
+    console.error(e);
+  }
 }
 
 async function loadDB(){
-  const p = new URLSearchParams();
-  p.set('active_only', qs('#onlyActive').checked ? '1' : '0');
-  const q = qs('#search').value.trim(); if(q) p.set('search', q);
-  const data = await fetchJSON('/products/db/list?'+p.toString());
-  renderProducts(data.items||[]);
+  try{
+    const p = new URLSearchParams();
+    p.set('active_only', qs('#onlyActive').checked ? '1' : '0');
+    const q = qs('#search').value.trim(); if(q) p.set('search', q);
+    const data = await fetchJSON('/products/db/list?'+p.toString());
+    renderProducts(data.items||[]);
+    // доб. диагностику
+    const h = await fetchJSON('/products/db/health');
+    qs('#note').textContent = `Загружено из БД: ${data.count}. База: ${h.db_path} (${fmt(h.size)} байт). Товаров: ${h.products}, партий: ${h.batches}.`;
+  }catch(e){
+    qs('#note').textContent = 'Ошибка загрузки из БД: '+(e.message||e);
+    console.error(e);
+  }
 }
 
 async function importFile(file){
@@ -246,6 +257,9 @@ async function openDetail(row){
 
   function addRow(data){
     const tr = document.createElement('tr');
+    const delBtnHtml = data?.id
+      ? ('<button class="btn-link btnDel" data-id="'+String(data.id)+'">Удалить</button>')
+      : '';
     tr.innerHTML = `
       <td><input type="date" value="${data?.date || new Date().toISOString().slice(0,10)}"></td>
       <td><input type="number" min="0" step="1" value="${data?.qty ?? ''}" style="width:90px"></td>
@@ -254,128 +268,17 @@ async function openDetail(row){
       <td class="net">—</td>
       <td class="code">${data?.batch_code || '<span class="muted">— генерируется</span>'}</td>
       <td><input type="text" value="${data?.note ?? ''}"></td>
-      <td>${data?.id ? `<button class="btn-link btnDel" data-id="${data.id}">Удалить</button>` : ''}</td>
+      <td>${delBtnHtml}</td>
     `;
     tbody.appendChild(tr);
     recalc(tr);
   }
 
+  // текущие партии
   const data = await fetchJSON('/products/db/price-batches/'+encodeURIComponent(sku));
   (data.batches||[]).forEach(addRow);
 
   qs('#btnAddRow', mount).onclick = ()=> addRow({});
 
   tbody.addEventListener('input', e=>{
-    const tr = e.target.closest('tr'); if(!tr) return;
-    recalc(tr);
-  });
-
-  tbody.addEventListener('click', async (e)=>{
-    const btn = e.target.closest('.btnDel');
-    if(!btn) return;
-    await fetchJSON('/products/db/price-batches/'+encodeURIComponent(sku)+'/'+btn.dataset.id, {method:'DELETE'});
-    btn.closest('tr').remove();
-  });
-
-  qs('#btnSaveRows', mount).onclick = async ()=>{
-    const entries = qsa('tr', tbody).map(tr=>{
-      const [d,q,c,comm, ,codeCell, noteInput] = [
-        tr.children[0].querySelector('input'),
-        tr.children[1].querySelector('input'),
-        tr.children[2].querySelector('input'),
-        tr.children[3].querySelector('input'),
-        tr.children[4],
-        tr.children[5],
-        tr.children[6].querySelector('input'),
-      ];
-      const batch_code = codeCell.textContent?.trim()?.startsWith('—') ? null : (codeCell.textContent||'').trim();
-      return {
-        date: d.value,
-        qty: Number(q.value||0),
-        unit_cost: Number(c.value||0),
-        commission_pct: Number(comm.value||0) || null,
-        note: noteInput.value || null,
-        batch_code
-      };
-    }).filter(e => e.qty>0 && e.unit_cost>0);
-    if(!entries.length){ alert('Добавьте хотя бы одну строку партии.'); return; }
-
-    await fetchJSON('/products/db/price-batches/'+encodeURIComponent(sku), {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({entries})
-    });
-    alert('Сохранено.');
-    openDetail(row);
-  };
-}
-
-// ------- helpers for save/export -------
-function tableToRows(){
-  return qsa('#tbl tbody tr').map(tr=>{
-    const t = tr.children;
-    const code = t[0].textContent.trim();
-    const name = t[1].textContent.trim();
-    const brand = t[2].textContent.trim() || null;
-    const category = t[3].textContent.trim() || null;
-    const qty = parseInt(t[4].textContent.replace(/\s/g,'')) || 0;
-    const price = parseFloat(t[5].textContent.replace(/\s/g,'')) || 0;
-    const active = t[6].querySelector('.dot')?.classList.contains('on') || false;
-    return { code, name, brand, category, qty, price, active };
-  });
-}
-
-document.addEventListener('DOMContentLoaded', ()=>{
-  qs('#btnLoadApi').onclick = loadAPI;
-  qs('#btnLoadDb').onclick = loadDB;
-
-  qs('#fileInput').addEventListener('change', async (e)=>{
-    const f = e.target.files?.[0]; if(!f) return;
-    try{ await importFile(f); } catch(err){ alert(err.message||err); }
-    e.target.value = '';
-  });
-
-  qs('#restoreFile').addEventListener('change', async (e)=>{
-    const f = e.target.files?.[0]; if(!f) return;
-    const fd = new FormData(); fd.append('file', f);
-    try{
-      await fetchJSON('/products/db/restore', {method:'POST', body:fd});
-      alert('БД восстановлена.'); loadDB();
-    }catch(err){ alert(err.message||err); }
-    e.target.value = '';
-  });
-
-  qs('#btnBackup').onclick = ()=> { window.location = '/products/db/backup.sqlite3'; };
-
-  qs('#tbl').addEventListener('click', (e)=>{
-    const btn = e.target.closest('.btn-parties');
-    if(!btn) return;
-    const row = btn.closest('tr');
-    openDetail(row);
-  });
-
-  qs('#btnSaveDb').onclick = async ()=>{
-    const rows = tableToRows();
-    if(!rows.length){ alert('Нет строк для сохранения'); return; }
-    await fetchJSON('/products/db/bulk-upsert', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(rows)
-    });
-    alert('Сохранено в БД.');
-    loadDB();
-  };
-
-  qs('#btnExportDb').onclick = ()=>{
-    const p = new URLSearchParams();
-    p.set('active_only', qs('#onlyActive').checked ? '1' : '0');
-    const q = qs('#search').value.trim(); if(q) p.set('search', q);
-    window.location = '/products/db/export.csv?' + p.toString();
-  };
-
-  // автозагрузка
-  loadDB();
-});
-</script>
-</body>
-</html>
+    const tr = e.target.closest('tr');
