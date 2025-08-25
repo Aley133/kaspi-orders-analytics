@@ -82,6 +82,8 @@
         <button class="btn" id="btnLoadApi">Загрузить</button>
         <label class="btn secondary" for="fileInput">Импорт из файла (XML/XLSX)</label>
         <input type="file" id="fileInput" accept=".xml,.xlsx,.xls" style="display:none">
+        <button class="btn secondary" id="btnSaveDb">Сохранить таблицу в БД</button>
+        <button class="btn secondary" id="btnExportDb">Экспорт CSV (БД)</button>
         <button class="btn secondary" id="btnLoadDb">Загрузить из БД</button>
         <button class="btn secondary" id="btnBackup">Бэкап БД</button>
         <label class="btn secondary" for="restoreFile">Восстановить БД</label>
@@ -134,13 +136,6 @@ async function fetchJSON(url, opts){
   if(!r.ok) throw new Error((await r.text())||r.statusText);
   return r.json();
 }
-
-await fetch('/products/db/bulk-upsert', {
-  method: 'POST',
-  headers: {'Content-Type': 'application/json'},
-  body: JSON.stringify(rows) // [{code,name,brand,category,price,qty,active,barcode}, ...]
-});
-
 
 function parsePriceCell(cell){ return Number((cell?.textContent||'0').toString().replace(/\s/g,'')); }
 
@@ -340,7 +335,37 @@ document.addEventListener('DOMContentLoaded', ()=>{
     const row = btn.closest('tr');
     openDetail(row);
   });
+ function tableToRows(){
+  return qsa('#tbl tbody tr').map(tr=>{
+    const t = tr.children;
+    const code = t[0].textContent.trim();
+    const name = t[1].textContent.trim();
+    const brand = t[2].textContent.trim() || null;
+    const category = t[3].textContent.trim() || null;
+    const qty = parseInt(t[4].textContent.replace(/\s/g,'')) || 0;
+    const price = parseFloat(t[5].textContent.replace(/\s/g,'')) || 0;
+    const active = t[6].querySelector('.dot')?.classList.contains('on') || false;
+    return { code, name, brand, category, qty, price, active };
+  });
+}
 
+qs('#btnSaveDb').onclick = async ()=>{
+  const rows = tableToRows();
+  if(!rows.length){ alert('Нет строк для сохранения'); return; }
+  await fetchJSON('/products/db/bulk-upsert', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(rows)
+  });
+  alert('Сохранено в БД.');
+};
+
+qs('#btnExportDb').onclick = ()=>{
+  const p = new URLSearchParams();
+  p.set('active_only', qs('#onlyActive').checked ? '1' : '0');
+  const q = qs('#search').value.trim(); if(q) p.set('search', q);
+  window.location = '/products/db/export.csv?' + p.toString();
+};
   // автозагрузка из БД при открытии
   loadDB();
 });
