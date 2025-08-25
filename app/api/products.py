@@ -433,6 +433,17 @@ class CategoryIn(BaseModel):
     base_percent: float = 0.0
     extra_percent: float = 3.0
     tax_percent: float = 0.0
+    
+# === ДОБАВЬ: модель для массового сохранения товаров ===
+class ProductIn(BaseModel):
+    code: str
+    name: Optional[str] = None
+    brand: Optional[str] = None
+    category: Optional[str] = None
+    price: float | None = None
+    qty: int | None = None
+    active: bool | int | None = None
+    barcode: Optional[str] = None
 
 # =============================================================================
 # Router factory
@@ -666,6 +677,101 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
         return {"status": "ok", "sku": sku, "category": category}
 
     # ---------- Бэкап / восстановление БД ----------
+
+        # ---------- DB: массовое сохранение текущей таблицы из UI ----------
+    @router.post("/db/bulk-upsert")
+    async def db_bulk_upsert(payload: List[ProductIn]):
+        """
+        Принимает список строк таблицы со склада и сохраняет их в products.
+        Поля, которых нет, заполняются дефолтами.
+        """
+        rows: List[Dict[str, Any]] = []
+        for p in payload:
+            rows.append({
+                "code": p.code,
+                "name": p.name or p.code,
+                "brand": p.brand,
+                "category": p.category,
+                "price": p.price if p.price is not None else 0,
+                "qty": p.qty if p.qty is not None else 0,
+                "active": (
+                    1 if p.active in (True, 1, "1", "true", "yes", "on")
+                    else 0 if p.active in (False, 0, "0", "false", "no", "off")
+                    else None
+                ),
+                "barcode": p.barcode,
+            })
+        _upsert_products(rows)
+        return {"status": "ok", "count": len(rows)}
+
+    # ---------- DB: экспорт сохранённой таблицы products в CSV ----------
+    @router.get("/db/export.csv")
+    async def export_db_csv(active_only: int = 1, search: str = ""):
+        _ensure_schema()
+        with _db() as c:
+            sql = (
+                "SELECT sku AS code, name, brand, category, price, "
+                "quantity AS qty, active, barcode FROM products"
+            )
+            conds, params = [], []
+            if active_only:
+                conds.append("active=1")
+            if search:
+                conds.append("(sku LIKE ? OR name LIKE ?)")
+                params += [f"%{search}%", f"%{search}%"]
+            if conds:
+                sql += " WHERE " + " AND ".join(conds)
+            sql += " ORDER BY name COLLATE NOCASE"
+            rows = [dict(r) for r in c.execute(sql, params)]
+
+        def esc(s: Any) -> str:
+            s = "" if s is None else str(s)
+            if any(ch in s for ch in [",", '"', "\n"]):
+                s = '"' + s.replace('"', '""') + '"'
+            return s
+
+        header = "code,name,brand,category,price,qty,active,barcode\n"
+        body = "".join(
+            [
+                ",".join(
+                    [
+                        esc(r["code"]),
+                        esc(r["name"]),
+                        esc(r["brand"]),
+                        esc(r["category"]),
+                        esc(r["price"]),
+                        esc(r["qty"]),
+                        esc(1 if r["active"] else 0),
+                        esc(r["barcode"]),
+                    ]
+                )
+                + "\n"
+                for r in rows
+            ]
+        )
+        csv = header + body
+        return Response(
+            content=csv,
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": 'attachment; filename="products_db.csv"'},
+        )
+
+    # ---------- DB: быстрый тумблер «Активен» (по желанию) ----------
+    @router.put("/db/product-active/{sku}")
+    async def set_product_active(sku: str, payload: Dict[str, Any] = Body(...)):
+        """
+        payload: {"active": true/false}
+        """
+        _ensure_schema()
+        active = 1 if payload.get("active") in (True, 1, "1", "true", "yes", "on") else 0
+        with _db() as c:
+            c.execute(
+                "UPDATE products SET active=?, updated_at=datetime('now') WHERE sku=?",
+                (active, sku),
+            )
+        return {"status": "ok", "sku": sku, "active": active}
+
+    
     @router.get("/db/backup.sqlite3")
     async def backup_db():
         _ensure_schema()
