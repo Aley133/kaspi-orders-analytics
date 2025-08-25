@@ -17,7 +17,6 @@
     html,body{height:100%}
     body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Helvetica Neue",Arial;transition:background .2s,color .2s}
     a{color:inherit;text-decoration:none}
-
     .layout{display:grid;grid-template-columns:220px 1fr;min-height:100vh}
     .sidebar{border-right:1px solid var(--line);padding:16px 12px;position:sticky;top:0;height:100vh}
     .brand{font-weight:800;font-size:18px;margin:4px 0 12px}
@@ -29,10 +28,8 @@
     .switch input:checked{background:var(--pri)}
     .switch input::after{content:"";position:absolute;inset:3px auto auto 3px;width:16px;height:16px;background:#fff;border-radius:50%;transition:left .2s}
     .switch input:checked::after{left:21px}
-
     .content{padding:20px 16px}
     h1{margin:0 0 12px}
-
     .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
     .btn{background:var(--pri);color:#fff;border:0;border-radius:10px;padding:8px 12px;cursor:pointer;transition:transform .04s ease, filter .15s}
     .btn:hover{filter:brightness(1.05)}
@@ -49,11 +46,12 @@
     .dot.on{background:#10b981}
     .dot.on::after{content:"";position:absolute;inset:-5px;border-radius:50%;border:2px solid rgba(16,185,129,.4);animation:pulse 1.8s ease-out infinite;}
     @keyframes pulse{0%{transform:scale(.6);opacity:1}70%{transform:scale(1.4);opacity:0}100%{opacity:0}}
-    .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:var(--pill-bg);color:var(--pill-fg);font-size:12px}
     .col-right{text-align:right}
     .detail{background:var(--card)}
     .block{padding:12px}
     .shell{border:1px solid var(--line);border-radius:12px;overflow:hidden}
+    .toast{position:fixed;right:16px;bottom:16px;background:var(--card);border:1px solid var(--line);padding:10px 12px;border-radius:10px;box-shadow:0 6px 16px rgba(0,0,0,.08);display:none}
+    .toast.show{display:block}
   </style>
 </head>
 <body data-theme="light">
@@ -115,11 +113,20 @@
     </main>
   </div>
 
-<script type="module">
+  <div id="toast" class="toast"></div>
+
+<script>
 const qs=(s,el=document)=>el.querySelector(s);
 const qsa=(s,el=document)=>[...el.querySelectorAll(s)];
 const nf = new Intl.NumberFormat('ru-RU');
 const fmt = n => nf.format(Number(n||0));
+
+function toast(msg){
+  const el = qs('#toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  setTimeout(()=>el.classList.remove('show'), 3000);
+}
 
 (function initTheme(){
   const saved = localStorage.getItem('theme') || 'light';
@@ -134,8 +141,14 @@ const fmt = n => nf.format(Number(n||0));
 
 async function fetchJSON(url, opts){
   const r = await fetch(url, opts||{});
-  if(!r.ok) throw new Error((await r.text())||r.statusText);
-  return r.json();
+  const text = await r.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch(e){ /* not json */ }
+  if(!r.ok){
+    const msg = (data && (data.detail || data.message)) || text || r.statusText;
+    throw new Error(msg);
+  }
+  return data;
 }
 
 function parsePriceCell(cell){ return Number((cell?.textContent||'0').toString().replace(/\s/g,'')); }
@@ -149,62 +162,49 @@ function renderProducts(items){
     tr.dataset.sku = sku;
     tr.className = 'data-row';
     const on = (it.qty||0)>0 || it.active===true;
-    tr.innerHTML = `
-      <td>${sku}</td>
-      <td>${it.name||''}</td>
-      <td>${it.brand||''}</td>
-      <td>${it.category||''}</td>
-      <td>${fmt(it.qty||0)}</td>
-      <td>${fmt(it.price||0)}</td>
-      <td><span class="dot ${on?'on':''}"></span></td>
-      <td>${fmt(it.batch_count||0)}</td>
-      <td>${it.last_margin!=null ? fmt(it.last_margin) : '—'}</td>
-      <td class="col-right"><button class="btn-link btn-parties">Партии</button></td>
-    `;
+    tr.innerHTML =
+      '<td>'+sku+'</td>'+
+      '<td>'+(it.name||'')+'</td>'+
+      '<td>'+(it.brand||'')+'</td>'+
+      '<td>'+(it.category||'')+'</td>'+
+      '<td>'+fmt(it.qty||0)+'</td>'+
+      '<td>'+fmt(it.price||0)+'</td>'+
+      '<td><span class="dot '+(on?'on':'')+'"></span></td>'+
+      '<td>'+fmt(it.batch_count||0)+'</td>'+
+      '<td>'+(it.last_margin!=null ? fmt(it.last_margin) : '—')+'</td>'+
+      '<td class="col-right"><button class="btn-link btn-parties">Партии</button></td>';
     tb.appendChild(tr);
   });
 }
 
 async function loadAPI(){
-  try{
-    const p = new URLSearchParams();
-    p.set('active', qs('#onlyActive').checked ? '1' : '0');
-    const q = qs('#search').value.trim();
-    if(q) p.set('q', q);
-    p.set('page','1'); p.set('page_size','2000');
-    const data = await fetchJSON('/products/list?'+p.toString());
-    if(data.note) qs('#note').textContent = data.note;
-    renderProducts(data.items||[]);
-  }catch(e){
-    qs('#note').textContent = 'Ошибка загрузки из API: '+(e.message||e);
-    console.error(e);
-  }
+  const p = new URLSearchParams();
+  p.set('active', qs('#onlyActive').checked ? '1' : '0');
+  const q = qs('#search').value.trim();
+  if(q) p.set('q', q);
+  p.set('page','1'); p.set('page_size','2000');
+  const data = await fetchJSON('/products/list?'+p.toString());
+  if(data.note) qs('#note').textContent = data.note;
+  renderProducts(data.items||[]);
+  toast('Загружено из API: '+(data.items?.length||0)+' позиций');
 }
 
 async function loadDB(){
-  try{
-    const p = new URLSearchParams();
-    p.set('active_only', qs('#onlyActive').checked ? '1' : '0');
-    const q = qs('#search').value.trim(); if(q) p.set('search', q);
-    const data = await fetchJSON('/products/db/list?'+p.toString());
-    renderProducts(data.items||[]);
-    // доб. диагностику
-    const h = await fetchJSON('/products/db/health');
-    qs('#note').textContent = `Загружено из БД: ${data.count}. База: ${h.db_path} (${fmt(h.size)} байт). Товаров: ${h.products}, партий: ${h.batches}.`;
-  }catch(e){
-    qs('#note').textContent = 'Ошибка загрузки из БД: '+(e.message||e);
-    console.error(e);
-  }
+  const p = new URLSearchParams();
+  p.set('active_only', qs('#onlyActive').checked ? '1' : '0');
+  const q = qs('#search').value.trim(); if(q) p.set('search', q);
+  const data = await fetchJSON('/products/db/list?'+p.toString());
+  renderProducts(data.items||[]);
+  toast('Загружено из БД: '+(data.count||0)+' позиций (файл: '+(data.db_path||'—')+')');
 }
 
 async function importFile(file){
   const fd = new FormData();
   fd.append('file', file);
-  const res = await fetch('/products/manual-upload', {method:'POST', body:fd});
-  if(!res.ok){ const t = await res.text(); throw new Error(t||res.statusText); }
-  const data = await res.json();
-  qs('#note').textContent = `Файл загружен: ${file.name}. Позиции: ${data.count||0}`;
+  const data = await fetchJSON('/products/manual-upload', {method:'POST', body:fd});
+  qs('#note').textContent = 'Файл загружен: '+file.name+'. Позиции: '+(data.count||0)+'. Вставлено: '+data.inserted+'; Обновлено: '+data.updated;
   renderProducts(data.items||[]);
+  toast('Импорт из файла: '+(data.count||0)+' позиций сохранены в БД');
 }
 
 function clearDetails(){ qsa('tr.detail').forEach(tr => tr.remove()); }
@@ -226,59 +226,162 @@ async function openDetail(row){
   row.insertAdjacentElement('afterend', tr);
   const mount = tr.firstChild;
 
-  mount.innerHTML = `
-    <div class="block">
-      <div style="margin:8px 0 6px; font-weight:600">Партии закупок — <span id="dTitle">${row.cells[1].textContent}</span></div>
-      <table style="width:100%" id="btTable">
-        <thead>
-          <tr>
-            <th>Дата</th><th>Кол-во</th><th>Закуп., KZT</th><th>Комиссия, %</th><th>Маржа / шт</th><th>Код</th><th>Прим.</th><th></th>
-          </tr>
-        </thead>
-        <tbody id="btBody"></tbody>
-      </table>
-      <div class="row" style="margin-top:8px; gap:8px">
-        <button class="btn secondary" id="btnAddRow">+ Добавить</button>
-        <button class="btn" id="btnSaveRows">Сохранить</button>
-      </div>
-    </div>
-  `;
+  mount.innerHTML =
+    '<div class="block">'+
+      '<div style="margin:8px 0 6px; font-weight:600">Партии закупок — <span id="dTitle">'+row.cells[1].textContent+'</span></div>'+
+      '<table style="width:100%" id="btTable">'+
+        '<thead><tr>'+
+          '<th>Дата</th><th>Кол-во</th><th>Закуп., KZT</th><th>Комиссия, %</th><th>Маржа / шт</th><th>Код</th><th>Прим.</th><th></th>'+
+        '</tr></thead>'+
+        '<tbody id="btBody"></tbody>'+
+      '</table>'+
+      '<div class="row" style="margin-top:8px; gap:8px">'+
+        '<button class="btn secondary" id="btnAddRow">+ Добавить</button>'+
+        '<button class="btn" id="btnSaveRows">Сохранить</button>'+
+      '</div>'+
+    '</div>';
 
   const tbody = qs('#btBody', mount);
   const priceKZT = parsePriceCell(row.cells[5]);
 
   function recalc(tr){
-    const [dEl, qEl, cEl, commEl] = qsa('input', tr);
-    const uc = Number(cEl.value||0);
-    const comm = Number(commEl.value||0);
+    const inputs = tr.querySelectorAll('input');
+    const uc = Number(inputs[2].value||0);
+    const comm = Number(inputs[3].value||0);
     const net = priceKZT - (priceKZT * comm/100) - uc;
     tr.querySelector('.net').textContent = isFinite(net) ? fmt(net) : '—';
   }
 
   function addRow(data){
+    const delBtnHTML = (data && data.id) ? ('<button class="btn-link btnDel" data-id="'+data.id+'">Удалить</button>') : '';
+    const rowHTML =
+      '<td><input type="date" value="'+(data?.date || new Date().toISOString().slice(0,10))+'"></td>'+
+      '<td><input type="number" min="0" step="1" value="'+(data?.qty ?? '')+'" style="width:90px"></td>'+
+      '<td><input type="number" min="0" step="0.01" value="'+(data?.unit_cost ?? '')+'" style="width:110px"></td>'+
+      '<td><input type="number" min="0" step="0.01" value="'+(data?.commission_pct ?? '')+'" style="width:100px"></td>'+
+      '<td class="net">—</td>'+
+      '<td class="code">'+(data?.batch_code || '<span class="muted">— генерируется</span>')+'</td>'+
+      '<td><input type="text" value="'+(data?.note ?? '')+'"></td>'+
+      '<td>'+delBtnHTML+'</td>';
     const tr = document.createElement('tr');
-    const delBtnHtml = data?.id
-      ? ('<button class="btn-link btnDel" data-id="'+String(data.id)+'">Удалить</button>')
-      : '';
-    tr.innerHTML = `
-      <td><input type="date" value="${data?.date || new Date().toISOString().slice(0,10)}"></td>
-      <td><input type="number" min="0" step="1" value="${data?.qty ?? ''}" style="width:90px"></td>
-      <td><input type="number" min="0" step="0.01" value="${data?.unit_cost ?? ''}" style="width:110px"></td>
-      <td><input type="number" min="0" step="0.01" value="${data?.commission_pct ?? ''}" style="width:100px"></td>
-      <td class="net">—</td>
-      <td class="code">${data?.batch_code || '<span class="muted">— генерируется</span>'}</td>
-      <td><input type="text" value="${data?.note ?? ''}"></td>
-      <td>${delBtnHtml}</td>
-    `;
+    tr.innerHTML = rowHTML;
     tbody.appendChild(tr);
     recalc(tr);
   }
 
-  // текущие партии
   const data = await fetchJSON('/products/db/price-batches/'+encodeURIComponent(sku));
   (data.batches||[]).forEach(addRow);
 
   qs('#btnAddRow', mount).onclick = ()=> addRow({});
 
   tbody.addEventListener('input', e=>{
-    const tr = e.target.closest('tr');
+    const tr = e.target.closest('tr'); if(!tr) return;
+    recalc(tr);
+  });
+
+  tbody.addEventListener('click', async (e)=>{
+    const btn = e.target.closest('.btnDel');
+    if(!btn) return;
+    await fetchJSON('/products/db/price-batches/'+encodeURIComponent(sku)+'/'+btn.dataset.id, {method:'DELETE'});
+    btn.closest('tr').remove();
+  });
+
+  qs('#btnSaveRows', mount).onclick = async ()=>{
+    const entries = qsa('tr', tbody).map(tr=>{
+      const inputs = tr.querySelectorAll('input');
+      const codeCell = tr.children[5];
+      const rawCode = codeCell.textContent || '';
+      const hasCode = rawCode.trim().length && rawCode.indexOf('—') !== 0;
+      return {
+        date: inputs[0].value,
+        qty: Number(inputs[1].value||0),
+        unit_cost: Number(inputs[2].value||0),
+        commission_pct: inputs[3].value ? Number(inputs[3].value) : null,
+        note: inputs[5].value || null,
+        batch_code: hasCode ? rawCode.trim() : null
+      };
+    }).filter(e => e.qty>0 && e.unit_cost>0);
+    if(!entries.length){ alert('Добавьте хотя бы одну строку партии.'); return; }
+
+    await fetchJSON('/products/db/price-batches/'+encodeURIComponent(sku), {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({entries})
+    });
+    toast('Партии сохранены');
+    openDetail(row);
+  };
+}
+
+// helpers for save/export
+function tableToRows(){
+  return qsa('#tbl tbody tr').map(tr=>{
+    const t = tr.children;
+    const code = t[0].textContent.trim();
+    const name = t[1].textContent.trim();
+    const brand = t[2].textContent.trim() || null;
+    const category = t[3].textContent.trim() || null;
+    const qty = parseInt(t[4].textContent.replace(/\s/g,'')) || 0;
+    const price = parseFloat(t[5].textContent.replace(/\s/g,'')) || 0;
+    const active = t[6].querySelector('.dot')?.classList.contains('on') || false;
+    return { code, name, brand, category, qty, price, active };
+  });
+}
+
+document.addEventListener('DOMContentLoaded', ()=>{
+  qs('#btnLoadApi').onclick = ()=> loadAPI().catch(err=>toast('Ошибка API: '+err.message));
+  qs('#btnLoadDb').onclick  = ()=> loadDB().catch(err=>toast('Ошибка загрузки БД: '+err.message));
+
+  qs('#fileInput').addEventListener('change', async (e)=>{
+    const f = e.target.files?.[0]; if(!f) return;
+    try{ await importFile(f); } catch(err){ toast('Ошибка импорта: '+err.message); }
+    e.target.value = '';
+  });
+
+  qs('#restoreFile').addEventListener('change', async (e)=>{
+    const f = e.target.files?.[0]; if(!f) return;
+    const fd = new FormData(); fd.append('file', f);
+    try{
+      const res = await fetchJSON('/products/db/restore', {method:'POST', body:fd});
+      toast('БД восстановлена ('+(res.products||0)+' товаров, '+(res.batches||0)+' партий)');
+      await loadDB();
+    }catch(err){ toast('Ошибка восстановления: '+err.message); }
+    e.target.value = '';
+  });
+
+  qs('#btnBackup').onclick = ()=> { window.location = '/products/db/backup.sqlite3'; };
+
+  qs('#tbl').addEventListener('click', (e)=>{
+    const btn = e.target.closest('.btn-parties');
+    if(!btn) return;
+    const row = btn.closest('tr');
+    openDetail(row).catch(err=>toast('Ошибка партий: '+err.message));
+  });
+
+  qs('#btnSaveDb').onclick = async ()=>{
+    try{
+      const rows = tableToRows();
+      if(!rows.length){ alert('Нет строк для сохранения'); return; }
+      const res = await fetchJSON('/products/db/bulk-upsert', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(rows)
+      });
+      toast('Записано в БД. inserted='+res.inserted+', updated='+res.updated+', total='+res.total);
+      await loadDB();
+    }catch(err){ toast('Ошибка сохранения БД: '+err.message); }
+  };
+
+  qs('#btnExportDb').onclick = ()=>{
+    const p = new URLSearchParams();
+    p.set('active_only', qs('#onlyActive').checked ? '1' : '0');
+    const q = qs('#search').value.trim(); if(q) p.set('search', q);
+    window.location = '/products/db/export.csv?' + p.toString();
+  };
+
+  // автозагрузка
+  loadDB().catch(err=>toast('Ошибка старта: '+err.message));
+});
+</script>
+</body>
+</html>
