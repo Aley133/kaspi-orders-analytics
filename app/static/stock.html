@@ -138,7 +138,9 @@ async function fetchJSON(url, opts){
   return r.json();
 }
 
-function parsePriceCell(cell){ return Number((cell?.textContent||'0').toString().replace(/\\s/g,'')); }
+function parsePriceCell(cell){
+  return Number((cell?.textContent||'0').toString().replace(/\s/g,''));
+}
 
 function renderProducts(items){
   const tb = qs('#tbl tbody');
@@ -149,18 +151,18 @@ function renderProducts(items){
     tr.dataset.sku = sku;
     tr.className = 'data-row';
     const on = (it.qty||0)>0 || it.active===true;
-    tr.innerHTML = \`
-      <td>\${sku}</td>
-      <td>\${it.name||''}</td>
-      <td>\${it.brand||''}</td>
-      <td>\${it.category||''}</td>
-      <td>\${fmt(it.qty||0)}</td>
-      <td>\${fmt(it.price||0)}</td>
-      <td><span class="dot \${on?'on':''}"></span></td>
-      <td>\${fmt(it.batch_count||0)}</td>
-      <td>\${it.last_margin!=null ? fmt(it.last_margin) : '—'}</td>
+    tr.innerHTML = `
+      <td>${sku}</td>
+      <td>${it.name||''}</td>
+      <td>${it.brand||''}</td>
+      <td>${it.category||''}</td>
+      <td>${fmt(it.qty||0)}</td>
+      <td>${fmt(it.price||0)}</td>
+      <td><span class="dot ${on?'on':''}"></span></td>
+      <td>${fmt(it.batch_count||0)}</td>
+      <td>${it.last_margin!=null ? fmt(it.last_margin) : '—'}</td>
       <td class="col-right"><button class="btn-link btn-parties">Партии</button></td>
-    \`;
+    `;
     tb.appendChild(tr);
   });
 }
@@ -190,7 +192,7 @@ async function importFile(file){
   const res = await fetch('/products/manual-upload', {method:'POST', body:fd});
   if(!res.ok){ const t = await res.text(); throw new Error(t||res.statusText); }
   const data = await res.json();
-  qs('#note').textContent = \`Файл загружен: \${file.name}. Позиции: \${data.count||0}\`;
+  qs('#note').textContent = `Файл загружен: ${file.name}. Позиции: ${data.count||0}`;
   renderProducts(data.items||[]);
 }
 
@@ -213,9 +215,9 @@ async function openDetail(row){
   row.insertAdjacentElement('afterend', tr);
   const mount = tr.firstChild;
 
-  mount.innerHTML = \`
+  mount.innerHTML = `
     <div class="block">
-      <div style="margin:8px 0 6px; font-weight:600">Партии закупок — <span id="dTitle">\${row.cells[1].textContent}</span></div>
+      <div style="margin:8px 0 6px; font-weight:600">Партии закупок — <span id="dTitle">${row.cells[1].textContent}</span></div>
       <table style="width:100%" id="btTable">
         <thead>
           <tr>
@@ -229,7 +231,7 @@ async function openDetail(row){
         <button class="btn" id="btnSaveRows">Сохранить</button>
       </div>
     </div>
-  \`;
+  `;
 
   const tbody = qs('#btBody', mount);
   const priceKZT = parsePriceCell(row.cells[5]);
@@ -244,16 +246,16 @@ async function openDetail(row){
 
   function addRow(data){
     const tr = document.createElement('tr');
-    tr.innerHTML = \`
-      <td><input type="date" value="\${data?.date || new Date().toISOString().slice(0,10)}"></td>
-      <td><input type="number" min="0" step="1" value="\${data?.qty ?? ''}" style="width:90px"></td>
-      <td><input type="number" min="0" step="0.01" value="\${data?.unit_cost ?? ''}" style="width:110px"></td>
-      <td><input type="number" min="0" step="0.01" value="\${data?.commission_pct ?? ''}" style="width:100px"></td>
+    tr.innerHTML = `
+      <td><input type="date" value="${data?.date || new Date().toISOString().slice(0,10)}"></td>
+      <td><input type="number" min="0" step="1" value="${data?.qty ?? ''}" style="width:90px"></td>
+      <td><input type="number" min="0" step="0.01" value="${data?.unit_cost ?? ''}" style="width:110px"></td>
+      <td><input type="number" min="0" step="0.01" value="${data?.commission_pct ?? ''}" style="width:100px"></td>
       <td class="net">—</td>
-      <td class="code">\${data?.batch_code || '<span class="muted">— генерируется</span>'}</td>
-      <td><input type="text" value="\${data?.note ?? ''}"></td>
-      <td>\${data?.id ? \`<button class="btn-link btnDel" data-id="\${data.id}">Удалить</button>\` : ''}</td>
-    \`;
+      <td class="code">${data?.batch_code || '<span class="muted">— генерируется</span>'}</td>
+      <td><input type="text" value="${data?.note ?? ''}"></td>
+      <td>${data?.id ? `<button class="btn-link btnDel" data-id="${data.id}">Удалить</button>` : ''}</td>
+    `;
     tbody.appendChild(tr);
     recalc(tr);
   }
@@ -308,7 +310,7 @@ async function openDetail(row){
   };
 }
 
-// helpers for save/export
+// ------- helpers for save/export -------
 function tableToRows(){
   return qsa('#tbl tbody tr').map(tr=>{
     const t = tr.children;
@@ -316,8 +318,8 @@ function tableToRows(){
     const name = t[1].textContent.trim();
     const brand = t[2].textContent.trim() || null;
     const category = t[3].textContent.trim() || null;
-    const qty = parseInt(t[4].textContent.replace(/\\s/g,'')) || 0;
-    const price = parseFloat(t[5].textContent.replace(/\\s/g,'')) || 0;
+    const qty = parseInt(t[4].textContent.replace(/\s/g,'')) || 0;
+    const price = parseFloat(t[5].textContent.replace(/\s/g,'')) || 0;
     const active = t[6].querySelector('.dot')?.classList.contains('on') || false;
     return { code, name, brand, category, qty, price, active };
   });
@@ -371,6 +373,7 @@ document.addEventListener('DOMContentLoaded', ()=>{
     window.location = '/products/db/export.csv?' + p.toString();
   };
 
+  // автозагрузка
   loadDB();
 });
 </script>
