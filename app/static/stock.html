@@ -135,6 +135,13 @@ async function fetchJSON(url, opts){
   return r.json();
 }
 
+await fetch('/products/db/bulk-upsert', {
+  method: 'POST',
+  headers: {'Content-Type': 'application/json'},
+  body: JSON.stringify(rows) // [{code,name,brand,category,price,qty,active,barcode}, ...]
+});
+
+
 function parsePriceCell(cell){ return Number((cell?.textContent||'0').toString().replace(/\s/g,'')); }
 
 function renderProducts(items){
