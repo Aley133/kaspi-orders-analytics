@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from cachetools import TTLCache
 from httpx import HTTPStatusError, RequestError
+from app.api.profit_fifo import get_profit_fifo_router
     
 # --- Kaspi client import (robust) ---
 try:
@@ -92,6 +93,7 @@ client = KaspiClient(token=KASPI_TOKEN, base_url=KASPI_BASE_URL) if KASPI_TOKEN 
 orders_cache = TTLCache(maxsize=128, ttl=CACHE_TTL)
 
 app.include_router(get_products_router(client), prefix="/products")
+app.include_router(get_profit_fifo_router(), prefix="/profit")   # новый
 
 # -------------------- Utils --------------------
 def tzinfo_of(name: str) -> pytz.BaseTzInfo:
