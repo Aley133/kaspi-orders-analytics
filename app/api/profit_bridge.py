@@ -7,7 +7,7 @@ from typing import Optional, Literal, Dict, Any, List
 
 from fastapi import APIRouter, Request, HTTPException, status
 
-router = APIRouter(tags=["profit"])  # main.py включает его с prefix="/profit"
+router = APIRouter(tags=["profit"])  # main.py подключает с prefix="/profit"
 
 
 # ---------- helpers ----------
@@ -59,13 +59,8 @@ async def profit_summary(
     use_bd: Literal["0", "1"] = "0",
     bd_start: str = "20:00",
 ) -> Dict[str, Any]:
-    """
-    Обобщённый ответ для KPI и графика. Пока — заглушка с нулями,
-    чтобы фронт работал стабильно.
-    """
+    """KPI + график: пока заглушка с нулями, чтобы фронт не падал."""
     _check_key(req)
-
-    # Валидация дат (мягкая)
     try:
         _ = datetime.strptime(date_from, "%Y-%m-%d")
         _ = datetime.strptime(date_to, "%Y-%m-%d")
@@ -73,12 +68,7 @@ async def profit_summary(
         raise HTTPException(status_code=400, detail="Bad date format, expected YYYY-MM-DD")
 
     total = {"revenue": 0, "commission": 0, "cost": 0, "profit": 0}
-    rows: List[Dict[str, Any]] = []
-
-    # Для совместимости с фронтом: при group_by="total" можно вернуть пустые rows
-    if group_by != "total":
-        rows = []  # здесь позже появится реальная агрегация
-
+    rows: List[Dict[str, Any]] = []  # позже тут будет реальная агрегация
     return {"currency": "KZT", "total": total, "rows": rows}
 
 
@@ -89,9 +79,7 @@ async def profit_by_sku(
     date_to: str,
     limit: int = 50,
 ) -> Dict[str, Any]:
-    """
-    Топ SKU по прибыли. Заглушка — пустые ряды (фронт просто покажет пустую таблицу).
-    """
+    """Топ SKU по прибыли. Пока пусто."""
     _check_key(req)
     try:
         _ = datetime.strptime(date_from, "%Y-%m-%d")
@@ -108,9 +96,7 @@ async def rebuild_ledger(
     date_from: str,
     date_to: str,
 ) -> Dict[str, Any]:
-    """
-    Пересчёт FIFO-списаний за период. Сейчас — no-op с нулём пересчитанных записей.
-    """
+    """Пересчёт FIFO-списаний за период. Сейчас no-op."""
     _check_key(req)
     try:
         _ = datetime.strptime(date_from, "%Y-%m-%d")
@@ -118,7 +104,6 @@ async def rebuild_ledger(
     except ValueError:
         raise HTTPException(status_code=400, detail="Bad date format, expected YYYY-MM-DD")
 
-    # TODO: здесь будет реальный пересчёт ledger'а
     return {"recomputed": 0}
 
 
@@ -134,13 +119,8 @@ async def sync_orders_into_profit(
     states: Optional[str] = None,
     exclude_states: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """
-    Синхронизация заказов/позиций в БД FIFO.
-    Пока возвращаем «нулевые» итоги, чтобы кнопка в UI не падала.
-    """
+    """Синхронизация заказов/позиций в БД FIFO. Пока заглушка."""
     _check_key(req)
-    # TODO: здесь будет ход в твой источник заказов и запись позиций в таблицы FIFO
-
     return {
         "synced_orders": 0,
         "items_inserted": 0,
@@ -155,3 +135,11 @@ async def sync_orders_into_profit(
             "exclude_states": exclude_states,
         },
     }
+
+
+# --- совместимость с main.py ---
+def get_profit_bridge_router() -> APIRouter:
+    """Чтобы main.py мог вызывать get_profit_bridge_router()."""
+    return router
+
+__all__ = ["router", "get_profit_bridge_router"]
