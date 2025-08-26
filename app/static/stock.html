@@ -64,6 +64,7 @@
         <input type="file" id="fileInput" accept=".xml,.xlsx,.xls" style="display:none">
         <button class="btn secondary" id="btnSaveDb">Сохранить таблицу в БД</button>
         <button class="btn secondary" id="btnExportDb">Экспорт CSV (БД)</button>
+        <button class="btn secondary" id="btnApiKey">API-Key</button>
         <button class="btn secondary" id="btnLoadDb">Загрузить из БД</button>
 
         <!-- элементы только для локальной SQLite -->
@@ -374,25 +375,53 @@ document.addEventListener('DOMContentLoaded', async ()=>{
   const _origFetch = window.fetch.bind(window);
   window.fetch = function(input, init) {
     try {
-      const url = typeof input === "string" ? input : (input && input.url) || "";
-      if (url.startsWith("/products/")) {
+      let urlStr = typeof input === "string" ? input : (input && input.url) || "";
+      if (urlStr.startsWith("/products/")) {
         init = init || {};
+        const k = window.KASPI_API_KEY || "";
+
+        // Заголовок
         let headers = init.headers instanceof Headers ? init.headers : new Headers(init.headers || {});
-        if (window.KASPI_API_KEY) headers.set("X-API-Key", window.KASPI_API_KEY);
+        if (k) headers.set("X-API-Key", k);
         init.headers = headers;
+
+        // Fallback: подпишем ?api_key=... (на тот же ключ)
+        if (k) {
+          const u = new URL(urlStr, location.origin);
+          if (!u.searchParams.has("api_key")) u.searchParams.set("api_key", k);
+          if (typeof input === "string") {
+            input = u.pathname + u.search;
+          } else {
+            // пересоздаём Request, чтобы применились изменённые searchParams
+            input = new Request(u.toString(), init);
+          }
+        }
       }
-    } catch (e) {}
+    } catch (e) { /* no-op */ }
     return _origFetch(input, init);
   };
 
-  // В консоли страницы: setApiKey("твой_ключ") — сохранит ключ и включит заголовок
+  // Удобный setter (сохранит ключ и тут же начнёт подставлять)
   window.setApiKey = function(k) {
     localStorage.setItem(KEY, k || "");
     window.KASPI_API_KEY = k || "";
     console.log("API key set");
   };
+
+  // Кнопка "API-Key": спросить и сохранить
+  document.addEventListener("DOMContentLoaded", () => {
+    const btn = document.getElementById("btnApiKey");
+    if (btn) {
+      btn.addEventListener("click", () => {
+        const curr = window.KASPI_API_KEY || "";
+        const v = prompt("Введите X-API-Key (сохранится в этом браузере):", curr);
+        if (v !== null) { setApiKey(v.trim()); alert("Сохранено. Повторите действие."); }
+      });
+    }
+  });
 })();
 </script>
+
 
 <!-- Скрыть элементы с data-sqlite-only в режиме Postgres -->
 <script>
