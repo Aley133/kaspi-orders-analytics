@@ -98,7 +98,31 @@
       </section>
     </div>
   </div>
+<section class="kpi">
+  <div class="kpi-item"><div class="kpi-label">Прибыль (FIFO): период</div>
+    <div class="kpi-value" id="kpiProfit">0</div>
+  </div>
+</section>
 
+<script>
+async function loadProfitFIFO(){
+  const start = document.getElementById('start').value;
+  const end = document.getElementById('end').value;
+  const use_bd = document.getElementById('use_bd')?.checked ? '1' : '0';
+  const bd_start = document.getElementById('bd_start')?.value || '20:00';
+  const p = new URLSearchParams({date_from:start,date_to:end,group_by:'total',use_bd,use_bd,bd_start});
+  const r = await fetch('/profit/summary?'+p.toString());
+  if(!r.ok) return;
+  const data = await r.json();
+  document.getElementById('kpiProfit').textContent = `${(data.total?.profit??0).toLocaleString('ru-RU')} ${data.currency||'KZT'}`;
+}
+(async()=>{
+  // в конце твоей функции run() просто добавь:
+  // await loadIds(); // уже есть
+  // и сразу после:
+  await loadProfitFIFO();
+})();
+</script>
 <script>
 const nf = new Intl.NumberFormat('ru-RU');
 function fmt(n){ return nf.format(Math.round((Number(n) + Number.EPSILON) * 100) / 100); }
