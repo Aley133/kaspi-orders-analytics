@@ -5,14 +5,28 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Мой склад — Kaspi</title>
   <style>
-    :root{ --bg:#ffffff; --fg:#0f172a; --muted:#6b7280; --card:#f8fafc; --line:#e5e7eb; --pri:#1f7aee; --pri-weak:#e9eef6; --pill-bg:#eef2ff; --pill-fg:#3730a3; }
-    body[data-theme="dark"]{ --bg:#0b1220; --fg:#e5e7eb; --muted:#94a3b8; --card:#0f1829; --line:#1f2a37; --pri:#3b82f6; --pri-weak:#132036; --pill-bg:#1e293b; --pill-fg:#bfdbfe; }
-    *{box-sizing:border-box} html,body{height:100%} body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Helvetica Neue",Arial}
+    :root{
+      --bg:#ffffff; --fg:#0f172a; --muted:#6b7280; --card:#f8fafc; --line:#e5e7eb;
+      --pri:#1f7aee; --pri-weak:#e9eef6; --pill-bg:#eef2ff; --pill-fg:#3730a3;
+      --ok-bg:#ecfdf5; --ok-fg:#065f46; --ok-border:#a7f3d0;
+      --err-bg:#fef2f2; --err-fg:#991b1b; --err-border:#fecaca;
+      --chip:#e2e8f0;
+    }
+    body[data-theme="dark"]{
+      --bg:#0b1220; --fg:#e5e7eb; --muted:#94a3b8; --card:#0f1829; --line:#1f2a37;
+      --pri:#3b82f6; --pri-weak:#132036; --pill-bg:#1e293b; --pill-fg:#bfdbfe;
+      --ok-bg:#112a1f; --ok-fg:#a7f3d0; --ok-border:#134e4a;
+      --err-bg:#3b0d0d; --err-fg:#fecaca; --err-border:#7f1d1d;
+      --chip:#0f172a;
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Helvetica Neue",Arial}
     .layout{display:grid;grid-template-columns:220px 1fr;min-height:100vh}
     .sidebar{border-right:1px solid var(--line);padding:16px 12px;position:sticky;top:0;height:100vh}
     .brand{font-weight:800;font-size:18px;margin:4px 0 12px}
     .nav{display:flex;flex-direction:column;gap:6px;margin-bottom:16px}
-    .nav a{padding:8px 10px;border-radius:10px;color:var(--fg);opacity:.9}
+    .nav a{padding:8px 10px;border-radius:10px;color:var(--fg);opacity:.9;text-decoration:none}
     .nav a:hover{background:var(--card);opacity:1}
     .switch{display:flex;gap:8px;align-items:center;margin-top:auto;padding-top:12px;border-top:1px solid var(--line)}
     .switch input{width:40px;height:22px;appearance:none;background:var(--line);border-radius:999px;position:relative}
@@ -24,7 +38,9 @@
     .btn{background:var(--pri);color:#fff;border:0;border-radius:10px;padding:8px 12px;cursor:pointer}
     .btn.secondary{background:var(--pri-weak);color:var(--fg)}
     .btn-link{background:transparent;border:0;color:var(--pri);cursor:pointer;padding:0}
-    input[type="text"],input[type="number"],input[type="date"],select{height:34px;padding:6px 8px;border:1px solid var(--line);border-radius:10px;background:transparent;color:var(--fg)}
+    input[type="text"],input[type="number"],input[type="date"],select{
+      height:34px;padding:6px 8px;border:1px solid var(--line);border-radius:10px;background:transparent;color:var(--fg)
+    }
     table{border-collapse:collapse;width:100%}
     th,td{border-bottom:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:middle}
     thead th{position:sticky;top:0;background:var(--card);z-index:1}
@@ -32,9 +48,12 @@
     .dot{display:inline-block;width:10px;height:10px;border-radius:50%;background:#9ca3af}
     .dot.on{background:#10b981}
     .note{margin:8px 0 12px; padding:8px 10px;border-radius:8px;display:none}
-    .note.ok{display:block;background:#ecfdf5;color:#065f46;border:1px solid #a7f3d0}
-    .note.err{display:block;background:#fef2f2;color:#991b1b;border:1px solid #fecaca}
-    .detail{background:var(--card)} .block{padding:12px}
+    .note.ok{display:block;background:var(--ok-bg);color:var(--ok-fg);border:1px solid var(--ok-border)}
+    .note.err{display:block;background:var(--err-bg);color:var(--err-fg);border:1px solid var(--err-border)}
+    .detail{background:var(--card)}
+    .block{padding:12px}
+    .chip{display:inline-flex;align-items:center;gap:6px;background:var(--chip);color:var(--fg);padding:4px 8px;border-radius:999px;font-size:12px}
+    .chip .dot{width:8px;height:8px}
   </style>
 </head>
 <body data-theme="light">
@@ -43,6 +62,7 @@
       <div class="brand">⚡ LeoXpress</div>
       <nav class="nav">
         <a href="#" style="background:var(--card)">Мой склад</a>
+        <a href="/ui/index.html">Аналитика</a>
         <a href="#">Предзаказ</a>
         <a href="#">Демпинг</a>
         <a href="#">WhatsApp-рассылка</a>
@@ -64,8 +84,9 @@
         <input type="file" id="fileInput" accept=".xml,.xlsx,.xls" style="display:none">
         <button class="btn secondary" id="btnSaveDb">Сохранить таблицу в БД</button>
         <button class="btn secondary" id="btnExportDb">Экспорт CSV (БД)</button>
-        <button class="btn secondary" id="btnApiKey">API-Key</button>
         <button class="btn secondary" id="btnLoadDb">Загрузить из БД</button>
+        <button class="btn secondary" id="btnApiKey">API-Key</button>
+        <span id="apiKeyBadge" class="chip"><span class="dot"></span><span>ключ не задан</span></span>
 
         <!-- элементы только для локальной SQLite -->
         <button class="btn secondary" id="btnBackup" data-sqlite-only>Бэкап БД</button>
@@ -122,13 +143,24 @@ function setNote(msg, ok=false){
   });
 })();
 
-async function fetchJSON(url, opts){
+// --- Fetch helper с автоповтором при 401/403 (запрос ключа) ---
+async function fetchJSON(url, opts, _retry){
   const r = await fetch(url, opts||{});
+  if(r.status===401 || r.status===403){
+    if(!_retry){
+      const curr = window.KASPI_API_KEY || "";
+      const v = prompt("Укажите X-API-Key (сохранится в этом браузере):", curr);
+      if(v!==null){ window.setApiKey(v.trim()); return fetchJSON(url, opts, true); }
+    }
+    const txt = await r.text();
+    throw new Error(txt || 'Unauthorized');
+  }
   if(!r.ok){
     const txt = await r.text();
     throw new Error(txt || r.statusText || 'HTTP ' + r.status);
   }
-  return r.json();
+  const ct = r.headers.get('content-type')||'';
+  return ct.includes('application/json') ? r.json() : r.text();
 }
 
 function parsePriceCell(cell){ return Number((cell?.textContent||'0').toString().replace(/\s/g,'')); }
@@ -335,7 +367,8 @@ document.addEventListener('DOMContentLoaded', async ()=>{
     e.target.value = '';
   });
 
-  qs('#btnBackup').onclick = ()=> { window.location = '/products/db/backup.sqlite3'; };
+  const backupBtn = qs('#btnBackup');
+  if(backupBtn) backupBtn.onclick = ()=> { window.location = '/products/db/backup.sqlite3'; };
 
   qs('#tbl').addEventListener('click', (e)=>{
     const btn = e.target.closest('.btn-parties'); if(!btn) return;
@@ -366,11 +399,27 @@ document.addEventListener('DOMContentLoaded', async ()=>{
 });
 </script>
 
-<!-- Автоподстановка X-API-Key ко всем запросам /products/* -->
+<!-- Автоподстановка X-API-Key ко всем запросам /products/* + статус ключа -->
 <script>
 (() => {
   const KEY = "KASPI_API_KEY";
+  const badge = () => document.getElementById('apiKeyBadge');
+
+  function refreshKeyBadge(){
+    const v = localStorage.getItem(KEY) || "";
+    const el = badge(); if(!el) return;
+    const dot = el.querySelector('.dot'); const text = el.querySelector('span:last-child');
+    if(v){
+      dot.classList.add('on');
+      text.textContent = 'ключ установлен';
+    }else{
+      dot.classList.remove('on');
+      text.textContent = 'ключ не задан';
+    }
+  }
+
   window.KASPI_API_KEY = localStorage.getItem(KEY) || "";
+  refreshKeyBadge();
 
   const _origFetch = window.fetch.bind(window);
   window.fetch = function(input, init) {
@@ -392,7 +441,6 @@ document.addEventListener('DOMContentLoaded', async ()=>{
           if (typeof input === "string") {
             input = u.pathname + u.search;
           } else {
-            // пересоздаём Request, чтобы применились изменённые searchParams
             input = new Request(u.toString(), init);
           }
         }
@@ -405,6 +453,7 @@ document.addEventListener('DOMContentLoaded', async ()=>{
   window.setApiKey = function(k) {
     localStorage.setItem(KEY, k || "");
     window.KASPI_API_KEY = k || "";
+    refreshKeyBadge();
     console.log("API key set");
   };
 
@@ -421,7 +470,6 @@ document.addEventListener('DOMContentLoaded', async ()=>{
   });
 })();
 </script>
-
 
 <!-- Скрыть элементы с data-sqlite-only в режиме Postgres -->
 <script>
@@ -441,15 +489,12 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   const hide = (el) => { if (el) el.style.display = "none"; };
 
-  // 1) Ссылка/кнопка на backup (если есть)
   hide(document.querySelector('a[href$="/products/db/backup.sqlite3"]'));
   hide(document.querySelector('button[data-action="backup"]'));
-  // 2) Форма/кнопка restore
   document.querySelectorAll('form[action$="/products/db/restore"]').forEach(hide);
   document.querySelectorAll('button[data-action="restore"]').forEach(hide);
-  // 3) Любые элементы, помеченные атрибутом data-sqlite-only
   document.querySelectorAll("[data-sqlite-only]").forEach(hide);
-  // 4) Fallback по тексту
+  // Fallback по тексту
   document.querySelectorAll("button, a, form, div, section").forEach((el) => {
     const t = (el.innerText || "").toLowerCase();
     if (/(backup|бэкап|restore|восстанов)/.test(t)) hide(el);
