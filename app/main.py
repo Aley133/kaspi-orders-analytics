@@ -14,16 +14,6 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from cachetools import TTLCache
 from httpx import HTTPStatusError, RequestError
-
-origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
-if origins:
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=origins,
-        allow_methods=["GET","POST","PUT","DELETE","OPTIONS"],
-        allow_headers=["*"],
-        allow_credentials=False,
-    )
     
 # --- Kaspi client import (robust) ---
 try:
@@ -88,7 +78,15 @@ _EFF_BDS: str = BUSINESS_DAY_START
 
 # -------------------- FastAPI --------------------
 app = FastAPI(title="Kaspi Orders Analytics")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
+if origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_methods=["GET","POST","PUT","DELETE","OPTIONS"],
+        allow_headers=["*"],
+        allow_credentials=False,
+    )
 
 client = KaspiClient(token=KASPI_TOKEN, base_url=KASPI_BASE_URL) if KASPI_TOKEN else None
 orders_cache = TTLCache(maxsize=128, ttl=CACHE_TTL)
