@@ -14,29 +14,26 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from cachetools import TTLCache
 from httpx import HTTPStatusError, RequestError
+
+# FIFO router (используется фронтом под /profit)
 from app.api.profit_fifo import get_profit_fifo_router
-from app.api.profit_bridge import router as profit_bridge_router
-    
+
 # --- Kaspi client import (robust) ---
 try:
-    # абсолютный импорт, когда запускаем как пакет: uvicorn app.main:app
     from app.kaspi_client import KaspiClient  # type: ignore
 except Exception:
     try:
-        # относительный импорт, если интерпретатор уже внутри пакета app
         from .kaspi_client import KaspiClient  # type: ignore
-    except Exception:  # pragma: no cover
-        # крайний случай (скриптовый запуск из app/)
+    except Exception:
         from kaspi_client import KaspiClient  # type: ignore
 
-# --- products router import (robust, без маскирующего fallback на `api`) ---
+# --- products router import (robust) ---
 try:
     from app.api.products import get_products_router
 except Exception as _e1:
     try:
         from .api.products import get_products_router
     except Exception as _e2:
-        # Не уходим в `from api.products ...`, чтобы не маскировать реальную ошибку импорта
         import traceback
         print("Failed to import app.api.products:", repr(_e1), "| secondary:", repr(_e2))
         traceback.print_exc()
@@ -93,9 +90,17 @@ if origins:
 client = KaspiClient(token=KASPI_TOKEN, base_url=KASPI_BASE_URL) if KASPI_TOKEN else None
 orders_cache = TTLCache(maxsize=128, ttl=CACHE_TTL)
 
+# Роутеры
 app.include_router(get_products_router(client), prefix="/products")
-app.include_router(get_profit_fifo_router(), prefix="/profit")
-app.include_router(get_profit_bridge_router(), prefix="/profit")
+app.include_router(get_profit_fifo_router(), prefix="/profit")  # <— ИМЕННО FIFO под /profit
+
+# Опционально: profit_bridge (если есть), но на ДРУГОМ префиксе, чтобы не конфликтовать
+try:
+    from app.api.profit_bridge import get_profit_bridge_router  # type: ignore
+    app.include_router(get_profit_bridge_router(), prefix="/profit-bridge")
+except Exception as _e_bridge:
+    # тихо логируем, но не валим старт
+    print("profit_bridge is not enabled:", repr(_e_bridge))
 
 # -------------------- Utils --------------------
 def tzinfo_of(name: str) -> pytz.BaseTzInfo:
@@ -142,20 +147,17 @@ def parse_states_csv(s: Optional[str]) -> Optional[set[str]]:
         return None
     return {norm_state(x) for x in re.split(r"[\s,;]+", s) if x.strip()}
 
-# ----- robust city extraction -----
 _CITY_KEY_HINTS = {"city", "cityname", "town", "locality", "settlement"}
 
 def _normalize_city(s: str) -> str:
     if not isinstance(s, str):
         return ""
     s = s.strip()
-    # убираем "г.", "город" и берём первую часть до запятой
     s = re.sub(r"^\s*(г\.?|город)\s+", "", s, flags=re.IGNORECASE)
     s = s.split(",")[0].strip()
     return s
 
 def _deep_find_city(obj) -> str:
-    """Рекурсивно ищем строковое поле, ключ которого похож на 'city'."""
     if isinstance(obj, dict):
         for k, v in obj.items():
             kl = str(k).lower()
@@ -172,7 +174,6 @@ def _deep_find_city(obj) -> str:
     return ""
 
 def extract_city(attrs: dict) -> str:
-    # 1) явные ключи из ENV
     for k in CITY_KEYS:
         v = dict_get_path(attrs, k) if "." in k else attrs.get(k)
         if isinstance(v, str) and v.strip():
@@ -181,7 +182,6 @@ def extract_city(attrs: dict) -> str:
             res = _deep_find_city(v)
             if res:
                 return res
-    # 2) глобальный глубокий поиск по всем полям
     res = _deep_find_city(attrs)
     return res or ""
 
@@ -202,7 +202,7 @@ def extract_ms(attrs: dict, field: str) -> Optional[int]:
     if v is None:
         return None
     try:
-        return int(v)  # milliseconds typical
+        return int(v)
     except Exception:
         try:
             return int(datetime.fromisoformat(str(v).replace("Z", "+00:00")).timestamp() * 1000)
@@ -210,7 +210,6 @@ def extract_ms(attrs: dict, field: str) -> Optional[int]:
             return None
 
 def bucket_date(dt_local: datetime) -> str:
-    # дата закрытия D: окно [D-1 cutoff .. D cutoff)
     if _EFF_USE_BD:
         shift = timedelta(hours=24) - _bd_delta(_EFF_BDS)
         return (dt_local + shift).date().isoformat()
@@ -224,6 +223,8 @@ def _guess_number(attrs: dict, fallback_id: str) -> str:
     return str(fallback_id)
 
 # -------------------- Models --------------------
+from pydantic import BaseModel
+
 class DayPoint(BaseModel):
     x: str
     count: int
@@ -325,7 +326,6 @@ def _collect_range(start_dt: datetime, end_dt: datetime, tz: str, date_field: st
         except RequestError as e:
             raise HTTPException(status_code=502, detail=f"Network: {e}")
 
-    # полный список дней (с нулями)
     out_days: List[DayPoint] = []
     cur = start_dt.astimezone(tzinfo).date()
     end_d = end_dt.astimezone(tzinfo).date()
@@ -346,7 +346,6 @@ async def analytics(start: str = Query(...), end: str = Query(...), tz: str = Qu
 
     tzinfo = tzinfo_of(tz)
 
-    # эффективные настройки на запрос
     global _EFF_USE_BD, _EFF_BDS
     eff_use_bd = USE_BUSINESS_DAY if use_bd is None else bool(use_bd)
     eff_bds = BUSINESS_DAY_START if not business_day_start else business_day_start
@@ -357,7 +356,6 @@ async def analytics(start: str = Query(...), end: str = Query(...), tz: str = Qu
 
     if eff_use_bd:
         delta = _bd_delta(eff_bds)
-        # метка дня D: окно [D-1 00:00+delta .. D 00:00+delta)
         start_dt = tzinfo.localize(datetime.combine((start_dt.date() - timedelta(days=1)), time(0, 0, 0))) + delta
         end_dt = tzinfo.localize(datetime.combine(end_dt.date(), time(0, 0, 0))) + delta - timedelta(milliseconds=1)
     else:
@@ -378,7 +376,6 @@ async def analytics(start: str = Query(...), end: str = Query(...), tz: str = Qu
 
     days, cities_dict, tot, tot_amt, st_counts = _collect_range(start_dt, end_dt, tz, date_field, inc, exc)
 
-    # фронт ждёт массив {city, count}
     cities_list = [{"city": c, "count": n} for c, n in sorted(cities_dict.items(), key=lambda x: -x[1])]
 
     prev_days: List[DayPoint] = []
@@ -467,20 +464,17 @@ async def list_ids(start: str = Query(...), end: str = Query(...), tz: str = Que
         except RequestError as e:
             raise HTTPException(status_code=502, detail=f"Network: {e}")
 
-    # strict sort by local datetime
     out.sort(key=lambda it: it["date"], reverse=(order == "desc"))
 
-    # totals for whole period
     period_total_amount = round(sum(float(it.get("amount", 0) or 0) for it in out), 2)
     period_total_count = len(out)
 
-    # group by day if requested
     groups: List[Dict[str, object]] = []
     if grouped:
         cur_day: Optional[str] = None
         bucket: List[Dict[str, object]] = []
         for it in out:
-            d = str(it["date"])[:10]  # YYYY-MM-DD
+            d = str(it["date"])[:10]
             if cur_day is None:
                 cur_day = d
             if d != cur_day:
@@ -498,7 +492,6 @@ async def list_ids(start: str = Query(...), end: str = Query(...), tz: str = Que
                 "total_amount": round(sum(float(x.get("amount", 0) or 0) for x in bucket), 2),
             })
 
-    # slice after sorting (сначала сортируем/группируем, потом режем)
     if limit and limit > 0:
         out = out[:limit]
 
