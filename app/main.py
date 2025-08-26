@@ -15,6 +15,16 @@ from pydantic import BaseModel
 from cachetools import TTLCache
 from httpx import HTTPStatusError, RequestError
 
+origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
+if origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_methods=["GET","POST","PUT","DELETE","OPTIONS"],
+        allow_headers=["*"],
+        allow_credentials=False,
+    )
+    
 # --- Kaspi client import (robust) ---
 try:
     # абсолютный импорт, когда запускаем как пакет: uvicorn app.main:app
