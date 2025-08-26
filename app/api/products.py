@@ -10,7 +10,7 @@ import sqlite3
 from xml.etree import ElementTree as ET
 
 
-def require_api_key(req: Request):
+def require_api_key(req: Request) -> bool:
     api_key = os.getenv("API_KEY")
     if not api_key:        # если ключ не задан, пускать всех (режим dev)
         return True
