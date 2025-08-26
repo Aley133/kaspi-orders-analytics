@@ -65,9 +65,11 @@
         <button class="btn secondary" id="btnSaveDb">Сохранить таблицу в БД</button>
         <button class="btn secondary" id="btnExportDb">Экспорт CSV (БД)</button>
         <button class="btn secondary" id="btnLoadDb">Загрузить из БД</button>
-        <button class="btn secondary" id="btnBackup">Бэкап БД</button>
-        <label class="btn secondary" for="restoreFile">Восстановить БД</label>
-        <input type="file" id="restoreFile" accept=".sqlite3" style="display:none">
+
+        <!-- элементы только для локальной SQLite -->
+        <button class="btn secondary" id="btnBackup" data-sqlite-only>Бэкап БД</button>
+        <label class="btn secondary" for="restoreFile" data-sqlite-only>Восстановить БД</label>
+        <input type="file" id="restoreFile" accept=".sqlite3" style="display:none" data-sqlite-only>
       </div>
 
       <div id="note" class="note"></div>
@@ -303,12 +305,13 @@ function tableToRows(){
 }
 
 document.addEventListener('DOMContentLoaded', async ()=>{
-  // проверка, что роутер действительно под /products
+  // ping: показываем безопасный драйвер, без подробностей урла
   try{
     const ping = await fetchJSON('/products/db/ping');
-    setNote('Бэкенд OK (integrity_check=' + (ping.ok ? 'ok':'fail') + ', ' + ping.db_path + ')', true);
+    const backend = ping?.driver ? ('db=' + ping.driver) : (ping?.db_path || '');
+    setNote('Бэкенд OK (integrity=' + (ping.ok ? 'ok':'fail') + '; ' + backend + ')', true);
   }catch(e){
-    setNote('Не найден /products/db/ping. Вероятно, роутер подключён НЕ под префиксом /products. Проверь main.py -> include_router(..., prefix="/products").');
+    setNote('Не найден /products/db/ping. Проверь main.py -> include_router(..., prefix="/products").');
   }
 
   qs('#btnLoadApi').onclick = loadAPI;
@@ -361,10 +364,11 @@ document.addEventListener('DOMContentLoaded', async ()=>{
   loadDB();
 });
 </script>
-  <script>
+
+<!-- Автоподстановка X-API-Key ко всем запросам /products/* -->
+<script>
 (() => {
   const KEY = "KASPI_API_KEY";
-  // Прочитать ключ из localStorage (задать: setApiKey("..."))
   window.KASPI_API_KEY = localStorage.getItem(KEY) || "";
 
   const _origFetch = window.fetch.bind(window);
@@ -373,16 +377,15 @@ document.addEventListener('DOMContentLoaded', async ()=>{
       const url = typeof input === "string" ? input : (input && input.url) || "";
       if (url.startsWith("/products/")) {
         init = init || {};
-        // Приводим headers к Headers, чтобы set работал всегда
         let headers = init.headers instanceof Headers ? init.headers : new Headers(init.headers || {});
         if (window.KASPI_API_KEY) headers.set("X-API-Key", window.KASPI_API_KEY);
         init.headers = headers;
       }
-    } catch (e) { /* no-op */ }
+    } catch (e) {}
     return _origFetch(input, init);
   };
 
-  // Утилита: сохранить ключ в localStorage и сразу применить
+  // В консоли страницы: setApiKey("твой_ключ") — сохранит ключ и включит заголовок
   window.setApiKey = function(k) {
     localStorage.setItem(KEY, k || "");
     window.KASPI_API_KEY = k || "";
@@ -390,17 +393,17 @@ document.addEventListener('DOMContentLoaded', async ()=>{
   };
 })();
 </script>
-  <script>
+
+<!-- Скрыть элементы с data-sqlite-only в режиме Postgres -->
+<script>
 document.addEventListener("DOMContentLoaded", async () => {
   let isPG = false;
   try {
     const r = await fetch("/products/db/ping");
     const j = await r.json();
-    // Предпочитаем безопасный флаг driver, но есть и fallback на старый формат
     if (j && typeof j.driver === "string") {
       isPG = (j.driver === "pg");
     } else if (j && j.db_path) {
-      // Старое поведение: пытаемся угадать по строке
       isPG = String(j.db_path).startsWith("postgres");
     }
   } catch (e) {}
@@ -417,7 +420,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.querySelectorAll('button[data-action="restore"]').forEach(hide);
   // 3) Любые элементы, помеченные атрибутом data-sqlite-only
   document.querySelectorAll("[data-sqlite-only]").forEach(hide);
-  // 4) Попытка скрыть заметные блоки по тексту (fallback)
+  // 4) Fallback по тексту
   document.querySelectorAll("button, a, form, div, section").forEach((el) => {
     const t = (el.innerText || "").toLowerCase();
     if (/(backup|бэкап|restore|восстанов)/.test(t)) hide(el);
