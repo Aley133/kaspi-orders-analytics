@@ -106,22 +106,31 @@
 
 <script>
 async function loadProfitFIFO(){
-  const start = document.getElementById('start').value;
-  const end = document.getElementById('end').value;
-  const use_bd = document.getElementById('use_bd')?.checked ? '1' : '0';
-  const bd_start = document.getElementById('bd_start')?.value || '20:00';
-  const p = new URLSearchParams({date_from:start,date_to:end,group_by:'total',use_bd,use_bd,bd_start});
-  const r = await fetch('/profit/summary?'+p.toString());
-  if(!r.ok) return;
+  const startEl = document.getElementById('start');
+  const endEl   = document.getElementById('end');
+  const df = (startEl && startEl.value) ? startEl.value : '';
+  const dt = (endEl   && endEl.value)   ? endEl.value   : '';
+  if(!df || !dt) return; // не знаем диапазон — просто не дергаем API
+
+  const use_bd  = document.getElementById('use_bd')?.checked ? '1' : '0';
+  const bd_start= document.getElementById('bd_start')?.value || '20:00';
+
+  const p = new URLSearchParams({ start: df, end: dt, group_by: 'total', use_bd, bd_start });
+  const r = await fetch('/profit/summary?' + p.toString());
+  if(!r.ok){ console.warn('profit/summary:', await r.text()); return; }
   const data = await r.json();
-  document.getElementById('kpiProfit').textContent = `${(data.total?.profit??0).toLocaleString('ru-RU')} ${data.currency||'KZT'}`;
+  // выведи куда нужно (пример):
+  const el = document.getElementById('kpiProfit');
+  if(el) el.textContent = `${(data.total?.profit ?? 0).toLocaleString('ru-RU')} ${data.currency||'KZT'}`;
 }
-(async()=>{
-  // в конце твоей функции run() просто добавь:
-  // await loadIds(); // уже есть
-  // и сразу после:
-  await loadProfitFIFO();
-})();
+
+// вызывй после того, как применены даты (там, где у тебя уже вызывается перерисовка analytics)
+document.addEventListener('DOMContentLoaded', () => {
+  // если у тебя есть функция run() или apply(), повесь сюда:
+  // window.addEventListener('leox:filters-applied', loadProfitFIFO)
+  // либо просто задержка, чтобы поля дат успели заполниться:
+  setTimeout(loadProfitFIFO, 100);
+});
 </script>
 <script>
 const nf = new Intl.NumberFormat('ru-RU');
