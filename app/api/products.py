@@ -473,11 +473,11 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
         if _USE_PG:
             with _db() as c:
                 c.execute(_q("SELECT 1"))
-            return {"ok": True, "db_path": os.getenv("DATABASE_URL", "")}
+            return {"ok": True, "driver": "pg"}
         else:
             with _db() as c:
                 ok = c.execute("PRAGMA integrity_check").fetchone()[0]
-            return {"ok": ok == "ok", "db_path": DB_PATH}
+            return {"ok": ok == "ok", "driver": "sqlite"}
 
     # ---- Каталог из Kaspi API ----
     @router.get("/list")
