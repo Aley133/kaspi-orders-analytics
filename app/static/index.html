@@ -6,6 +6,14 @@
   <title>Kaspi Orders Analytics</title>
   <link rel="stylesheet" href="style.css" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    /* Маленькие утилиты, чтобы не править style.css */
+    .chip{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:999px;padding:4px 8px;background:var(--card);font-size:12px}
+    .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#9ca3af}
+    .dot.on{background:#10b981}
+    .table{width:100%;border-collapse:collapse}
+    .table th,.table td{border-bottom:1px solid var(--line);padding:8px 10px;text-align:left}
+  </style>
 </head>
 <body data-theme="light">
   <div class="layout">
@@ -73,49 +81,58 @@
         </div>
       </section>
 
-      <!-- ======== KPI Прибыли (FIFO) ======== -->
+      <!-- ======== KPI Прибыли (FIFO) + график + таблицы ======== -->
       <section class="shell">
         <div class="row" style="justify-content:space-between;align-items:center;">
           <h2 style="margin:0">Прибыль (FIFO)</h2>
-          <div class="row">
+          <div class="row" style="gap:10px;align-items:center">
+            <span id="profitKeyBadge" class="chip"><span class="dot"></span><span>ключ не задан</span></span>
+            <button type="button" class="btn secondary" id="btnProfitApiKey">API-Key</button>
             <label for="profitGroup">Группировка</label>
             <select id="profitGroup">
               <option value="day">День</option>
               <option value="week">Неделя</option>
               <option value="month">Месяц</option>
             </select>
+            <button type="button" class="btn secondary" id="btnProfitRebuild" title="Пересчитать списания FIFO за выбранный период">Перестроить FIFO</button>
           </div>
         </div>
 
+        <div id="profitDbInfo" class="muted" style="margin:6px 0 10px"></div>
         <div class="kpi" style="margin-top:10px">
-          <div class="kpi-item">
-            <div class="kpi-label">Выручка</div>
-            <div class="kpi-value" id="kpiPRevenue">0</div>
-          </div>
-          <div class="kpi-item">
-            <div class="kpi-label">Комиссия</div>
-            <div class="kpi-value" id="kpiPCommission">0</div>
-          </div>
-          <div class="kpi-item">
-            <div class="kpi-label">Себестоимость</div>
-            <div class="kpi-value" id="kpiPCost">0</div>
-          </div>
-          <div class="kpi-item">
-            <div class="kpi-label">Прибыль</div>
-            <div class="kpi-value" id="kpiPProfit">0</div>
-          </div>
+          <div class="kpi-item"><div class="kpi-label">Выручка</div><div class="kpi-value" id="kpiPRevenue">0</div></div>
+          <div class="kpi-item"><div class="kpi-label">Комиссия</div><div class="kpi-value" id="kpiPCommission">0</div></div>
+          <div class="kpi-item"><div class="kpi-label">Себестоимость</div><div class="kpi-value" id="kpiPCost">0</div></div>
+          <div class="kpi-item"><div class="kpi-label">Прибыль</div><div class="kpi-value" id="kpiPProfit">0</div></div>
         </div>
 
-        <div id="profitChartHolder" style="margin-top:10px">
+        <div id="profitChartHolder" style="margin-top:8px">
           <canvas id="profitChart"></canvas>
         </div>
         <div id="profitEmpty" class="muted" style="display:none;padding:8px 0">Нет данных для выбранного периода</div>
+
+        <div class="row" style="gap:16px; margin-top:16px; align-items:flex-start; flex-wrap:wrap">
+          <div style="flex:1; min-width:320px">
+            <h3 style="margin:0 0 6px">Таблица периодов</h3>
+            <table id="tbl-profit" class="table">
+              <thead><tr><th>Период</th><th>Выручка</th><th>Комиссия</th><th>Себестоимость</th><th>Прибыль</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div style="flex:1; min-width:320px">
+            <h3 style="margin:0 0 6px">Топ SKU по прибыли</h3>
+            <table id="tbl-profit-sku" class="table">
+              <thead><tr><th>SKU</th><th>Выручка</th><th>Комиссия</th><th>Себестоимость</th><th>Прибыль</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
       </section>
-      <!-- ======== /KPI Прибыли ======== -->
+      <!-- ======== /FIFO ======== -->
 
       <section class="shell">
         <h2>Топ города</h2>
-        <div id="chart-cies"><canvas id="cities"></canvas></div>
+        <div id="chart-cities"><canvas id="cities"></canvas></div>
       </section>
 
       <section class="shell">
@@ -141,7 +158,7 @@
 <script>
 const nf = new Intl.NumberFormat('ru-RU');
 function fmt(n){ return nf.format(Math.round((Number(n) + Number.EPSILON) * 100) / 100); }
-function table(id, rows){
+function tableFill(id, rows){
   const tb = document.querySelector(`#${id} tbody`);
   tb.innerHTML = '';
   for(const r of rows){
@@ -160,7 +177,6 @@ async function loadMeta(){
     const r = await fetch('/meta');
     if(!r.ok) throw new Error();
     const meta = await r.json();
-    // date_field options
     const sel = document.getElementById('date_field');
     sel.innerHTML = '';
     (meta.date_field_options || ['creationDate']).forEach(v=>{
@@ -169,8 +185,7 @@ async function loadMeta(){
     sel.value = meta.date_field_default || 'creationDate';
     document.getElementById('tz').value = meta.timezone || 'Asia/Almaty';
     document.getElementById('bd_start').value = meta.business_day_start || '20:00';
-  } catch(e){ /* ignore meta errors */ }
-  // defaults: today
+  } catch(e){ /* ignore */ }
   const today = new Date(); const iso = d=>d.toISOString().slice(0,10);
   document.getElementById('start').value = iso(today);
   document.getElementById('end').value = iso(today);
@@ -208,9 +223,7 @@ async function run(e){
   document.getElementById('periodLabel').textContent = `${data.range.start} → ${data.range.end}`;
 
   const cutoffEl = document.getElementById('periodCutoff');
-  if(cutoffEl){
-    cutoffEl.textContent = (use_bd==='1' ? (bd_start || '20:00') : '24:00');
-  }
+  if(cutoffEl){ cutoffEl.textContent = (use_bd==='1' ? (bd_start || '20:00') : '24:00'); }
   const bdInfo = document.getElementById('bdInfo');
   if(bdInfo){
     bdInfo.textContent = (use_bd==='1' ? `День магазина: ${bd_start||'20:00'} → ${bd_start||'20:00'}` : 'День магазина: выключен');
@@ -229,12 +242,12 @@ async function run(e){
   if(entries.length===0){ sb.innerHTML = '<div class="muted">Нет данных</div>'; }
 
   // Таблица дней
-  table('tbl-days', (data.days||[]).map(d=>[d.x, d.count, `${fmt(d.amount)} ${window.APP_CURRENCY}`]));
+  tableFill('tbl-days', (data.days||[]).map(d=>[d.x, d.count, `${fmt(d.amount)} ${window.APP_CURRENCY}`]));
 
-  // Топ города (Chart.js)
+  // Топ города
   const labels = (data.cities||[]).map(c=>c.city);
   const counts = (data.cities||[]).map(c=>c.count);
-  const holder = document.getElementById('chart-cities') || document.getElementById('chart-cies');
+  const holder = document.getElementById('chart-cities');
   holder.innerHTML = '<canvas id="cities"></canvas>';
   if(labels.length===0){
     holder.innerHTML = '<div class="muted" style="padding:12px">Нет данных по городам</div>';
@@ -248,11 +261,8 @@ async function run(e){
     });
   }
 
-  // Номера заказов
   await loadIds();
-
-  // Прибыль (FIFO)
-  await loadProfitFIFO();
+  await loadProfitFIFO(); // KPI + график + таблицы
 }
 
 async function loadIds(){
@@ -281,7 +291,6 @@ async function loadIds(){
   const container = document.getElementById('ids');
   container.innerHTML = '';
 
-  // Итоги по периоду (шт. и сумма)
   const totalCount = (typeof data.period_total_count === 'number') ? data.period_total_count : (data.items||[]).length;
   const totalAmount = (typeof data.period_total_amount === 'number') ? data.period_total_amount : (data.items||[]).reduce((a,it)=>a+(Number(it.amount)||0),0);
   const summary = document.createElement('div');
@@ -289,7 +298,6 @@ async function loadIds(){
   summary.innerHTML = `<span>Итого за период:</span> <b>${fmt(totalCount)}</b><span>шт.</span> <span>·</span> <b>${fmt(totalAmount)}</b> <span>${currency}</span>`;
   container.appendChild(summary);
 
-  // Панель действий
   const bar = document.createElement('div');
   bar.className='ids-actions';
   const btnCopy = document.createElement('button'); btnCopy.className='btn'; btnCopy.textContent='Скопировать номера';
@@ -307,7 +315,6 @@ async function loadIds(){
   bar.appendChild(btnCopy); bar.appendChild(btnCsv); bar.appendChild(btnExpand); bar.appendChild(btnCollapse);
   container.appendChild(bar);
 
-  // Группы по датам
   const wrapper = document.createElement('div');
   wrapper.className='ids-groups';
   container.appendChild(wrapper);
@@ -336,63 +343,161 @@ async function loadIds(){
   btnCollapse.onclick = ()=> detailsList.forEach(d=>d.open=false);
 }
 
-/* ====== Прибыль FIFO: KPI + график ====== */
-async function loadProfitFIFO(){
-  const startEl = document.getElementById('start');
-  const endEl   = document.getElementById('end');
-  const df = (startEl && startEl.value) ? startEl.value : '';
-  const dt = (endEl   && endEl.value)   ? endEl.value   : '';
-  if(!df || !dt) return; // без диапазона не дёргаем API
+/* ====== Блок FIFO ====== */
+/* Ключ и автоподстановка X-API-Key/ ?api_key= только для /profit/* */
+(() => {
+  const KEY = "KASPI_API_KEY";
+  const badge = ()=>document.getElementById('profitKeyBadge');
+  function refreshBadge(){
+    const v = localStorage.getItem(KEY) || "";
+    const el = badge(); if(!el) return;
+    el.querySelector('.dot').classList.toggle('on', !!v);
+    el.querySelector('span:last-child').textContent = v ? 'ключ установлен' : 'ключ не задан';
+  }
+  window.KASPI_API_KEY = localStorage.getItem(KEY) || ""; refreshBadge();
 
-  const use_bd   = document.getElementById('use_bd')?.checked ? '1' : '0';
-  const bd_start = document.getElementById('bd_start')?.value || '20:00';
-  const group_by = document.getElementById('profitGroup')?.value || 'day';
+  const origFetch = window.fetch.bind(window);
+  window.fetch = function(input, init){
+    try{
+      const urlStr = typeof input === 'string' ? input : (input && input.url) || '';
+      if (urlStr.startsWith('/profit/')) {
+        init = init || {};
+        const k = window.KASPI_API_KEY || '';
+        let headers = init.headers instanceof Headers ? init.headers : new Headers(init.headers || {});
+        if (k) headers.set('X-API-Key', k);
+        init.headers = headers;
+        if (k) {
+          const u = new URL(urlStr, location.origin);
+          if (!u.searchParams.has('api_key')) u.searchParams.set('api_key', k);
+          if (typeof input === 'string') input = u.pathname + u.search; else input = new Request(u.toString(), init);
+        }
+      }
+    }catch(e){}
+    return origFetch(input, init);
+  };
 
-  const p = new URLSearchParams({ start: df, end: dt, group_by, use_bd, bd_start });
-  const r = await fetch('/profit/summary?' + p.toString());
+  window.setApiKey = function(k){
+    localStorage.setItem(KEY, k || '');
+    window.KASPI_API_KEY = k || '';
+    refreshBadge();
+  };
+
+  document.addEventListener('DOMContentLoaded', ()=>{
+    const btn = document.getElementById('btnProfitApiKey');
+    if(btn){
+      btn.addEventListener('click', ()=>{
+        const v = prompt('Введите X-API-Key (сохранится в этом браузере):', window.KASPI_API_KEY||'');
+        if(v!==null){ setApiKey(v.trim()); alert('Сохранено. Повторите действие.'); }
+      });
+    }
+  });
+})();
+
+async function fetchProfitJSON(url, opts, _retry){
+  const r = await fetch(url, opts||{});
+  if(r.status===401 || r.status===403){
+    if(!_retry){
+      const v = prompt('Укажите X-API-Key для блока FIFO:', window.KASPI_API_KEY||'');
+      if(v!==null){ window.setApiKey(v.trim()); return fetchProfitJSON(url, opts, true); }
+    }
+    throw new Error(await r.text() || 'Unauthorized');
+  }
   if(!r.ok){
-    console.warn('profit/summary:', await r.text());
-    return;
+    throw new Error((await r.text()) || r.statusText || 'HTTP '+r.status);
   }
-  const data = await r.json();
-  const cur = data.currency || window.APP_CURRENCY || 'KZT';
+  const ct = r.headers.get('content-type')||'';
+  return ct.includes('application/json') ? r.json() : r.text();
+}
 
-  // KPI
-  const t = data.total || {revenue:0, commission:0, cost:0, profit:0};
-  const set = (id,val)=>{ const el=document.getElementById(id); if(el) el.textContent = `${fmt(val)} ${cur}`; };
-  set('kpiPRevenue', t.revenue||0);
-  set('kpiPCommission', t.commission||0);
-  set('kpiPCost', t.cost||0);
-  set('kpiPProfit', t.profit||0);
+function setFifoKPIs(total, cur){
+  const t = total || {revenue:0, commission:0, cost:0, profit:0};
+  document.getElementById('kpiPRevenue').textContent   = `${fmt(t.revenue||0)} ${cur}`;
+  document.getElementById('kpiPCommission').textContent= `${fmt(t.commission||0)} ${cur}`;
+  document.getElementById('kpiPCost').textContent      = `${fmt(t.cost||0)} ${cur}`;
+  document.getElementById('kpiPProfit').textContent    = `${fmt(t.profit||0)} ${cur}`;
+}
 
-  // Chart
-  const rows = data.rows || [];
+function drawProfitChart(rows, cur){
+  const empty = document.getElementById('profitEmpty');
   const holder = document.getElementById('profitChartHolder');
-  const empty  = document.getElementById('profitEmpty');
-  if(rows.length === 0){
-    if(profitChart){ profitChart.destroy(); profitChart=null; }
-    empty.style.display='block';
-    holder.style.display='none';
-    return;
-  }
-  empty.style.display='none';
-  holder.style.display='block';
-
+  const ctx = document.getElementById('profitChart').getContext('2d');
+  if(profitChart){ profitChart.destroy(); profitChart=null; }
+  if(!rows.length){ empty.style.display='block'; holder.style.display='none'; return; }
+  empty.style.display='none'; holder.style.display='block';
   const labels = rows.map(r=>r.period);
   const values = rows.map(r=>Number(r.profit||0));
-  const ctx = document.getElementById('profitChart').getContext('2d');
-  if(profitChart) profitChart.destroy();
   profitChart = new Chart(ctx, {
-    type: 'bar',
-    data: { labels, datasets:[{ label:'Прибыль', data: values }] },
-    options: {
+    type:'bar',
+    data:{ labels, datasets:[{ label:'Прибыль', data: values }] },
+    options:{
       responsive:true,
       plugins:{ legend:{ display:false }, tooltip:{ callbacks:{ label:(ctx)=>`Прибыль: ${fmt(ctx.parsed.y)} ${cur}` } } },
       scales:{ x:{ ticks:{ maxRotation:0 } }, y:{ beginAtZero:true } }
     }
   });
 }
-/* ====== /Прибыль FIFO ====== */
+
+async function pingProfitDb(){
+  try{
+    const info = await fetchProfitJSON('/profit/db/ping');
+    const driver = info?.driver || (info?.db_path?.startsWith('postgres') ? 'pg' : 'sqlite');
+    document.getElementById('profitDbInfo').textContent = `FIFO DB: ${driver}`;
+  }catch(e){
+    document.getElementById('profitDbInfo').textContent = '';
+  }
+}
+
+async function rebuildFifo(){
+  const df = document.getElementById('start').value;
+  const dt = document.getElementById('end').value;
+  if(!df || !dt){ alert('Сначала задайте период (начало/конец).'); return; }
+  try{
+    const p = new URLSearchParams({ date_from: df, date_to: dt });
+    const res = await fetchProfitJSON('/profit/rebuild-ledger?' + p.toString(), { method:'POST' });
+    setNote(`FIFO перестроен. Добавлено списаний: ${res?.recomputed||0}`, true);
+    await loadProfitFIFO(); // сразу обновим KPI/график
+  }catch(e){
+    setNote('Перестроение FIFO не удалось: ' + e.message);
+  }
+}
+
+async function loadProfitFIFO(){
+  const df = document.getElementById('start').value;
+  const dt = document.getElementById('end').value;
+  if(!df || !dt) return;
+
+  const use_bd   = document.getElementById('use_bd')?.checked ? '1' : '0';
+  const bd_start = document.getElementById('bd_start')?.value || '20:00';
+  const group_by = document.getElementById('profitGroup')?.value || 'day';
+
+  try{
+    // summary
+    const p = new URLSearchParams({ date_from: df, date_to: dt, group_by, use_bd, bd_start });
+    const sum = await fetchProfitJSON('/profit/summary?' + p.toString());
+    const cur = sum.currency || window.APP_CURRENCY || 'KZT';
+    setFifoKPIs(sum.total, cur);
+    drawProfitChart(sum.rows||[], cur);
+
+    // таблица периодов
+    tableFill('tbl-profit', (sum.rows||[]).map(r=>[
+      r.period, `${fmt(r.revenue)} ${cur}`, `${fmt(r.commission)} ${cur}`, `${fmt(r.cost)} ${cur}`, `${fmt(r.profit)} ${cur}`
+    ]));
+
+    // топ sku
+    const s = new URLSearchParams({ date_from: df, date_to: dt, limit: 50 });
+    const top = await fetchProfitJSON('/profit/by-sku?' + s.toString());
+    tableFill('tbl-profit-sku', (top.rows||[]).map(x=>[
+      x.sku, `${fmt(x.revenue)} ${cur}`, `${fmt(x.commission)} ${cur}`, `${fmt(x.cost)} ${cur}`, `${fmt(x.profit)} ${cur}`
+    ]));
+  }catch(e){
+    console.warn('FIFO:', e);
+    setFifoKPIs({revenue:0,commission:0,cost:0,profit:0}, window.APP_CURRENCY||'KZT');
+    drawProfitChart([], window.APP_CURRENCY||'KZT');
+    tableFill('tbl-profit', []);
+    tableFill('tbl-profit-sku', []);
+  }
+}
+/* ====== /FIFO ====== */
 
 document.addEventListener('DOMContentLoaded', async () => {
   await loadMeta();
@@ -401,7 +506,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.body.setAttribute('data-theme', e.target.checked ? 'dark' : 'light');
   });
   document.getElementById('profitGroup').addEventListener('change', loadProfitFIFO);
-  run(); // initial загрузка всего
+  document.getElementById('btnProfitRebuild').addEventListener('click', rebuildFifo);
+  await pingProfitDb();
+  run(); // initial
 });
 </script>
 </body>
