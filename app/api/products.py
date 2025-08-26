@@ -1,11 +1,12 @@
 from __future__ import annotations
 from typing import Callable, Optional, List, Dict, Any, Tuple
 from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Body
-from fastapi.responses import Response, JSONResponse, FileResponse
+from fastapi.responses import Response, FileResponse
 from pydantic import BaseModel
 import secrets
 import io
-import sqlite3, os, shutil
+import os, shutil
+import sqlite3
 from xml.etree import ElementTree as ET
 
 # ===== optional deps for Excel =====
@@ -28,6 +29,18 @@ except Exception:
             ProductStock = None
             normalize_row = None  # fallback ниже
 
+# ====== DB backend switch (PG via SQLAlchemy / fallback SQLite) ======
+from contextlib import contextmanager
+
+try:
+    from sqlalchemy import create_engine, text, select, func  # type: ignore
+    _SQLA_OK = True
+except Exception:
+    _SQLA_OK = False
+
+DATABASE_URL = os.getenv("DATABASE_URL")  # postgresql+psycopg://... (Neon)
+_USE_PG = bool(DATABASE_URL and _SQLA_OK)
+
 def _resolve_db_path() -> str:
     target = os.getenv("DB_PATH", "/data/kaspi-orders.sqlite3")
     target_dir = os.path.dirname(target)
@@ -41,7 +54,7 @@ def _resolve_db_path() -> str:
 
 DB_PATH = _resolve_db_path()
 
-# Перенос старой локальной БД -> /data
+# Миграция старого файла БД (если был) в /data
 _OLD_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data.sqlite3"))
 if DB_PATH != _OLD_PATH and os.path.exists(_OLD_PATH) and not os.path.exists(DB_PATH):
     try:
@@ -50,77 +63,170 @@ if DB_PATH != _OLD_PATH and os.path.exists(_OLD_PATH) and not os.path.exists(DB_
     except Exception:
         pass
 
-def _db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+# SQL helpers
+if _USE_PG:
+    _engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True)
 
-def _gen_batch_code(conn: sqlite3.Connection) -> str:
+@contextmanager
+def _db():
+    """
+    Универсальный контекст:
+    - для PG возвращает SQLAlchemy Connection (begin)
+    - для SQLite возвращает sqlite3.Connection
+    """
+    if _USE_PG:
+        with _engine.begin() as conn:
+            yield conn
+    else:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+def _q(sql: str):
+    """Обёртка: в PG используем text(), в SQLite возвращаем сырой SQL"""
+    return text(sql) if _USE_PG else sql
+
+def _rows_to_dicts(rows):
+    """Приводит результат rowset к списку dict для обоих бэкендов"""
+    if _USE_PG:
+        return [dict(r._mapping) for r in rows]
+    return [dict(r) for r in rows]
+
+# ===== генерация кода партии для SQLite; в PG генерим на стороне SQL
+def _gen_batch_code_sqlite(conn: sqlite3.Connection) -> str:
     alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
     while True:
         code = "".join(secrets.choice(alphabet) for _ in range(6))
         if not conn.execute("SELECT 1 FROM batches WHERE batch_code=?", (code,)).fetchone():
             return code
 
+# ===== создание схемы
 def _ensure_schema():
-    with _db() as c:
-        c.executescript("""
-        PRAGMA journal_mode=WAL;
+    if _USE_PG:
+        with _db() as c:
+            # products
+            c.execute(_q("""
+            CREATE TABLE IF NOT EXISTS products(
+                sku TEXT PRIMARY KEY,
+                name TEXT,
+                brand TEXT,
+                category TEXT,
+                price DOUBLE PRECISION,
+                quantity INTEGER,
+                active INTEGER DEFAULT 1,
+                barcode TEXT,
+                updated_at TIMESTAMP DEFAULT NOW()
+            );
+            """))
+            # batches
+            c.execute(_q("""
+            CREATE TABLE IF NOT EXISTS batches(
+                id SERIAL PRIMARY KEY,
+                sku TEXT NOT NULL REFERENCES products(sku) ON DELETE CASCADE,
+                date DATE NOT NULL,
+                qty INTEGER NOT NULL,
+                unit_cost DOUBLE PRECISION NOT NULL,
+                note TEXT,
+                commission_pct DOUBLE PRECISION,
+                batch_code TEXT UNIQUE,
+                created_at TIMESTAMP DEFAULT NOW()
+            );
+            """))
+            # categories
+            c.execute(_q("""
+            CREATE TABLE IF NOT EXISTS categories(
+                name TEXT PRIMARY KEY,
+                base_percent DOUBLE PRECISION DEFAULT 0.0,
+                extra_percent DOUBLE PRECISION DEFAULT 3.0,
+                tax_percent DOUBLE PRECISION DEFAULT 0.0
+            );
+            """))
+            # сгенерировать отсутствующие batch_code
+            c.execute(_q("""
+            UPDATE batches
+               SET batch_code = CONCAT(
+                    SUBSTRING('ABCDEFGHJKLMNPQRSTUVWXYZ23456789' FROM floor(random()*32)::int + 1 FOR 1),
+                    SUBSTRING('ABCDEFGHJKLMNPQRSTUVWXYZ23456789' FROM floor(random()*32)::int + 1 FOR 1),
+                    SUBSTRING('ABCDEFGHJKLMNPQRSTUVWXYZ23456789' FROM floor(random()*32)::int + 1 FOR 1),
+                    SUBSTRING('ABCDEFGHJKLMNPQRSTUVWXYZ23456789' FROM floor(random()*32)::int + 1 FOR 1),
+                    SUBSTRING('ABCDEFGHJKLMNPQRSTUVWXYZ23456789' FROM floor(random()*32)::int + 1 FOR 1),
+                    SUBSTRING('ABCDEFGHJKLMNPQRSTUVWXYZ23456789' FROM floor(random()*32)::int + 1 FOR 1)
+               )
+             WHERE (batch_code IS NULL OR batch_code='');
+            """))
+    else:
+        with _db() as c:
+            c.executescript("""
+            PRAGMA journal_mode=WAL;
 
-        CREATE TABLE IF NOT EXISTS products(
-            sku TEXT PRIMARY KEY,
-            name TEXT,
-            brand TEXT,
-            category TEXT,
-            price REAL,
-            quantity INTEGER,
-            active INTEGER DEFAULT 1,
-            barcode TEXT,
-            updated_at TEXT
-        );
+            CREATE TABLE IF NOT EXISTS products(
+                sku TEXT PRIMARY KEY,
+                name TEXT,
+                brand TEXT,
+                category TEXT,
+                price REAL,
+                quantity INTEGER,
+                active INTEGER DEFAULT 1,
+                barcode TEXT,
+                updated_at TEXT
+            );
 
-        CREATE TABLE IF NOT EXISTS batches(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            sku TEXT NOT NULL,
-            date TEXT NOT NULL,
-            qty INTEGER NOT NULL,
-            unit_cost REAL NOT NULL,
-            note TEXT,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY(sku) REFERENCES products(sku) ON DELETE CASCADE
-        );
-        CREATE INDEX IF NOT EXISTS idx_batches_sku ON batches(sku);
+            CREATE TABLE IF NOT EXISTS batches(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sku TEXT NOT NULL,
+                date TEXT NOT NULL,
+                qty INTEGER NOT NULL,
+                unit_cost REAL NOT NULL,
+                note TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(sku) REFERENCES products(sku) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_batches_sku ON batches(sku);
 
-        CREATE TABLE IF NOT EXISTS categories(
-            name TEXT PRIMARY KEY,
-            base_percent REAL DEFAULT 0.0,
-            extra_percent REAL DEFAULT 3.0,
-            tax_percent REAL DEFAULT 0.0
-        );
-        """)
-        cols = {r["name"] for r in c.execute("PRAGMA table_info(batches)")}
-        if "commission_pct" not in cols:
-            c.execute("ALTER TABLE batches ADD COLUMN commission_pct REAL")
-        if "batch_code" not in cols:
-            c.execute("ALTER TABLE batches ADD COLUMN batch_code TEXT")
-        for r in c.execute("SELECT id FROM batches WHERE batch_code IS NULL OR batch_code=''").fetchall():
-            c.execute("UPDATE batches SET batch_code=? WHERE id=?", (_gen_batch_code(c), r["id"]))
+            CREATE TABLE IF NOT EXISTS categories(
+                name TEXT PRIMARY KEY,
+                base_percent REAL DEFAULT 0.0,
+                extra_percent REAL DEFAULT 3.0,
+                tax_percent REAL DEFAULT 0.0
+            );
+            """)
+            cols = {r["name"] for r in c.execute("PRAGMA table_info(batches)")}
+            if "commission_pct" not in cols:
+                c.execute("ALTER TABLE batches ADD COLUMN commission_pct REAL")
+            if "batch_code" not in cols:
+                c.execute("ALTER TABLE batches ADD COLUMN batch_code TEXT")
+            for r in c.execute("SELECT id FROM batches WHERE batch_code IS NULL OR batch_code=''").fetchall():
+                c.execute("UPDATE batches SET batch_code=? WHERE id=?", (_gen_batch_code_sqlite(c), r["id"]))
 
 def _seed_categories_if_empty():
     _ensure_schema()
     with _db() as c:
-        cnt = c.execute("SELECT COUNT(*) AS c FROM categories").fetchone()["c"]
-        if cnt == 0:
+        if _USE_PG:
+            cnt = c.execute(_q("SELECT COUNT(*) AS c FROM categories")).scalar_one()
+        else:
+            cnt = c.execute("SELECT COUNT(*) AS c FROM categories").fetchone()["c"]
+        if int(cnt) == 0:
             defaults = [
                 ("Витамины/БАДы", 10.0, 3.0, 0.0),
                 ("Сад/освещение", 10.0, 3.0, 0.0),
                 ("Товары для дома", 10.0, 3.0, 0.0),
                 ("Прочее", 10.0, 3.0, 0.0),
             ]
-            c.executemany(
-                "INSERT INTO categories(name,base_percent,extra_percent,tax_percent) VALUES(?,?,?,?)",
-                defaults
-            )
+            if _USE_PG:
+                for n,b,e,t in defaults:
+                    c.execute(_q("""
+                        INSERT INTO categories(name,base_percent,extra_percent,tax_percent)
+                        VALUES(:n,:b,:e,:t)
+                        ON CONFLICT (name) DO NOTHING
+                    """), {"n": n, "b": b, "e": e, "t": t})
+            else:
+                c.executemany(
+                    "INSERT OR IGNORE INTO categories(name,base_percent,extra_percent,tax_percent) VALUES(?,?,?,?)",
+                    defaults
+                )
 
 def _to_float(v) -> float:
     try:
@@ -141,6 +247,9 @@ def _sku_of(row: dict) -> str:
     ).strip()
 
 def _upsert_products(items: List[Dict[str, Any]]) -> Tuple[int,int]:
+    """
+    Upsert в products (PG или SQLite).
+    """
     _ensure_schema()
     inserted = updated = 0
     with _db() as c:
@@ -161,34 +270,61 @@ def _upsert_products(items: List[Dict[str, Any]]) -> Tuple[int,int]:
                 active = 1 if active else 0
             else:
                 active = 1 if qty > 0 else 0
-            row = c.execute("SELECT 1 FROM products WHERE sku=?", (sku,)).fetchone()
-            c.execute("""
-                INSERT INTO products(sku,name,brand,category,price,quantity,active,barcode,updated_at)
-                VALUES(?,?,?,?,?,?,?,?,datetime('now'))
-                ON CONFLICT(sku) DO UPDATE SET
-                    name=excluded.name,
-                    brand=excluded.brand,
-                    category=excluded.category,
-                    price=excluded.price,
-                    quantity=excluded.quantity,
-                    active=excluded.active,
-                    barcode=excluded.barcode,
-                    updated_at=excluded.updated_at
-            """, (sku, name, brand, category, price, qty, active, barcode))
-            if row: updated += 1
+
+            if _USE_PG:
+                existed = c.execute(_q("SELECT 1 FROM products WHERE sku=:sku"), {"sku": sku}).first()
+                c.execute(_q("""
+                    INSERT INTO products(sku,name,brand,category,price,quantity,active,barcode,updated_at)
+                    VALUES(:sku,:name,:brand,:category,:price,:qty,:active,:barcode,NOW())
+                    ON CONFLICT (sku) DO UPDATE SET
+                        name=EXCLUDED.name,
+                        brand=EXCLUDED.brand,
+                        category=EXCLUDED.category,
+                        price=EXCLUDED.price,
+                        quantity=EXCLUDED.quantity,
+                        active=EXCLUDED.active,
+                        barcode=EXCLUDED.barcode,
+                        updated_at=NOW()
+                """), {"sku": sku, "name": name, "brand": brand, "category": category,
+                       "price": price, "qty": qty, "active": active, "barcode": barcode})
+            else:
+                existed = c.execute("SELECT 1 FROM products WHERE sku=?", (sku,)).fetchone()
+                c.execute("""
+                    INSERT INTO products(sku,name,brand,category,price,quantity,active,barcode,updated_at)
+                    VALUES(?,?,?,?,?,?,?,?,datetime('now'))
+                    ON CONFLICT(sku) DO UPDATE SET
+                        name=excluded.name,
+                        brand=excluded.brand,
+                        category=excluded.category,
+                        price=excluded.price,
+                        quantity=excluded.quantity,
+                        active=excluded.active,
+                        barcode=excluded.barcode,
+                        updated_at=excluded.updated_at
+                """, (sku, name, brand, category, price, qty, active, barcode))
+
+            if existed: updated += 1
             else: inserted += 1
     return inserted, updated
 
 def _avg_cost(sku: str) -> float | None:
     _ensure_schema()
     with _db() as c:
-        r = c.execute(
-            "SELECT SUM(qty*unit_cost) AS tc, SUM(qty) AS tq FROM batches WHERE sku=?",
-            (sku,)
-        ).fetchone()
-        if not r or not r["tq"]:
-            return None
-        return float(r["tc"]) / float(r["tq"])
+        if _USE_PG:
+            r = c.execute(_q(
+                "SELECT SUM(qty*unit_cost) AS tc, SUM(qty) AS tq FROM batches WHERE sku=:sku"
+            ), {"sku": sku}).first()
+            if not r or not r.tq:
+                return None
+            return float(r.tc) / float(r.tq)
+        else:
+            r = c.execute(
+                "SELECT SUM(qty*unit_cost) AS tc, SUM(qty) AS tq FROM batches WHERE sku=?",
+                (sku,)
+            ).fetchone()
+            if not r or not r["tq"]:
+                return None
+            return float(r["tc"]) / float(r["tq"])
 
 # ===== Kaspi client (optional) =====
 try:
@@ -323,9 +459,14 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
     @router.get("/db/ping")
     async def db_ping():
         _ensure_schema()
-        with _db() as c:
-            ok = c.execute("PRAGMA integrity_check").fetchone()[0]
-        return {"ok": ok == "ok", "db_path": DB_PATH}
+        if _USE_PG:
+            with _db() as c:
+                c.execute(_q("SELECT 1"))
+            return {"ok": True, "db_path": os.getenv("DATABASE_URL", "")}
+        else:
+            with _db() as c:
+                ok = c.execute("PRAGMA integrity_check").fetchone()[0]
+            return {"ok": ok == "ok", "db_path": DB_PATH}
 
     # ---- Каталог из Kaspi API ----
     @router.get("/list")
@@ -350,11 +491,13 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
         if client is None:
             raise HTTPException(status_code=500, detail="KASPI_TOKEN is not set")
         items, _, _ = _collect_products(client, active_only=bool(active))
+
         def esc(s: str) -> str:
             s = "" if s is None else str(s)
             if any(c in s for c in [",", '"', "\n"]):
                 s = '"' + s.replace('"', '""') + '"'
             return s
+
         header = "id,code,name,price,qty,active,brand,category,barcode\n"
         body = "".join(
             [
@@ -389,8 +532,10 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
             root = ET.fromstring(content)
         except ET.ParseError as e:
             raise HTTPException(status_code=400, detail=f"Некорректный XML: {e}")
+
         def strip(tag: str) -> str:
             return tag.split("}", 1)[-1] if "}" in tag else tag
+
         def child_text(parent: ET.Element, *names: str) -> str:
             for el in parent.iter():
                 if strip(el.tag) in names:
@@ -398,6 +543,7 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
                     if t:
                         return t
             return ""
+
         rows: List[Dict[str, Any]] = []
         offers = [el for el in root.iter() if strip(el.tag) == "offer"]
         for off in offers:
@@ -489,27 +635,60 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
 
     # ---- DB: список товаров (+кол-во партий и маржа последней) ----
     @router.get("/db/list")
-    async def db_list(active_only: int = 1, search: str = ""):
+    async def db_list(active_only: int = Query(1), search: str = Query("", alias="q")):
         _ensure_schema()
         _seed_categories_if_empty()
         with _db() as c:
-            cats = {r["name"]: dict(r) for r in c.execute("SELECT * FROM categories")}
-            sql = "SELECT * FROM products"
-            conds, params = [], []
-            if active_only:
-                conds.append("active=1")
-            if search:
-                conds.append("(sku LIKE ? OR name LIKE ?)")
-                params += [f"%{search}%", f"%{search}%"]
-            if conds:
-                sql += " WHERE " + " AND ".join(conds)
-            sql += " ORDER BY name COLLATE NOCASE"
-            rows = [dict(r) for r in c.execute(sql, params)]
+            # категории
+            if _USE_PG:
+                cats_rows = c.execute(_q("SELECT name, base_percent, extra_percent, tax_percent FROM categories ORDER BY name")).all()
+                cats = {r._mapping["name"]: dict(r._mapping) for r in cats_rows}
+            else:
+                cats = {r["name"]: dict(r) for r in c.execute("SELECT * FROM categories")}
+            # продукты
+            if _USE_PG:
+                sql = "SELECT sku,name,brand,category,price,quantity,active FROM products"
+                conds, params = [], {}
+                if active_only:
+                    conds.append("active=1")
+                if search:
+                    conds.append("(sku ILIKE :q OR name ILIKE :q)")
+                    params["q"] = f"%{search}%"
+                if conds:
+                    sql += " WHERE " + " AND ".join(conds)
+                sql += " ORDER BY name"
+                rows = c.execute(_q(sql), params).all()
+            else:
+                sql = "SELECT sku,name,brand,category,price,quantity,active FROM products"
+                conds, params = [], []
+                if active_only:
+                    conds.append("active=1")
+                if search:
+                    conds.append("(sku LIKE ? OR name LIKE ?)")
+                    params += [f"%{search}%", f"%{search}%"]
+                if conds:
+                    sql += " WHERE " + " AND ".join(conds)
+                sql += " ORDER BY name COLLATE NOCASE"
+                rows = c.execute(sql, params).fetchall()
+            rows = _rows_to_dicts(rows)
+
             # batches meta
-            bc = {r["sku"]: r["cnt"] for r in c.execute("SELECT sku, COUNT(*) AS cnt FROM batches GROUP BY sku")}
-            last = {}
-            for r in c.execute("SELECT sku, date, unit_cost, commission_pct FROM batches ORDER BY date"):
-                last[r["sku"]] = (r["unit_cost"], r["commission_pct"])
+            if _USE_PG:
+                bc_rows = c.execute(_q("SELECT sku, COUNT(*) AS cnt FROM batches GROUP BY sku")).all()
+                bc = {r._mapping["sku"]: r._mapping["cnt"] for r in bc_rows}
+                last_rows = c.execute(_q(
+                    "SELECT sku, date, unit_cost, commission_pct FROM batches ORDER BY date"
+                )).all()
+                last = {}
+                for r in last_rows:
+                    m = r._mapping
+                    last[m["sku"]] = (m["unit_cost"], m["commission_pct"])
+            else:
+                bc = {r["sku"]: r["cnt"] for r in c.execute("SELECT sku, COUNT(*) AS cnt FROM batches GROUP BY sku")}
+                last = {}
+                for r in c.execute("SELECT sku, date, unit_cost, commission_pct FROM batches ORDER BY date"):
+                    last[r["sku"]] = (r["unit_cost"], r["commission_pct"])
+
         items: List[Dict[str, Any]] = []
         for r in rows:
             sku = r["sku"]
@@ -538,11 +717,17 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
     async def get_batches(sku: str):
         _ensure_schema()
         with _db() as c:
-            rows = [dict(r) for r in c.execute(
-                "SELECT id, date, qty, unit_cost, commission_pct, batch_code, note "
-                "FROM batches WHERE sku=? ORDER BY date",
-                (sku,)
-            )]
+            if _USE_PG:
+                rows = c.execute(_q(
+                    "SELECT id, date, qty, unit_cost, commission_pct, batch_code, note "
+                    "FROM batches WHERE sku=:sku ORDER BY date"
+                ), {"sku": sku}).all()
+                rows = _rows_to_dicts(rows)
+            else:
+                rows = [dict(r) for r in c.execute(
+                    "SELECT id, date, qty, unit_cost, commission_pct, batch_code, note "
+                    "FROM batches WHERE sku=? ORDER BY date", (sku,)
+                )]
         avgc = _avg_cost(sku)
         return {"batches": rows, "avg_cost": round(avgc, 2) if avgc is not None else None}
 
@@ -551,14 +736,40 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
         _ensure_schema()
         with _db() as c:
             for e in payload.entries:
-                code = e.batch_code or _gen_batch_code(c)
-                c.execute(
-                    "INSERT INTO batches(sku,date,qty,unit_cost,note,commission_pct,batch_code) "
-                    "VALUES(?,?,?,?,?,?,?)",
-                    (sku, e.date, int(e.qty), float(e.unit_cost), e.note,
-                     float(e.commission_pct) if e.commission_pct is not None else None,
-                     code)
-                )
+                if _USE_PG:
+                    # генерим код на стороне PG, если не задан
+                    code = e.batch_code
+                    if not code:
+                        code = c.execute(_q(
+                            "SELECT CONCAT("
+                            "SUBSTRING('ABCDEFGHJKLMNPQRSTUVWXYZ23456789' FROM floor(random()*32)::int + 1 FOR 1),"
+                            "SUBSTRING('ABCDEFGHJKLMNPQRSTUVWXYZ23456789' FROM floor(random()*32)::int + 1 FOR 1),"
+                            "SUBSTRING('ABCDEFGHJKLMNPQRSTUVWXYZ23456789' FROM floor(random()*32)::int + 1 FOR 1),"
+                            "SUBSTRING('ABCDEFGHJKLMNPQRSTUVWXYZ23456789' FROM floor(random()*32)::int + 1 FOR 1),"
+                            "SUBSTRING('ABCDEFGHJKLMNPQRSTUVWXYZ23456789' FROM floor(random()*32)::int + 1 FOR 1),"
+                            "SUBSTRING('ABCDEFGHJKLMNPQRSTUVWXYZ23456789' FROM floor(random()*32)::int + 1 FOR 1))"
+                        )).scalar_one()
+                    c.execute(_q(
+                        "INSERT INTO batches(sku,date,qty,unit_cost,note,commission_pct,batch_code) "
+                        "VALUES(:sku,:date,:qty,:ucost,:note,:comm,:code)"
+                    ), {
+                        "sku": sku,
+                        "date": e.date,
+                        "qty": int(e.qty),
+                        "ucost": float(e.unit_cost),
+                        "note": e.note,
+                        "comm": float(e.commission_pct) if e.commission_pct is not None else None,
+                        "code": code
+                    })
+                else:
+                    code = e.batch_code or _gen_batch_code_sqlite(c)
+                    c.execute(
+                        "INSERT INTO batches(sku,date,qty,unit_cost,note,commission_pct,batch_code) "
+                        "VALUES(?,?,?,?,?,?,?)",
+                        (sku, e.date, int(e.qty), float(e.unit_cost), e.note,
+                         float(e.commission_pct) if e.commission_pct is not None else None,
+                         code)
+                    )
         avgc = _avg_cost(sku)
         return {"status": "ok", "avg_cost": round(avgc, 2) if avgc is not None else None}
 
@@ -566,7 +777,10 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
     async def delete_batch(sku: str, bid: int):
         _ensure_schema()
         with _db() as c:
-            c.execute("DELETE FROM batches WHERE id=? AND sku=?", (bid, sku))
+            if _USE_PG:
+                c.execute(_q("DELETE FROM batches WHERE id=:bid AND sku=:sku"), {"bid": bid, "sku": sku})
+            else:
+                c.execute("DELETE FROM batches WHERE id=? AND sku=?", (bid, sku))
         return {"status": "ok"}
 
     # ---- DB: категории/комиссии ----
@@ -574,7 +788,13 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
     async def list_categories():
         _seed_categories_if_empty()
         with _db() as c:
-            rows = [dict(r) for r in c.execute("SELECT * FROM categories ORDER BY name")]
+            if _USE_PG:
+                rows = c.execute(_q(
+                    "SELECT name, base_percent, extra_percent, tax_percent FROM categories ORDER BY name"
+                )).all()
+                rows = _rows_to_dicts(rows)
+            else:
+                rows = [dict(r) for r in c.execute("SELECT * FROM categories ORDER BY name")]
         return {"categories": rows}
 
     @router.post("/db/categories")
@@ -582,14 +802,24 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
         _ensure_schema()
         with _db() as c:
             for cat in cats:
-                c.execute("""
-                    INSERT INTO categories(name,base_percent,extra_percent,tax_percent)
-                    VALUES(?,?,?,?)
-                    ON CONFLICT(name) DO UPDATE SET
-                      base_percent=excluded.base_percent,
-                      extra_percent=excluded.extra_percent,
-                      tax_percent=excluded.tax_percent
-                """, (cat.name, float(cat.base_percent), float(cat.extra_percent), float(cat.tax_percent)))
+                if _USE_PG:
+                    c.execute(_q("""
+                        INSERT INTO categories(name,base_percent,extra_percent,tax_percent)
+                        VALUES(:n,:b,:e,:t)
+                        ON CONFLICT (name) DO UPDATE
+                        SET base_percent=EXCLUDED.base_percent,
+                            extra_percent=EXCLUDED.extra_percent,
+                            tax_percent=EXCLUDED.tax_percent
+                    """), {"n": cat.name, "b": float(cat.base_percent), "e": float(cat.extra_percent), "t": float(cat.tax_percent)})
+                else:
+                    c.execute("""
+                        INSERT INTO categories(name,base_percent,extra_percent,tax_percent)
+                        VALUES(?,?,?,?)
+                        ON CONFLICT(name) DO UPDATE SET
+                          base_percent=excluded.base_percent,
+                          extra_percent=excluded.extra_percent,
+                          tax_percent=excluded.tax_percent
+                    """, (cat.name, float(cat.base_percent), float(cat.extra_percent), float(cat.tax_percent)))
         return {"status": "ok"}
 
     @router.put("/db/product-category/{sku}")
@@ -597,18 +827,27 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
         _ensure_schema()
         category = (payload.get("category") or "").strip()
         with _db() as c:
-            c.execute("UPDATE products SET category=?, updated_at=datetime('now') WHERE sku=?", (category, sku))
+            if _USE_PG:
+                c.execute(_q("UPDATE products SET category=:cat, updated_at=NOW() WHERE sku=:sku"),
+                          {"cat": category, "sku": sku})
+            else:
+                c.execute("UPDATE products SET category=?, updated_at=datetime('now') WHERE sku=?", (category, sku))
         return {"status": "ok", "sku": sku, "category": category}
 
-    # ---- Бэкап/восстановление ----
+    # ---- Бэкап/восстановление (актуально только для SQLite) ----
     @router.get("/db/backup.sqlite3")
     async def backup_db():
         _ensure_schema()
+        if _USE_PG:
+            # на Postgres файлового бэкапа нет — можно скрыть кнопку в UI, но ручку оставим с аккуратным ответом
+            raise HTTPException(status_code=501, detail="Backup доступен только для локальной SQLite.")
         fname = os.path.basename(DB_PATH) or "data.sqlite3"
         return FileResponse(DB_PATH, media_type="application/octet-stream", filename=fname)
 
     @router.post("/db/restore")
     async def restore_db(file: UploadFile = File(...)):
+        if _USE_PG:
+            raise HTTPException(status_code=501, detail="Restore доступен только для локальной SQLite.")
         content = await file.read()
         try:
             with _db() as c:
