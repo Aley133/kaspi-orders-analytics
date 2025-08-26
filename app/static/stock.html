@@ -361,5 +361,69 @@ document.addEventListener('DOMContentLoaded', async ()=>{
   loadDB();
 });
 </script>
+  <script>
+(() => {
+  const KEY = "KASPI_API_KEY";
+  // Прочитать ключ из localStorage (задать: setApiKey("..."))
+  window.KASPI_API_KEY = localStorage.getItem(KEY) || "";
+
+  const _origFetch = window.fetch.bind(window);
+  window.fetch = function(input, init) {
+    try {
+      const url = typeof input === "string" ? input : (input && input.url) || "";
+      if (url.startsWith("/products/")) {
+        init = init || {};
+        // Приводим headers к Headers, чтобы set работал всегда
+        let headers = init.headers instanceof Headers ? init.headers : new Headers(init.headers || {});
+        if (window.KASPI_API_KEY) headers.set("X-API-Key", window.KASPI_API_KEY);
+        init.headers = headers;
+      }
+    } catch (e) { /* no-op */ }
+    return _origFetch(input, init);
+  };
+
+  // Утилита: сохранить ключ в localStorage и сразу применить
+  window.setApiKey = function(k) {
+    localStorage.setItem(KEY, k || "");
+    window.KASPI_API_KEY = k || "";
+    console.log("API key set");
+  };
+})();
+</script>
+  <script>
+document.addEventListener("DOMContentLoaded", async () => {
+  let isPG = false;
+  try {
+    const r = await fetch("/products/db/ping");
+    const j = await r.json();
+    // Предпочитаем безопасный флаг driver, но есть и fallback на старый формат
+    if (j && typeof j.driver === "string") {
+      isPG = (j.driver === "pg");
+    } else if (j && j.db_path) {
+      // Старое поведение: пытаемся угадать по строке
+      isPG = String(j.db_path).startsWith("postgres");
+    }
+  } catch (e) {}
+
+  if (!isPG) return;
+
+  const hide = (el) => { if (el) el.style.display = "none"; };
+
+  // 1) Ссылка/кнопка на backup (если есть)
+  hide(document.querySelector('a[href$="/products/db/backup.sqlite3"]'));
+  hide(document.querySelector('button[data-action="backup"]'));
+  // 2) Форма/кнопка restore
+  document.querySelectorAll('form[action$="/products/db/restore"]').forEach(hide);
+  document.querySelectorAll('button[data-action="restore"]').forEach(hide);
+  // 3) Любые элементы, помеченные атрибутом data-sqlite-only
+  document.querySelectorAll("[data-sqlite-only]").forEach(hide);
+  // 4) Попытка скрыть заметные блоки по тексту (fallback)
+  document.querySelectorAll("button, a, form, div, section").forEach((el) => {
+    const t = (el.innerText || "").toLowerCase();
+    if (/(backup|бэкап|restore|восстанов)/.test(t)) hide(el);
+  });
+});
+</script>
+
 </body>
 </html>
