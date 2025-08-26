@@ -9,6 +9,17 @@ import os, shutil
 import sqlite3
 from xml.etree import ElementTree as ET
 
+
+def require_api_key(req: Request):
+    api_key = os.getenv("API_KEY")
+    if not api_key:        # если ключ не задан, пускать всех (режим dev)
+        return True
+    # принимаем либо заголовок, либо query param ?api_key=
+    sent = req.headers.get("X-API-Key") or req.query_params.get("api_key")
+    if sent != api_key:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    return True
+    
 # ===== optional deps for Excel =====
 try:
     import openpyxl  # for .xlsx
@@ -600,7 +611,7 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
         return rows
 
     @router.post("/manual-upload")
-    async def manual_upload(file: UploadFile = File(...)):
+    async def manual_upload(file: UploadFile = File(...), _: bool = Depends(require_api_key)):
         filename = (file.filename or "").lower()
         content = await file.read()
         if filename.endswith(".xml"):
@@ -732,7 +743,7 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
         return {"batches": rows, "avg_cost": round(avgc, 2) if avgc is not None else None}
 
     @router.post("/db/price-batches/{sku}")
-    async def add_batches(sku: str, payload: BatchListIn = Body(...)):
+    async def add_batches(sku: str, payload: BatchListIn = Body(...), _: bool = Depends(require_api_key)):
         _ensure_schema()
         with _db() as c:
             for e in payload.entries:
@@ -774,7 +785,7 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
         return {"status": "ok", "avg_cost": round(avgc, 2) if avgc is not None else None}
 
     @router.delete("/db/price-batches/{sku}/{bid}")
-    async def delete_batch(sku: str, bid: int):
+    async def delete_batch(sku: str, bid: int, _: bool = Depends(require_api_key)):
         _ensure_schema()
         with _db() as c:
             if _USE_PG:
@@ -798,7 +809,7 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
         return {"categories": rows}
 
     @router.post("/db/categories")
-    async def save_categories(cats: List[CategoryIn]):
+    async def save_categories(cats: List[CategoryIn], _: bool = Depends(require_api_key)):
         _ensure_schema()
         with _db() as c:
             for cat in cats:
@@ -823,7 +834,7 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
         return {"status": "ok"}
 
     @router.put("/db/product-category/{sku}")
-    async def set_product_category(sku: str, payload: Dict[str, Any] = Body(...)):
+    async def set_product_category(sku: str, payload: Dict[str, Any] = Body(...), _: bool = Depends(require_api_key)):
         _ensure_schema()
         category = (payload.get("category") or "").strip()
         with _db() as c:
