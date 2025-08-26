@@ -1,4 +1,3 @@
-
 <!doctype html>
 <html lang="ru">
 <head>
@@ -74,9 +73,49 @@
         </div>
       </section>
 
+      <!-- ======== KPI Прибыли (FIFO) ======== -->
+      <section class="shell">
+        <div class="row" style="justify-content:space-between;align-items:center;">
+          <h2 style="margin:0">Прибыль (FIFO)</h2>
+          <div class="row">
+            <label for="profitGroup">Группировка</label>
+            <select id="profitGroup">
+              <option value="day">День</option>
+              <option value="week">Неделя</option>
+              <option value="month">Месяц</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="kpi" style="margin-top:10px">
+          <div class="kpi-item">
+            <div class="kpi-label">Выручка</div>
+            <div class="kpi-value" id="kpiPRevenue">0</div>
+          </div>
+          <div class="kpi-item">
+            <div class="kpi-label">Комиссия</div>
+            <div class="kpi-value" id="kpiPCommission">0</div>
+          </div>
+          <div class="kpi-item">
+            <div class="kpi-label">Себестоимость</div>
+            <div class="kpi-value" id="kpiPCost">0</div>
+          </div>
+          <div class="kpi-item">
+            <div class="kpi-label">Прибыль</div>
+            <div class="kpi-value" id="kpiPProfit">0</div>
+          </div>
+        </div>
+
+        <div id="profitChartHolder" style="margin-top:10px">
+          <canvas id="profitChart"></canvas>
+        </div>
+        <div id="profitEmpty" class="muted" style="display:none;padding:8px 0">Нет данных для выбранного периода</div>
+      </section>
+      <!-- ======== /KPI Прибыли ======== -->
+
       <section class="shell">
         <h2>Топ города</h2>
-        <div id="chart-cities"><canvas id="cities"></canvas></div>
+        <div id="chart-cies"><canvas id="cities"></canvas></div>
       </section>
 
       <section class="shell">
@@ -98,40 +137,7 @@
       </section>
     </div>
   </div>
-<section class="kpi">
-  <div class="kpi-item"><div class="kpi-label">Прибыль (FIFO): период</div>
-    <div class="kpi-value" id="kpiProfit">0</div>
-  </div>
-</section>
 
-<script>
-async function loadProfitFIFO(){
-  const startEl = document.getElementById('start');
-  const endEl   = document.getElementById('end');
-  const df = (startEl && startEl.value) ? startEl.value : '';
-  const dt = (endEl   && endEl.value)   ? endEl.value   : '';
-  if(!df || !dt) return; // не знаем диапазон — просто не дергаем API
-
-  const use_bd  = document.getElementById('use_bd')?.checked ? '1' : '0';
-  const bd_start= document.getElementById('bd_start')?.value || '20:00';
-
-  const p = new URLSearchParams({ start: df, end: dt, group_by: 'total', use_bd, bd_start });
-  const r = await fetch('/profit/summary?' + p.toString());
-  if(!r.ok){ console.warn('profit/summary:', await r.text()); return; }
-  const data = await r.json();
-  // выведи куда нужно (пример):
-  const el = document.getElementById('kpiProfit');
-  if(el) el.textContent = `${(data.total?.profit ?? 0).toLocaleString('ru-RU')} ${data.currency||'KZT'}`;
-}
-
-// вызывй после того, как применены даты (там, где у тебя уже вызывается перерисовка analytics)
-document.addEventListener('DOMContentLoaded', () => {
-  // если у тебя есть функция run() или apply(), повесь сюда:
-  // window.addEventListener('leox:filters-applied', loadProfitFIFO)
-  // либо просто задержка, чтобы поля дат успели заполниться:
-  setTimeout(loadProfitFIFO, 100);
-});
-</script>
 <script>
 const nf = new Intl.NumberFormat('ru-RU');
 function fmt(n){ return nf.format(Math.round((Number(n) + Number.EPSILON) * 100) / 100); }
@@ -146,7 +152,9 @@ function table(id, rows){
     tb.appendChild(tr);
   }
 }
+</script>
 
+<script>
 async function loadMeta(){
   try {
     const r = await fetch('/meta');
@@ -169,6 +177,7 @@ async function loadMeta(){
 }
 
 let citiesChart = null;
+let profitChart = null;
 
 async function run(e){
   if(e) e.preventDefault();
@@ -225,7 +234,7 @@ async function run(e){
   // Топ города (Chart.js)
   const labels = (data.cities||[]).map(c=>c.city);
   const counts = (data.cities||[]).map(c=>c.count);
-  const holder = document.getElementById('chart-cities');
+  const holder = document.getElementById('chart-cities') || document.getElementById('chart-cies');
   holder.innerHTML = '<canvas id="cities"></canvas>';
   if(labels.length===0){
     holder.innerHTML = '<div class="muted" style="padding:12px">Нет данных по городам</div>';
@@ -239,8 +248,11 @@ async function run(e){
     });
   }
 
-  // Обновить список номеров
+  // Номера заказов
   await loadIds();
+
+  // Прибыль (FIFO)
+  await loadProfitFIFO();
 }
 
 async function loadIds(){
@@ -324,14 +336,72 @@ async function loadIds(){
   btnCollapse.onclick = ()=> detailsList.forEach(d=>d.open=false);
 }
 
-// Theme toggle
+/* ====== Прибыль FIFO: KPI + график ====== */
+async function loadProfitFIFO(){
+  const startEl = document.getElementById('start');
+  const endEl   = document.getElementById('end');
+  const df = (startEl && startEl.value) ? startEl.value : '';
+  const dt = (endEl   && endEl.value)   ? endEl.value   : '';
+  if(!df || !dt) return; // без диапазона не дёргаем API
+
+  const use_bd   = document.getElementById('use_bd')?.checked ? '1' : '0';
+  const bd_start = document.getElementById('bd_start')?.value || '20:00';
+  const group_by = document.getElementById('profitGroup')?.value || 'day';
+
+  const p = new URLSearchParams({ start: df, end: dt, group_by, use_bd, bd_start });
+  const r = await fetch('/profit/summary?' + p.toString());
+  if(!r.ok){
+    console.warn('profit/summary:', await r.text());
+    return;
+  }
+  const data = await r.json();
+  const cur = data.currency || window.APP_CURRENCY || 'KZT';
+
+  // KPI
+  const t = data.total || {revenue:0, commission:0, cost:0, profit:0};
+  const set = (id,val)=>{ const el=document.getElementById(id); if(el) el.textContent = `${fmt(val)} ${cur}`; };
+  set('kpiPRevenue', t.revenue||0);
+  set('kpiPCommission', t.commission||0);
+  set('kpiPCost', t.cost||0);
+  set('kpiPProfit', t.profit||0);
+
+  // Chart
+  const rows = data.rows || [];
+  const holder = document.getElementById('profitChartHolder');
+  const empty  = document.getElementById('profitEmpty');
+  if(rows.length === 0){
+    if(profitChart){ profitChart.destroy(); profitChart=null; }
+    empty.style.display='block';
+    holder.style.display='none';
+    return;
+  }
+  empty.style.display='none';
+  holder.style.display='block';
+
+  const labels = rows.map(r=>r.period);
+  const values = rows.map(r=>Number(r.profit||0));
+  const ctx = document.getElementById('profitChart').getContext('2d');
+  if(profitChart) profitChart.destroy();
+  profitChart = new Chart(ctx, {
+    type: 'bar',
+    data: { labels, datasets:[{ label:'Прибыль', data: values }] },
+    options: {
+      responsive:true,
+      plugins:{ legend:{ display:false }, tooltip:{ callbacks:{ label:(ctx)=>`Прибыль: ${fmt(ctx.parsed.y)} ${cur}` } } },
+      scales:{ x:{ ticks:{ maxRotation:0 } }, y:{ beginAtZero:true } }
+    }
+  });
+}
+/* ====== /Прибыль FIFO ====== */
+
 document.addEventListener('DOMContentLoaded', async () => {
   await loadMeta();
   document.getElementById('f').addEventListener('submit', run);
   document.getElementById('themeToggle').addEventListener('change', (e)=>{
     document.body.setAttribute('data-theme', e.target.checked ? 'dark' : 'light');
   });
-  run(); // initial
+  document.getElementById('profitGroup').addEventListener('change', loadProfitFIFO);
+  run(); // initial загрузка всего
 });
 </script>
 </body>
