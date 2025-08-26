@@ -7,12 +7,17 @@
   <link rel="stylesheet" href="style.css" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <style>
-    /* Маленькие утилиты, чтобы не править style.css */
+    /* маленькие утилиты */
     .chip{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:999px;padding:4px 8px;background:var(--card);font-size:12px}
     .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#9ca3af}
     .dot.on{background:#10b981}
+    .dot.warn{background:#f59e0b}
+    .dot.err{background:#ef4444}
     .table{width:100%;border-collapse:collapse}
     .table th,.table td{border-bottom:1px solid var(--line);padding:8px 10px;text-align:left}
+    .note{margin:8px 0 12px;padding:8px 10px;border-radius:8px;display:none}
+    .note.ok{display:block;background:#ecfdf5;color:#065f46;border:1px solid #a7f3d0}
+    .note.err{display:block;background:#fef2f2;color:#991b1b;border:1px solid #fecaca}
   </style>
 </head>
 <body data-theme="light">
@@ -68,6 +73,8 @@
         <div id="bdInfo" class="muted"></div>
       </form>
 
+      <div id="note" class="note"></div>
+
       <section class="kpi">
         <div class="kpi-item"><div class="kpi-label">Период</div>
           <div class="kpi-value" id="periodLabel">—</div>
@@ -86,7 +93,12 @@
         <div class="row" style="justify-content:space-between;align-items:center;">
           <h2 style="margin:0">Прибыль (FIFO)</h2>
           <div class="row" style="gap:10px;align-items:center">
-            <span id="profitKeyBadge" class="chip"><span class="dot"></span><span>ключ не задан</span></span>
+            <span id="profitKeyBadge" class="chip" title="Ключ Kaspi для защищённых эндпоинтов FIFO">
+              <span class="dot"></span><span>ключ не задан</span>
+            </span>
+            <span id="profitSyncChip" class="chip" title="Статус синхронизации">
+              <span class="dot"></span><span>статус неизвестен</span>
+            </span>
             <button type="button" class="btn secondary" id="btnProfitApiKey">API-Key</button>
             <label for="profitGroup">Группировка</label>
             <select id="profitGroup">
@@ -94,11 +106,14 @@
               <option value="week">Неделя</option>
               <option value="month">Месяц</option>
             </select>
-            <button type="button" class="btn secondary" id="btnProfitRebuild" title="Пересчитать списания FIFO за выбранный период">Перестроить FIFO</button>
+            <button type="button" class="btn secondary" id="btnProfitSync">Синхронизировать</button>
+            <button type="button" class="btn secondary" id="btnProfitRebuild" title="Пересчитать списания FIFO за период">Перестроить FIFO</button>
+            <button type="button" class="btn" id="btnProfitSyncRebuild">Синхронизировать + Перестроить</button>
           </div>
         </div>
 
         <div id="profitDbInfo" class="muted" style="margin:6px 0 10px"></div>
+
         <div class="kpi" style="margin-top:10px">
           <div class="kpi-item"><div class="kpi-label">Выручка</div><div class="kpi-value" id="kpiPRevenue">0</div></div>
           <div class="kpi-item"><div class="kpi-label">Комиссия</div><div class="kpi-value" id="kpiPCommission">0</div></div>
@@ -168,6 +183,11 @@ function tableFill(id, rows){
     }
     tb.appendChild(tr);
   }
+}
+function setNote(msg, ok=false){
+  const el = document.getElementById('note');
+  el.textContent = msg;
+  el.className = 'note ' + (ok ? 'ok' : 'err');
 }
 </script>
 
@@ -262,9 +282,11 @@ async function run(e){
   }
 
   await loadIds();
-  await loadProfitFIFO(); // KPI + график + таблицы
+  await loadProfitFIFO();             // KPI + график + таблицы
+  await checkProfitStatus(data);      // индикатор синхронизации
 }
 
+/* ====== Номера заказов ====== */
 async function loadIds(){
   const start = document.getElementById('start').value;
   const end = document.getElementById('end').value;
@@ -351,7 +373,7 @@ async function loadIds(){
   function refreshBadge(){
     const v = localStorage.getItem(KEY) || "";
     const el = badge(); if(!el) return;
-    el.querySelector('.dot').classList.toggle('on', !!v);
+    el.querySelector('.dot').className = 'dot ' + (v ? 'on' : '');
     el.querySelector('span:last-child').textContent = v ? 'ключ установлен' : 'ключ не задан';
   }
   window.KASPI_API_KEY = localStorage.getItem(KEY) || ""; refreshBadge();
@@ -403,7 +425,8 @@ async function fetchProfitJSON(url, opts, _retry){
     throw new Error(await r.text() || 'Unauthorized');
   }
   if(!r.ok){
-    throw new Error((await r.text()) || r.statusText || 'HTTP '+r.status);
+    const body = await r.text();
+    throw new Error(body || r.statusText || ('HTTP '+r.status));
   }
   const ct = r.headers.get('content-type')||'';
   return ct.includes('application/json') ? r.json() : r.text();
@@ -447,20 +470,105 @@ async function pingProfitDb(){
   }
 }
 
+/* ---- операции: sync / rebuild ---- */
+function buildSyncParams(){
+  const start = document.getElementById('start').value;
+  const end   = document.getElementById('end').value;
+  const tz = document.getElementById('tz').value || 'Asia/Almaty';
+  const date_field = document.getElementById('date_field').value;
+  const states = document.getElementById('states').value;
+  const exc = document.getElementById('exclude_states').checked ? 'CANCELED' : '';
+  const use_bd = document.getElementById('use_bd')?.checked ? '1' : '0';
+  const bd_start = document.getElementById('bd_start')?.value || '20:00';
+
+  const p = new URLSearchParams({ start, end, tz, date_field, use_bd, business_day_start: bd_start });
+  if(states) p.set('states', states);
+  if(exc) p.set('exclude_states', exc);
+  return p;
+}
+
+async function syncProfit(){
+  const df = document.getElementById('start').value;
+  const dt = document.getElementById('end').value;
+  if(!df || !dt){ setNote('Сначала задайте период (начало/конец).'); return; }
+  try{
+    const p = buildSyncParams();
+    const res = await fetchProfitJSON('/profit/sync?' + p.toString(), { method:'POST' });
+    setNote(`Синхронизация FIFO: заказов=${res?.synced_orders||0}, вставлено позиций=${res?.items_inserted||0}`, true);
+    await loadProfitFIFO();
+    await checkProfitStatus(); // обновим индикатор
+  }catch(e){
+    setNote('Синхронизация не удалась: ' + e.message);
+  }
+}
+
 async function rebuildFifo(){
   const df = document.getElementById('start').value;
   const dt = document.getElementById('end').value;
-  if(!df || !dt){ alert('Сначала задайте период (начало/конец).'); return; }
+  if(!df || !dt){ setNote('Сначала задайте период (начало/конец).'); return; }
   try{
     const p = new URLSearchParams({ date_from: df, date_to: dt });
     const res = await fetchProfitJSON('/profit/rebuild-ledger?' + p.toString(), { method:'POST' });
     setNote(`FIFO перестроен. Добавлено списаний: ${res?.recomputed||0}`, true);
-    await loadProfitFIFO(); // сразу обновим KPI/график
+    await loadProfitFIFO();
+    await checkProfitStatus();
   }catch(e){
     setNote('Перестроение FIFO не удалось: ' + e.message);
   }
 }
 
+async function syncAndRebuild(){
+  await syncProfit();
+  // если sync прошёл — rebuild:
+  try{
+    const df = document.getElementById('start').value;
+    const dt = document.getElementById('end').value;
+    const p = new URLSearchParams({ date_from: df, date_to: dt });
+    const res = await fetchProfitJSON('/profit/rebuild-ledger?' + p.toString(), { method:'POST' });
+    setNote(`Синхр.+пересчёт выполнены. Списаний: ${res?.recomputed||0}`, true);
+    await loadProfitFIFO();
+    await checkProfitStatus();
+  }catch(e){
+    // setNote уже показан в syncProfit при ошибке sync
+  }
+}
+
+/* ---- статус синхронизации: чип как в "Мой склад" ---- */
+function setSyncChip(state, text){
+  const el = document.getElementById('profitSyncChip');
+  const dot = el.querySelector('.dot');
+  dot.className = 'dot ' + (state==='ok' ? 'on' : state==='warn' ? 'warn' : state==='err' ? 'err' : '');
+  el.querySelector('span:last-child').textContent = text;
+  el.title = text;
+}
+
+async function checkProfitStatus(analyticsData){
+  try{
+    const df = document.getElementById('start').value;
+    const dt = document.getElementById('end').value;
+    if(!df || !dt){ setSyncChip('warn','нет периода'); return; }
+
+    const ordersCount = (analyticsData && typeof analyticsData.total_orders==='number')
+      ? analyticsData.total_orders
+      : (await (await fetch(`/orders/analytics?start=${df}&end=${dt}`)).json()).total_orders;
+
+    const p = new URLSearchParams({ date_from: df, date_to: dt, group_by: 'total', use_bd: (document.getElementById('use_bd')?.checked ? '1':'0'), bd_start: (document.getElementById('bd_start')?.value||'20:00') });
+    const sum = await fetchProfitJSON('/profit/summary?' + p.toString());
+    const t = sum.total || {revenue:0,commission:0,cost:0,profit:0};
+
+    if((t.revenue||0) > 0 || (t.cost||0) > 0 || (t.commission||0) > 0 || (t.profit||0) !== 0){
+      setSyncChip('ok','синхронизировано');
+    }else if(ordersCount>0){
+      setSyncChip('warn','требуется синхронизация/перестроение');
+    }else{
+      setSyncChip('','нет заказов в периоде');
+    }
+  }catch(e){
+    setSyncChip('err','ошибка проверки статуса');
+  }
+}
+
+/* ====== Загрузка KPI/график/таблицы FIFO ====== */
 async function loadProfitFIFO(){
   const df = document.getElementById('start').value;
   const dt = document.getElementById('end').value;
@@ -507,6 +615,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
   document.getElementById('profitGroup').addEventListener('change', loadProfitFIFO);
   document.getElementById('btnProfitRebuild').addEventListener('click', rebuildFifo);
+  document.getElementById('btnProfitSync').addEventListener('click', syncProfit);
+  document.getElementById('btnProfitSyncRebuild').addEventListener('click', syncAndRebuild);
   await pingProfitDb();
   run(); // initial
 });
