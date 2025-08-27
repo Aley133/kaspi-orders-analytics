@@ -53,7 +53,7 @@ def require_api_key(req: Request) -> bool:
     if not required:
         return True
     got = (req.headers.get("X-API-Key") or req.query_params.get("api_key") or "")
-    got = got.strip().strip('<>').strip('"').strip("'")
+    got = got.strip().strip("<>").strip('"').strip("'")
     if got != required:
         raise HTTPException(status_code=401, detail="Invalid API key")
     return True
@@ -81,9 +81,10 @@ def _kaspi_headers() -> Dict[str, str]:
     return {
         "X-Auth-Token": KASPI_TOKEN,
         "Accept": "application/vnd.api+json",
+        "Content-Type": "application/vnd.api+json",
     }
 
-# ---------- Время (точь-в-точь логика из main.py) ----------
+# ---------- Time utils ----------
 def _tzinfo(name: str) -> pytz.BaseTzInfo:
     try:
         return pytz.timezone(name)
@@ -99,23 +100,19 @@ def _bd_delta(hhmm: str) -> timedelta:
     hh, mm = map(int, (hhmm or "20:00").split(":"))
     return timedelta(hours=hh, minutes=mm)
 
-def _build_window_dt(start: str, end: str, tz: str, use_bd: bool, bd_start: str) -> Tuple[datetime, datetime]:
-    """Вернём локальные TZ-aware границы периода (как в main.py)."""
+def _build_window(start: str, end: str, tz: str, use_bd: bool, bd_start: str) -> Tuple[int, int]:
     z = _tzinfo(tz)
     s0 = _parse_date_local(start, tz)
     e0 = _parse_date_local(end, tz) + timedelta(days=1) - timedelta(milliseconds=1)
     if use_bd:
-        delta = _bd_delta(bd_start or "20:00")
+        delta = _bd_delta(bd_start)
         s = z.localize(datetime.combine((s0.date() - timedelta(days=1)), dt_time(0, 0))) + delta
         e = z.localize(datetime.combine(e0.date(), dt_time(0, 0))) + delta - timedelta(milliseconds=1)
     else:
         s, e = s0, e0
-    return s, e
+    return int(s.astimezone(pytz.UTC).timestamp() * 1000), int(e.astimezone(pytz.UTC).timestamp() * 1000)
 
-def _to_ms_utc(dt: datetime) -> int:
-    return int(dt.astimezone(pytz.UTC).timestamp() * 1000)
-
-# ---------- Схема (есть и sales) ----------
+# ---------- Schema (добавлена таблица sales) ----------
 def _ensure_schema():
     with _db() as c:
         if _USE_PG:
@@ -176,7 +173,7 @@ def _ensure_schema():
             CREATE INDEX IF NOT EXISTS idx_sales_sku  ON sales(sku);
             """)
 
-# ---------- модели ----------
+# ---------- Models ----------
 class OrderItemIn(BaseModel):
     sku: str
     qty: int
@@ -221,7 +218,7 @@ def _norm_state(s: str) -> str:
 def _parse_states_csv(s: Optional[str]) -> Optional[set[str]]:
     if not s:
         return None
-    return {_norm_state(x) for x in s.replace(";", ",").split(",") if x.strip()}
+    return { _norm_state(x) for x in s.replace(";", ",").split(",") if x.strip() }
 
 def _extract_product_code(entry: Dict[str, Any], included: Dict[str, Dict[str, Any]]) -> str:
     attrs = entry.get("attributes", {}) or {}
@@ -244,68 +241,74 @@ def _extract_product_code(entry: Dict[str, Any], included: Dict[str, Dict[str, A
     return _get_str(entry, ["id"], "")
 
 # ---------- fetch позиций ----------
-async def _fetch_entries_httpx(order_id: str) -> List[Dict[str, Any]]:
+async def _fetch_entries_httpx(order_id: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Возвращает (items, debug)."""
+    debug: Dict[str, Any] = {}
     headers = _kaspi_headers()
-    async with httpx.AsyncClient(base_url=KASPI_BASE_URL, timeout=30.0) as cli:
-        # 1) /orderentries?filter[order.id]=...
+    timeout = httpx.Timeout(20.0, connect=10.0)
+    async with httpx.AsyncClient(base_url=KASPI_BASE_URL, timeout=timeout) as cli:
+        # 1) /orderentries
         try:
             params = {"filter[order.id]": order_id, "include": "product", "page[size]": "200"}
             r = await cli.get("/orderentries", params=params, headers=headers)
-            r.raise_for_status()
-            j = r.json()
-            data = j.get("data", []) or []
-            included = {x["id"]: x for x in (j.get("included", []) or []) if isinstance(x, dict) and "id" in x}
-            out = []
-            for e in data:
-                attrs = e.get("attributes", {}) or {}
-                qty = _get_int(attrs, ["quantity", "qty", "count"], 1)
-                price = _get_num(attrs, ["unitPrice", "basePrice", "price"], 0.0)
-                sku = _extract_product_code(e, included) or _get_str(attrs, ["code", "productCode", "sku"])
-                if sku:
-                    out.append({"sku": sku, "qty": qty, "unit_price": price})
-            if out:
-                return out
-        except httpx.HTTPError:
-            pass
+            debug["orderentries_status"] = r.status_code
+            if r.status_code == 200:
+                j = r.json()
+                data = j.get("data", []) or []
+                included = {x["id"]: x for x in (j.get("included", []) or []) if isinstance(x, dict) and "id" in x}
+                out = []
+                for e in data:
+                    attrs = e.get("attributes", {}) or {}
+                    qty = _get_int(attrs, ["quantity", "qty", "count"], 1)
+                    price = _get_num(attrs, ["unitPrice", "basePrice", "price"], 0.0)
+                    sku = _extract_product_code(e, included) or _get_str(attrs, ["code", "productCode", "sku"])
+                    if sku:
+                        out.append({"sku": sku, "qty": qty, "unit_price": price})
+                if out:
+                    return out, debug
+        except httpx.HTTPError as ex:
+            debug["orderentries_error"] = str(ex)
 
-        # 2) fallback: /orders/{id}?include=entries.product
+        # 2) /orders/{id}?include=entries.product
         try:
             params = {"include": "entries.product"}
             r = await cli.get(f"/orders/{order_id}", params=params, headers=headers)
-            r.raise_for_status()
-            j = r.json()
-            included_raw = j.get("included", []) or []
-            included = {x["id"]: x for x in included_raw if isinstance(x, dict) and "id" in x}
-            out = []
-            for inc in included_raw:
-                t = str(inc.get("type", "")).lower()
-                if "entry" not in t:
-                    continue
-                attrs = inc.get("attributes", {}) or {}
-                qty = _get_int(attrs, ["quantity", "qty", "count"], 1)
-                price = _get_num(attrs, ["unitPrice", "basePrice", "price"], 0.0)
-                sku = _extract_product_code(inc, included) or _get_str(attrs, ["code", "productCode", "sku"])
-                if sku:
-                    out.append({"sku": sku, "qty": qty, "unit_price": price})
-            return out
-        except httpx.HTTPError:
-            pass
+            debug["order_by_id_status"] = r.status_code
+            if r.status_code == 200:
+                j = r.json()
+                included_raw = j.get("included", []) or []
+                included = {x["id"]: x for x in included_raw if isinstance(x, dict) and "id" in x}
+                out = []
+                for inc in included_raw:
+                    t = str(inc.get("type", "")).lower()
+                    if "entry" not in t:
+                        continue
+                    attrs = inc.get("attributes", {}) or {}
+                    qty = _get_int(attrs, ["quantity", "qty", "count"], 1)
+                    price = _get_num(attrs, ["unitPrice", "basePrice", "price"], 0.0)
+                    sku = _extract_product_code(inc, included) or _get_str(attrs, ["code", "productCode", "sku"])
+                    if sku:
+                        out.append({"sku": sku, "qty": qty, "unit_price": price})
+                return out, debug
+        except httpx.HTTPError as ex:
+            debug["order_by_id_error"] = str(ex)
 
-    return []
+    return [], debug
 
 # ---------- чтение списка заказов ----------
-async def _iter_orders(start_dt: datetime, end_dt: datetime, tz: str, date_field: str,
+async def _iter_orders(start_ms: int, end_ms: int, tz: str, date_field: str,
                        inc_states: Optional[set[str]], exc_states: Optional[set[str]],
-                       max_orders: int = 0) -> List[Dict[str, Any]]:
-    """start_dt/end_dt — TZ-aware локальные границы!"""
+                       max_orders: Optional[int] = None) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
 
     if KaspiClient:
         cli = KaspiClient(token=KASPI_TOKEN, base_url=KASPI_BASE_URL)
+        s = datetime.utcfromtimestamp(start_ms / 1000.0)
+        e = datetime.utcfromtimestamp(end_ms / 1000.0)
         step = timedelta(days=7)
-        cur = start_dt
-        while cur <= end_dt:
-            nxt = min(cur + step - timedelta(milliseconds=1), end_dt)
+        cur = s
+        while cur <= e:
+            nxt = min(cur + step, e)
             try_field = date_field or "creationDate"
             while True:
                 try:
@@ -317,15 +320,15 @@ async def _iter_orders(start_dt: datetime, end_dt: datetime, tz: str, date_field
                             continue
                         if exc_states and st in exc_states:
                             continue
-                        ms = attrs.get(try_field) or attrs.get("creationDate") or _to_ms_utc(start_dt)
+                        ms = attrs.get(try_field) or attrs.get("creationDate") or start_ms
                         try:
                             ms = int(ms)
                         except Exception:
                             try:
                                 ms = int(datetime.fromisoformat(str(ms).replace("Z","+00:00")).timestamp()*1000)
                             except Exception:
-                                ms = _to_ms_utc(start_dt)
-                        date_iso = datetime.fromtimestamp(ms/1000.0, tz=pytz.UTC).astimezone(_tzinfo(tz)).isoformat()
+                                ms = start_ms
+                        date_iso = datetime.utcfromtimestamp(ms/1000.0).isoformat()
                         out.append({"id": oid, "date": date_iso, "customer": attrs.get("customer")})
                         if max_orders and len(out) >= max_orders:
                             return out
@@ -338,11 +341,10 @@ async def _iter_orders(start_dt: datetime, end_dt: datetime, tz: str, date_field
             cur = nxt + timedelta(milliseconds=1)
         return out
 
-    # httpx
+    # HTTPX прямой (если нет SDK)
     headers = _kaspi_headers()
-    start_ms = _to_ms_utc(start_dt)
-    end_ms   = _to_ms_utc(end_dt)
-    async with httpx.AsyncClient(base_url=KASPI_BASE_URL, timeout=30.0) as cli:
+    timeout = httpx.Timeout(20.0, connect=10.0)
+    async with httpx.AsyncClient(base_url=KASPI_BASE_URL, timeout=timeout) as cli:
         page = 0
         while True:
             params = {
@@ -373,7 +375,7 @@ async def _iter_orders(start_dt: datetime, end_dt: datetime, tz: str, date_field
                         ms = int(datetime.fromisoformat(str(ms).replace("Z","+00:00")).timestamp()*1000)
                     except Exception:
                         ms = start_ms
-                date_iso = datetime.fromtimestamp(ms/1000.0, tz=pytz.UTC).astimezone(_tzinfo(tz)).isoformat()
+                date_iso = datetime.utcfromtimestamp(ms/1000.0).isoformat()
                 out.append({"id": oid, "date": date_iso, "customer": attrs.get("customer")})
                 if max_orders and len(out) >= max_orders:
                     return out
@@ -461,56 +463,58 @@ async def ping_bridge():
     _ensure_schema()
     return {"ok": True, "driver": "pg" if _USE_PG else "sqlite"}
 
-# Диагностика: что видим у Kaspi по заданному периоду
 @router.get("/diag")
 @router.get("/bridge/diag")
-async def diag(
-    start: str = Query(...),
-    end: str = Query(...),
+async def bridge_diag(
+    order_id: Optional[str] = Query(None, description="конкретный ID заказа"),
+    start: Optional[str] = Query(None),
+    end: Optional[str] = Query(None),
     tz: str = Query("Asia/Almaty"),
     date_field: str = Query("creationDate"),
-    states: Optional[str] = Query(None),
-    exclude_states: Optional[str] = Query(None),
     use_bd: bool = Query(False),
     business_day_start: str = Query("20:00"),
-    sample: int = Query(3, ge=0, le=20),
-    max_orders: int = Query(20, ge=0, le=200),
-    _auth: bool = Depends(require_api_key)
+    _auth: bool = Depends(require_api_key),
 ):
-    sdt, edt = _build_window_dt(start, end, tz, use_bd, business_day_start)
-    inc = _parse_states_csv(states)
-    exc = _parse_states_csv(exclude_states)
-    orders = await _iter_orders(sdt, edt, tz, date_field, inc, exc, max_orders=max_orders)
+    """Диагностика выборки позиций заказа."""
+    _ensure_schema()
+    checked_id = order_id
+    orders: List[Dict[str, Any]] = []
+
+    if not checked_id:
+        if not (start and end):
+            raise HTTPException(status_code=400, detail="Provide order_id OR (start & end)")
+        s_ms, e_ms = _build_window(start, end, tz, use_bd, business_day_start)
+        orders = await _iter_orders(s_ms, e_ms, tz, date_field, None, None, max_orders=1)
+        if not orders:
+            return {"orders_found": 0, "note": "no orders in range"}
+        checked_id = str(orders[0]["id"])
+
+    items, dbg = await _fetch_entries_httpx(checked_id)
     return {
-        "window": {
-            "start_local": sdt.isoformat(),
-            "end_local": edt.isoformat(),
-            "start_ms_utc": _to_ms_utc(sdt),
-            "end_ms_utc": _to_ms_utc(edt),
-        },
-        "found": len(orders),
-        "orders_preview": orders[:sample] if sample else [],
+        "order_id": checked_id,
+        "items": items,
+        "debug": dbg,
+        "hint": "если statuses 401/403/404 — у токена нет доступа к позициям (orderentries).",
     }
 
-# Статистика по локальной БД
 @router.get("/db-stats")
 @router.get("/bridge/db-stats")
 async def db_stats(_auth: bool = Depends(require_api_key)):
     _ensure_schema()
     with _db() as c:
         if _USE_PG:
-            n_orders = c.execute(_q("SELECT COUNT(*) AS n FROM orders")).scalar() or 0
-            n_items  = c.execute(_q("SELECT COUNT(*) AS n FROM order_items")).scalar() or 0
-            n_sales  = c.execute(_q("SELECT COUNT(*) AS n FROM sales")).scalar() or 0
-            last_sales = _rows(c.execute(_q("SELECT * FROM sales ORDER BY id DESC LIMIT 5")))
+            o = c.execute(_q("SELECT COUNT(*) AS n FROM orders")).first().n
+            oi = c.execute(_q("SELECT COUNT(*) AS n FROM order_items")).first().n
+            s = c.execute(_q("SELECT COUNT(*) AS n FROM sales")).first().n
+            last = _rows(c.execute(_q("SELECT order_id, date, sku, qty, unit_price FROM sales ORDER BY date DESC LIMIT 10")))
         else:
-            n_orders = c.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
-            n_items  = c.execute("SELECT COUNT(*) FROM order_items").fetchone()[0]
-            n_sales  = c.execute("SELECT COUNT(*) FROM sales").fetchone()[0]
-            last_sales = [dict(r) for r in c.execute("SELECT * FROM sales ORDER BY id DESC LIMIT 5").fetchall()]
-    return {"orders": n_orders, "order_items": n_items, "sales": n_sales, "last_sales": last_sales}
+            o = c.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
+            oi = c.execute("SELECT COUNT(*) FROM order_items").fetchone()[0]
+            s = c.execute("SELECT COUNT(*) FROM sales").fetchone()[0]
+            last = [dict(r) for r in c.execute("SELECT order_id, date, sku, qty, unit_price FROM sales ORDER BY date DESC LIMIT 10").fetchall()]
+    return {"orders": o, "order_items": oi, "sales": s, "last_sales": last}
 
-# Принимаем и POST, и GET (удобно для ручного прогона из браузера)
+# Принимаем и POST, и GET — проще дебажить из браузера
 @router.api_route("/sync", methods=["POST", "GET"])
 @router.api_route("/bridge/sync", methods=["POST", "GET"])
 async def profit_sync(
@@ -522,7 +526,7 @@ async def profit_sync(
     exclude_states: Optional[str] = Query(None, description="CSV исключаемых статусов"),
     use_bd: Optional[bool] = Query(False),
     business_day_start: Optional[str] = Query("20:00"),
-    max_orders: int = Query(0, ge=0, le=10000),
+    max_orders: Optional[int] = Query(None, description="ограничение для отладки"),
     _auth: bool = Depends(require_api_key)
 ):
     """
@@ -531,20 +535,22 @@ async def profit_sync(
     if not KASPI_TOKEN:
         raise HTTPException(status_code=500, detail="KASPI_TOKEN is not set")
 
-    sdt, edt = _build_window_dt(start, end, tz, bool(use_bd), business_day_start or "20:00")
     inc = _parse_states_csv(states)
     exc = _parse_states_csv(exclude_states)
 
-    orders = await _iter_orders(sdt, edt, tz, date_field, inc, exc, max_orders=max_orders)
+    s_ms, e_ms = _build_window(start, end, tz, bool(use_bd), business_day_start or "20:00")
+
+    orders = await _iter_orders(s_ms, e_ms, tz, date_field, inc, exc, max_orders=max_orders)
     if not orders:
         return {"status": "ok", "synced_orders": 0, "items_inserted": 0, "skipped": 0}
 
     total_o = total_i = skipped = 0
     for od in orders:
         oid = str(od["id"])
-        items = await _fetch_entries_httpx(oid)
+        items, dbg = await _fetch_entries_httpx(oid)
         if not items:
             skipped += 1
+            # можно вернуть debug по первому пустому — полезно в логах фронта
             continue
         o = OrderIn(
             id=oid,
@@ -556,7 +562,12 @@ async def profit_sync(
         total_o += io
         total_i += ii
 
-    return {"status": "ok", "synced_orders": total_o, "items_inserted": total_i, "skipped": skipped}
+    return {
+        "status": "ok",
+        "synced_orders": total_o,
+        "items_inserted": total_i,
+        "skipped": skipped
+    }
 
 def get_profit_bridge_router() -> APIRouter:
     return router
