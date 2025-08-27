@@ -415,6 +415,24 @@ async function loadIds(){
   });
 })();
 
+
+async function postProfitWithFallback(path1, path2, params){
+  const qs = params ? ('?' + params.toString()) : '';
+  // 1) пробуем первый путь
+  let r = await fetch(path1 + qs, { method:'POST' });
+  if(r.status === 404){
+    // 2) пробуем второй путь
+    r = await fetch(path2 + qs, { method:'POST' });
+  }
+  if(r.status===401 || r.status===403){
+    const v = prompt('Укажите X-API-Key для блока FIFO:', window.KASPI_API_KEY||'');
+    if(v!==null){ window.setApiKey(v.trim()); return postProfitWithFallback(path1, path2, params); }
+    throw new Error(await r.text() || 'Unauthorized');
+  }
+  if(!r.ok) throw new Error((await r.text()) || r.statusText || ('HTTP ' + r.status));
+  return r.json();
+}
+  
 async function fetchProfitJSON(url, opts, _retry){
   const r = await fetch(url, opts||{});
   if(r.status===401 || r.status===403){
