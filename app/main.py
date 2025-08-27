@@ -17,7 +17,7 @@ from httpx import HTTPStatusError, RequestError
 
 # FIFO router (используется фронтом под /profit)
 from app.api.profit_fifo import get_profit_fifo_router
-from app.api.profit_bridge import get_profit_bridge_router
+from app.api.profit_bridge import get_profit_bridge_router   # <= именно так
 # --- Kaspi client import (robust) ---
 try:
     from app.kaspi_client import KaspiClient  # type: ignore
@@ -90,17 +90,9 @@ if origins:
 client = KaspiClient(token=KASPI_TOKEN, base_url=KASPI_BASE_URL) if KASPI_TOKEN else None
 orders_cache = TTLCache(maxsize=128, ttl=CACHE_TTL)
 
-# Роутеры
 app.include_router(get_products_router(client), prefix="/products")
-app.include_router(get_profit_fifo_router(), prefix="/profit")  # <— ИМЕННО FIFO под /profit
-
-# Опционально: profit_bridge (если есть), но на ДРУГОМ префиксе, чтобы не конфликтовать
-try:
-    from app.api.profit_bridge import get_profit_bridge_router  # type: ignore
-    app.include_router(get_profit_bridge_router(), prefix="/profit-bridge")
-except Exception as _e_bridge:
-    # тихо логируем, но не валим старт
-    print("profit_bridge is not enabled:", repr(_e_bridge))
+app.include_router(get_profit_fifo_router(),   prefix="/profit")
+app.include_router(get_profit_bridge_router(), prefix="/profit")
 
 # -------------------- Utils --------------------
 def tzinfo_of(name: str) -> pytz.BaseTzInfo:
