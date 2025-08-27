@@ -214,9 +214,35 @@ def _guess_number(attrs: dict, fallback_id: str) -> str:
             return v.strip()
     return str(fallback_id)
 
-# -------------------- Models --------------------
-from pydantic import BaseModel
+# --- NEW: SKU extractor ---
+def extract_sku(attrs: dict) -> str:
+    """
+    Пытается найти артикул (SKU) в разных местах структуры заказа Kaspi.
+    Приоритет — в позициях заказа (entries/items) -> плоские поля заказа.
+    """
+    # 1) По позициям заказа
+    for key in ("entries", "items", "positions", "orderItems"):
+        lst = attrs.get(key)
+        if isinstance(lst, list) and lst:
+            item = lst[0] if isinstance(lst[0], dict) else None
+            if isinstance(item, dict):
+                for k in (
+                    "merchantProductCode",  # частый артикул продавца
+                    "article", "sku", "code", "productCode", "offerId", "id", "barcode"
+                ):
+                    v = item.get(k)
+                    if isinstance(v, str) and v.strip():
+                        return v.strip()
 
+    # 2) Плоские поля на самом заказе
+    for k in ("merchantProductCode", "article", "sku", "code", "productCode", "offerId"):
+        v = attrs.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+
+    return ""
+
+# -------------------- Models --------------------
 class DayPoint(BaseModel):
     x: str
     count: int
@@ -446,6 +472,7 @@ async def list_ids(start: str = Query(...), end: str = Query(...), tz: str = Que
                             "date": dtt.isoformat(),
                             "amount": round(extract_amount(attrs), 2),
                             "city": extract_city(attrs),
+                            "sku": extract_sku(attrs),  # <-- добавили SKU
                         })
                     break
                 except HTTPStatusError as ee:
@@ -505,6 +532,7 @@ async def list_ids_csv(start: str = Query(...), end: str = Query(...), tz: str =
                           states=states, exclude_states=exclude_states,
                           use_bd=use_bd, business_day_start=business_day_start,
                           limit=100000, order=order, grouped=0)
+    # CSV по-прежнему только со списком номеров (как было). При желании можно добавить ';'+sku.
     csv = "\n".join([str(it["number"]) for it in data["items"]])
     return csv
 
