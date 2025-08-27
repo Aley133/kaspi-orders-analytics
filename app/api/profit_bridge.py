@@ -13,6 +13,11 @@ import httpx
 from fastapi import APIRouter, HTTPException, Query, Depends, Request
 from pydantic import BaseModel
 
+
+HTTPX_TIMEOUT = httpx.Timeout(connect=15.0, read=45.0, write=15.0, pool=None)
+HTTPX_LIMITS  = httpx.Limits(max_connections=10, max_keepalive_connections=5)
+HTTPX_KW = dict(timeout=HTTPX_TIMEOUT, limits=HTTPX_LIMITS)
+
 # ---------- DB (PG/SQLite) ----------
 try:
     from sqlalchemy import create_engine, text  # type: ignore
@@ -261,33 +266,153 @@ async def _iter_orders(start_ms: int, end_ms: int, tz: str, date_field: str,
 
 # ---------- Получение позиций (5 стратегий + подробный debug) ----------
 async def _fetch_entries_httpx(order_id: str, order_number: Optional[str], debug: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """
-    Возвращаем список позиций: [{"sku","qty","unit_price"}...]
-    Стратегии:
-      A)  /orderentries?filter[order.id]=<id>
-      A2) /orderentries?filter[orders.id]=<id>
-      C)  /orders/{id}/entries?include=product
-      B)  /orders/{id}?include=entries.product
-      D)  /orders?filter[code]=<number>&include=entries.product
-    """
     headers = _kaspi_headers()
-    timeout = httpx.Timeout(connect=10.0, read=60.0, write=30.0, pool=60.0)
     items: List[Dict[str, Any]] = []
 
-    def _extract_from_entry(entry: dict, included_map: Dict[str, dict]) -> Optional[Dict[str, Any]]:
-        attrs = entry.get("attributes", {}) or {}
-        qty = _get_int(attrs, ["quantity", "qty", "count"], 1)
-        price = _get_num(attrs, ["unitPrice", "basePrice", "price"], 0.0)
-        sku = _get_str(attrs, ["code", "productCode", "sku"], "")
-        if not sku:
-            rel = entry.get("relationships", {}) or {}
-            node = rel.get("product", {}) or rel.get("masterProduct", {})
-            data_node = node.get("data")
-            if isinstance(data_node, dict):
-                rid = data_node.get("id")
-                a2 = included_map.get(rid, {}).get("attributes", {}) if rid else {}
-                sku = _get_str(a2, ["code", "sku", "productCode"], "")
-        return {"sku": sku, "qty": qty, "unit_price": price} if sku else None
+    async with httpx.AsyncClient(base_url=KASPI_BASE_URL, **HTTPX_KW) as cli:
+        # B1) /orders/{id}?include=entries (без product) — легче и быстрее
+        try:
+            params = {"include": "entries"}
+            r = await cli.get(f"/orders/{order_id}", params=params, headers=headers)
+            debug["order_by_id_entries_status"] = r.status_code
+            body = None
+            try:
+                j = r.json()
+            except Exception:
+                body = await r.aread()
+                j = {"raw": body[:600].decode(errors="ignore")}
+            debug["order_by_id_entries_preview"] = (json.dumps(j)[:600] if isinstance(j, dict) else str(j)[:600])
+            if r.status_code == 200 and isinstance(j, dict):
+                included = j.get("included", []) or []
+                for inc in included:
+                    if "entry" not in str(inc.get("type","")).lower():
+                        continue
+                    attrs = inc.get("attributes", {}) or {}
+                    qty = _get_int(attrs, ["quantity","qty","count"], 1)
+                    price = _get_num(attrs, ["unitPrice","basePrice","price"], 0.0)
+                    sku = _get_str(attrs, ["code","productCode","sku"], "")
+                    if sku:
+                        items.append({"sku": sku, "qty": qty, "unit_price": price})
+            if items:
+                debug["order_by_id_entries_count"] = len(items)
+                return items
+            else:
+                debug["order_by_id_entries_count"] = 0
+        except httpx.TimeoutException as e:
+            debug["order_by_id_entries_timeout"] = True
+            debug["order_by_id_entries_error"] = repr(e)
+        except httpx.HTTPError as e:
+            debug["order_by_id_entries_error"] = repr(e)
+
+        # A) /orderentries?filter[order.id]=... (иногда быстрее/иногда медленнее)
+        try:
+            params = {"filter[order.id]": order_id, "page[size]": "200"}  # без include=product
+            r = await cli.get("/orderentries", params=params, headers=headers)
+            debug["orderentries_status"] = r.status_code
+            try:
+                j = r.json()
+            except Exception:
+                jj = await r.aread()
+                j = {"raw": jj[:600].decode(errors="ignore")}
+            debug["orderentries_preview"] = (json.dumps(j)[:600] if isinstance(j, dict) else str(j)[:600])
+            if r.status_code == 200 and isinstance(j, dict):
+                data = j.get("data", []) or []
+                for e in data:
+                    attrs = e.get("attributes", {}) or {}
+                    qty = _get_int(attrs, ["quantity","qty","count"], 1)
+                    price = _get_num(attrs, ["unitPrice","basePrice","price"], 0.0)
+                    sku = _get_str(attrs, ["code","productCode","sku"], "")
+                    if sku:
+                        items.append({"sku": sku, "qty": qty, "unit_price": price})
+            if items:
+                debug["orderentries_count"] = len(items)
+                return items
+            else:
+                debug["orderentries_count"] = 0
+        except httpx.TimeoutException as e:
+            debug["orderentries_timeout"] = True
+            debug["orderentries_error"] = repr(e)
+        except httpx.HTTPError as e:
+            debug["orderentries_error"] = repr(e)
+
+        # B2) /orders/{id}?include=entries.product — самый тяжёлый, пробуем последним
+        try:
+            params = {"include": "entries.product"}
+            r = await cli.get(f"/orders/{order_id}", params=params, headers=headers)
+            debug["order_by_id_prod_status"] = r.status_code
+            try:
+                j = r.json()
+            except Exception:
+                jj = await r.aread()
+                j = {"raw": jj[:600].decode(errors="ignore")}
+            debug["order_by_id_prod_preview"] = (json.dumps(j)[:600] if isinstance(j, dict) else str(j)[:600])
+            if r.status_code == 200 and isinstance(j, dict):
+                included = j.get("included", []) or []
+                by_id = {x.get("id"): x for x in included if isinstance(x, dict)}
+                for inc in included:
+                    if "entry" not in str(inc.get("type","")).lower():
+                        continue
+                    attrs = inc.get("attributes", {}) or {}
+                    qty = _get_int(attrs, ["quantity","qty","count"], 1)
+                    price = _get_num(attrs, ["unitPrice","basePrice","price"], 0.0)
+                    sku = _get_str(attrs, ["code","productCode","sku"], "")
+                    if not sku:
+                        rel = inc.get("relationships", {}) or {}
+                        node = rel.get("product", {})
+                        data_node = node.get("data")
+                        if isinstance(data_node, dict):
+                            rid = data_node.get("id")
+                            ref = by_id.get(rid)
+                            a2 = (ref or {}).get("attributes", {}) or {}
+                            sku = _get_str(a2, ["code","sku","productCode"], "")
+                    if sku:
+                        items.append({"sku": sku, "qty": qty, "unit_price": price})
+            if items:
+                debug["order_by_id_prod_count"] = len(items)
+                return items
+            else:
+                debug["order_by_id_prod_count"] = 0
+        except httpx.TimeoutException as e:
+            debug["order_by_id_prod_timeout"] = True
+            debug["order_by_id_prod_error"] = repr(e)
+        except httpx.HTTPError as e:
+            debug["order_by_id_prod_error"] = repr(e)
+
+        # C) /orders?filter[code]=<number>&include=entries (если знаем номер)
+        if order_number:
+            try:
+                params = {"filter[code]": order_number, "include": "entries", "page[size]": "1"}
+                r = await cli.get("/orders", params=params, headers=headers)
+                debug["order_by_code_status"] = r.status_code
+                try:
+                    j = r.json()
+                except Exception:
+                    jj = await r.aread()
+                    j = {"raw": jj[:600].decode(errors="ignore")}
+                debug["order_by_code_preview"] = (json.dumps(j)[:600] if isinstance(j, dict) else str(j)[:600])
+                if r.status_code == 200 and isinstance(j, dict):
+                    included = j.get("included", []) or []
+                    for inc in included:
+                        if "entry" not in str(inc.get("type","")).lower():
+                            continue
+                        attrs = inc.get("attributes", {}) or {}
+                        qty = _get_int(attrs, ["quantity","qty","count"], 1)
+                        price = _get_num(attrs, ["unitPrice","basePrice","price"], 0.0)
+                        sku = _get_str(attrs, ["code","productCode","sku"], "")
+                        if sku:
+                            items.append({"sku": sku, "qty": qty, "unit_price": price})
+                if items:
+                    debug["order_by_code_count"] = len(items)
+                    return items
+                else:
+                    debug["order_by_code_count"] = 0
+            except httpx.TimeoutException as e:
+                debug["order_by_code_timeout"] = True
+                debug["order_by_code_error"] = repr(e)
+            except httpx.HTTPError as e:
+                debug["order_by_code_error"] = repr(e)
+
+    return items
 
     async with httpx.AsyncClient(base_url=KASPI_BASE_URL, timeout=timeout) as cli:
         # ---- A) orderentries: filter[order.id]
@@ -474,6 +599,32 @@ def _upsert_order_with_items(o: OrderIn) -> Tuple[int, int]:
 
 # ---------- Router ----------
 router = APIRouter(tags=["profit-bridge"])
+
+@router.get("/bridge/diag-raw")
+@router.get("/diag-raw")
+async def diag_raw(order_id: str = Query(...),
+                   _auth: bool = Depends(require_api_key)):
+    headers = _kaspi_headers()
+    out = {}
+    async with httpx.AsyncClient(base_url=KASPI_BASE_URL, **HTTPX_KW) as cli:
+        for path, params, key in [
+            (f"/orders/{order_id}", {"include":"entries"}, "orders_id_entries"),
+            ("/orderentries", {"filter[order.id]": order_id, "page[size]":"200"}, "orderentries"),
+            (f"/orders/{order_id}", {"include":"entries.product"}, "orders_id_entries_product"),
+        ]:
+            try:
+                r = await cli.get(path, params=params, headers=headers)
+                raw = await r.aread()
+                out[key] = {
+                    "status": r.status_code,
+                    "len": len(raw),
+                    "preview": raw[:600].decode(errors="ignore")
+                }
+            except httpx.TimeoutException as e:
+                out[key] = {"timeout": True, "error": repr(e)}
+            except httpx.HTTPError as e:
+                out[key] = {"http_error": repr(e)}
+    return out
 
 @router.get("/bridge/ping")
 @router.get("/ping")
