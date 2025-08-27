@@ -1,13 +1,37 @@
 # app/api/profit_bridge.py
 from __future__ import annotations
 
+"""
+Profit Bridge:
+- Тянет заказы из Kaspi по периоду
+- По каждому заказу тянет позиции (SKU, qty, price)
+- Складывает в локальную БД (orders, order_items) + плоскую таблицу sales
+- Делает это ПАРАЛЛЕЛЬНО с ограничением по одновременным запросам
+- Даёт служебную диагностику
+
+Подключается из main.py так:
+    app.include_router(get_profit_bridge_router(), prefix="/profit")
+
+Фронт может дергать:
+    POST/GET /profit/sync                (или /profit/bridge/sync)
+    GET       /profit/bridge/ping
+    GET       /profit/bridge/diag
+    GET       /profit/bridge/db-stats
+"""
+
 import os
+import asyncio
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime, timedelta, time as dt_time
+from contextlib import contextmanager
 
 import pytz
 from fastapi import APIRouter, HTTPException, Query, Depends, Request
 from pydantic import BaseModel
+
+# ---------- Настройки параллелизма/таймаутов ----------
+BRIDGE_CONCURRENCY = int(os.getenv("BRIDGE_CONCURRENCY", "8"))         # сколько запросов к Kaspi одновременно
+BRIDGE_HTTP_TIMEOUT = float(os.getenv("BRIDGE_HTTP_TIMEOUT", "12"))     # сек. общий таймаут httpx
 
 # ---------- DB (PG/SQLite) ----------
 try:
@@ -17,7 +41,6 @@ except Exception:
     _SQLA_OK = False
 
 import sqlite3
-from contextlib import contextmanager
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 _USE_PG = bool(DATABASE_URL and _SQLA_OK)
@@ -44,16 +67,19 @@ def _db():
         finally:
             conn.close()
 
-def _q(sql: str): return text(sql) if _USE_PG else sql
-def _rows(rows): return [dict(r._mapping) for r in rows] if _USE_PG else [dict(r) for r in rows]
+def _q(sql: str):
+    return text(sql) if _USE_PG else sql
 
-# ---------- Auth (как на фронте) ----------
+def _rows(rows):
+    return [dict(r._mapping) for r in rows] if _USE_PG else [dict(r) for r in rows]
+
+# ---------- Auth (как на фронте, но терпим к <...>,"...",'...') ----------
 def require_api_key(req: Request) -> bool:
     required = os.getenv("API_KEY", "").strip()
     if not required:
         return True
     got = (req.headers.get("X-API-Key") or req.query_params.get("api_key") or "")
-    got = got.strip().strip('<>').strip('"').strip("'")
+    got = got.strip().strip("<>").strip('"').strip("'")
     if got != required:
         raise HTTPException(status_code=401, detail="Invalid API key")
     return True
@@ -100,6 +126,7 @@ def _bd_delta(hhmm: str) -> timedelta:
     return timedelta(hours=hh, minutes=mm)
 
 def _build_window(start: str, end: str, tz: str, use_bd: bool, bd_start: str) -> Tuple[int, int]:
+    """Вернёт (start_ms_utc, end_ms_utc) для фильтра Kaspi."""
     z = _tzinfo(tz)
     s0 = _parse_date_local(start, tz)
     e0 = _parse_date_local(end, tz) + timedelta(days=1) - timedelta(milliseconds=1)
@@ -217,13 +244,15 @@ def _norm_state(s: str) -> str:
 def _parse_states_csv(s: Optional[str]) -> Optional[set[str]]:
     if not s:
         return None
-    return { _norm_state(x) for x in s.replace(";", ",").split(",") if x.strip() }
+    return {_norm_state(x) for x in s.replace(";", ",").split(",") if x.strip()}
 
 def _extract_product_code(entry: Dict[str, Any], included: Dict[str, Dict[str, Any]]) -> str:
+    # 1) attributes.code / productCode / sku
     attrs = entry.get("attributes", {}) or {}
     sku = _get_str(attrs, ["code", "productCode", "sku"])
     if sku:
         return sku
+    # 2) relationships → product/masterProduct/sku
     rel = entry.get("relationships", {}) or {}
     for key in ("product", "masterProduct", "item", "sku"):
         node = rel.get(key)
@@ -242,8 +271,9 @@ def _extract_product_code(entry: Dict[str, Any], included: Dict[str, Dict[str, A
 # ---------- fetch позиций ----------
 async def _fetch_entries_httpx(order_id: str) -> List[Dict[str, Any]]:
     headers = _kaspi_headers()
-    async with httpx.AsyncClient(base_url=KASPI_BASE_URL, timeout=30.0) as cli:
-        # 1) /orderentries
+    timeout = httpx.Timeout(BRIDGE_HTTP_TIMEOUT)
+    async with httpx.AsyncClient(base_url=KASPI_BASE_URL, timeout=timeout) as cli:
+        # 1) /orderentries?filter[order.id]=...
         try:
             params = {"filter[order.id]": order_id, "include": "product", "page[size]": "200"}
             r = await cli.get("/orderentries", params=params, headers=headers)
@@ -294,6 +324,7 @@ async def _iter_orders(start_ms: int, end_ms: int, tz: str, date_field: str,
                        inc_states: Optional[set[str]], exc_states: Optional[set[str]]) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
 
+    # 1) если есть ваш SDK — используем его
     if KaspiClient:
         cli = KaspiClient(token=KASPI_TOKEN, base_url=KASPI_BASE_URL)
         s = datetime.utcfromtimestamp(start_ms / 1000.0)
@@ -318,10 +349,10 @@ async def _iter_orders(start_ms: int, end_ms: int, tz: str, date_field: str,
                             ms = int(ms)
                         except Exception:
                             try:
-                                ms = int(datetime.fromisoformat(str(ms).replace("Z","+00:00")).timestamp()*1000)
+                                ms = int(datetime.fromisoformat(str(ms).replace("Z", "+00:00")).timestamp() * 1000)
                             except Exception:
                                 ms = start_ms
-                        date_iso = datetime.utcfromtimestamp(ms/1000.0).isoformat()
+                        date_iso = datetime.utcfromtimestamp(ms / 1000.0).isoformat()
                         out.append({"id": oid, "date": date_iso, "customer": attrs.get("customer")})
                     break
                 except Exception:
@@ -332,8 +363,10 @@ async def _iter_orders(start_ms: int, end_ms: int, tz: str, date_field: str,
             cur = nxt + timedelta(milliseconds=1)
         return out
 
+    # 2) httpx напрямую
     headers = _kaspi_headers()
-    async with httpx.AsyncClient(base_url=KASPI_BASE_URL, timeout=30.0) as cli:
+    timeout = httpx.Timeout(BRIDGE_HTTP_TIMEOUT)
+    async with httpx.AsyncClient(base_url=KASPI_BASE_URL, timeout=timeout) as cli:
         page = 0
         while True:
             params = {
@@ -361,16 +394,16 @@ async def _iter_orders(start_ms: int, end_ms: int, tz: str, date_field: str,
                     ms = int(ms)
                 except Exception:
                     try:
-                        ms = int(datetime.fromisoformat(str(ms).replace("Z","+00:00")).timestamp()*1000)
+                        ms = int(datetime.fromisoformat(str(ms).replace("Z", "+00:00")).timestamp() * 1000)
                     except Exception:
                         ms = start_ms
-                date_iso = datetime.utcfromtimestamp(ms/1000.0).isoformat()
+                date_iso = datetime.utcfromtimestamp(ms / 1000.0).isoformat()
                 out.append({"id": oid, "date": date_iso, "customer": attrs.get("customer")})
             page += 1
 
     return out
 
-# ---------- запись в БД (добавили sales) ----------
+# ---------- запись в БД (включая sales) ----------
 def _upsert_order_with_items(o: OrderIn) -> Tuple[int, int]:
     _ensure_schema()
     ins_o = ins_i = 0
@@ -391,7 +424,7 @@ def _upsert_order_with_items(o: OrderIn) -> Tuple[int, int]:
             """, (o.id, o.date, o.customer))
         ins_o += 0 if existed else 1
 
-        # replace items for this order in order_items AND sales
+        # полная замена позиций заказа
         if _USE_PG:
             c.execute(_q("DELETE FROM order_items WHERE order_id=:id"), {"id": o.id})
             c.execute(_q("DELETE FROM sales       WHERE order_id=:id"), {"id": o.id})
@@ -400,13 +433,20 @@ def _upsert_order_with_items(o: OrderIn) -> Tuple[int, int]:
             c.execute("DELETE FROM sales       WHERE order_id=?", (o.id,))
 
         for it in o.items:
-            # order_items (как было)
             if _USE_PG:
                 c.execute(_q("""
                     INSERT INTO order_items(order_id,sku,qty,unit_price,commission_pct)
                     VALUES(:oid,:sku,:qty,:p,:comm)
                 """), {
                     "oid": o.id, "sku": it.sku.strip(),
+                    "qty": int(it.qty), "p": float(it.unit_price),
+                    "comm": float(it.commission_pct) if it.commission_pct is not None else None
+                })
+                c.execute(_q("""
+                    INSERT INTO sales(order_id,date,sku,qty,unit_price,commission_pct)
+                    VALUES(:oid,:date,:sku,:qty,:p,:comm)
+                """), {
+                    "oid": o.id, "date": o.date, "sku": it.sku.strip(),
                     "qty": int(it.qty), "p": float(it.unit_price),
                     "comm": float(it.commission_pct) if it.commission_pct is not None else None
                 })
@@ -419,17 +459,6 @@ def _upsert_order_with_items(o: OrderIn) -> Tuple[int, int]:
                     float(it.unit_price),
                     float(it.commission_pct) if it.commission_pct is not None else None
                 ))
-            # sales (для profit_fifo)
-            if _USE_PG:
-                c.execute(_q("""
-                    INSERT INTO sales(order_id,date,sku,qty,unit_price,commission_pct)
-                    VALUES(:oid,:date,:sku,:qty,:p,:comm)
-                """), {
-                    "oid": o.id, "date": o.date, "sku": it.sku.strip(),
-                    "qty": int(it.qty), "p": float(it.unit_price),
-                    "comm": float(it.commission_pct) if it.commission_pct is not None else None
-                })
-            else:
                 c.execute("""
                     INSERT INTO sales(order_id,date,sku,qty,unit_price,commission_pct)
                     VALUES(?,?,?,?,?,?)
@@ -450,7 +479,37 @@ async def ping_bridge():
     _ensure_schema()
     return {"ok": True, "driver": "pg" if _USE_PG else "sqlite"}
 
-# Принимаем и POST, и GET — проще дебажить из браузера
+# Диагностика: сколько заказов попадёт в выборку (без вытягивания позиций)
+@router.get("/bridge/diag")
+async def diag_bridge(
+    start: str = Query(...), end: str = Query(...), tz: str = Query("Asia/Almaty"),
+    date_field: str = Query("creationDate"),
+    states: Optional[str] = Query(None), exclude_states: Optional[str] = Query(None),
+    use_bd: Optional[bool] = Query(False), business_day_start: Optional[str] = Query("20:00"),
+    _auth: bool = Depends(require_api_key),
+):
+    s_ms, e_ms = _build_window(start, end, tz, bool(use_bd), business_day_start or "20:00")
+    orders = await _iter_orders(s_ms, e_ms, tz, date_field, _parse_states_csv(states), _parse_states_csv(exclude_states))
+    sample = orders[:5]
+    return {"orders_found": len(orders), "sample": sample}
+
+# Быстрые статистики по БД (для проверки, что записи идут в sales)
+@router.get("/bridge/db-stats")
+async def db_stats(_auth: bool = Depends(require_api_key)):
+    _ensure_schema()
+    with _db() as c:
+        if _USE_PG:
+            ro = c.execute(_q("SELECT COUNT(*) AS n FROM orders")).first()
+            ri = c.execute(_q("SELECT COUNT(*) AS n FROM order_items")).first()
+            rs = c.execute(_q("SELECT COUNT(*) AS n FROM sales")).first()
+            return {"orders": ro[0] if ro else 0, "order_items": ri[0] if ri else 0, "sales": rs[0] if rs else 0}
+        else:
+            ro = c.execute("SELECT COUNT(*) AS n FROM orders").fetchone()
+            ri = c.execute("SELECT COUNT(*) AS n FROM order_items").fetchone()
+            rs = c.execute("SELECT COUNT(*) AS n FROM sales").fetchone()
+            return {"orders": ro["n"] if ro else 0, "order_items": ri["n"] if ri else 0, "sales": rs["n"] if rs else 0}
+
+# Принимаем и POST, и GET — удобнее для дебага из браузера
 @router.api_route("/sync", methods=["POST", "GET"])
 @router.api_route("/bridge/sync", methods=["POST", "GET"])
 async def profit_sync(
@@ -462,10 +521,12 @@ async def profit_sync(
     exclude_states: Optional[str] = Query(None, description="CSV исключаемых статусов"),
     use_bd: Optional[bool] = Query(False),
     business_day_start: Optional[str] = Query("20:00"),
+    max_orders: Optional[int] = Query(None, ge=1, le=2000),  # можно ограничить на время теста
     _auth: bool = Depends(require_api_key)
 ):
     """
-    Синхронизируем: тянем заказы из Kaspi, извлекаем позиции, пишем в sales (и order_items).
+    Синхронизируем: тянем заказы из Kaspi, извлекаем позиции ПАРАЛЛЕЛЬНО (ограничение BRIDGE_CONCURRENCY),
+    пишем в sales (и order_items).
     """
     if not KASPI_TOKEN:
         raise HTTPException(status_code=500, detail="KASPI_TOKEN is not set")
@@ -474,17 +535,21 @@ async def profit_sync(
     exc = _parse_states_csv(exclude_states)
 
     s_ms, e_ms = _build_window(start, end, tz, bool(use_bd), business_day_start or "20:00")
-
     orders = await _iter_orders(s_ms, e_ms, tz, date_field, inc, exc)
     if not orders:
-        return {"status": "ok", "synced_orders": 0, "items_inserted": 0}
+        return {"status": "ok", "synced_orders": 0, "items_inserted": 0, "skipped": 0}
 
-    total_o = total_i = 0
-    for od in orders:
+    if max_orders:
+        orders = orders[:max_orders]
+
+    sem = asyncio.Semaphore(BRIDGE_CONCURRENCY)
+
+    async def process_one(od: Dict[str, Any]) -> Tuple[int, int]:
         oid = str(od["id"])
-        items = await _fetch_entries_httpx(oid)
+        async with sem:
+            items = await _fetch_entries_httpx(oid)
         if not items:
-            continue
+            return (0, 0)
         o = OrderIn(
             id=oid,
             date=od["date"],
@@ -492,10 +557,22 @@ async def profit_sync(
             items=[OrderItemIn(sku=i["sku"], qty=int(i["qty"]), unit_price=float(i["unit_price"])) for i in items]
         )
         io, ii = _upsert_order_with_items(o)
-        total_o += io
-        total_i += ii
+        return (io, ii)
 
-    return {"status": "ok", "synced_orders": total_o, "items_inserted": total_i}
+    results = await asyncio.gather(*[process_one(od) for od in orders], return_exceptions=True)
+
+    total_o = total_i = 0
+    skipped = 0
+    for r in results:
+        if isinstance(r, Exception):
+            skipped += 1
+        else:
+            io, ii = r
+            total_o += io
+            total_i += ii
+
+    return {"status": "ok", "synced_orders": total_o, "items_inserted": total_i, "skipped": skipped}
 
 def get_profit_bridge_router() -> APIRouter:
+    """Фабрика для include_router(get_profit_bridge_router(), prefix='/profit')"""
     return router
