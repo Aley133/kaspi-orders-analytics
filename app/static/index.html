@@ -354,7 +354,10 @@ async function loadIds(){
 
     const pre = document.createElement('pre');
     pre.style.whiteSpace='pre-wrap';
-    pre.textContent = group.items.map(it=>`${it.number}\t${it.state}\t${it.date.slice(0,16).replace('T',' ')}\t${it.amount}`).join('\n');
+    // >>> SKU выведен вторым столбцом после номера
+    pre.textContent = group.items
+      .map(it=>`${it.number}\t${it.sku||''}\t${it.state}\t${it.date.slice(0,16).replace('T',' ')}\t${it.amount}`)
+      .join('\n');
     det.appendChild(pre);
 
     detailsList.push(det);
