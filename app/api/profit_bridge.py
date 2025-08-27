@@ -52,7 +52,8 @@ def require_api_key(req: Request) -> bool:
     required = os.getenv("API_KEY", "").strip()
     if not required:
         return True
-    got = req.headers.get("X-API-Key") or req.query_params.get("api_key")
+    got = (req.headers.get("X-API-Key") or req.query_params.get("api_key") or "")
+    got = got.strip().strip('<>').strip('"').strip("'")
     if got != required:
         raise HTTPException(status_code=401, detail="Invalid API key")
     return True
