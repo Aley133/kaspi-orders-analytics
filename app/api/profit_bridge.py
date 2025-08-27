@@ -2,29 +2,28 @@
 from __future__ import annotations
 
 import os
+import json
+import sqlite3
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime, timedelta, time as dt_time
+from contextlib import contextmanager
 
 import pytz
+import httpx
 from fastapi import APIRouter, HTTPException, Query, Depends, Request
 from pydantic import BaseModel
 
 # ---------- DB (PG/SQLite) ----------
 try:
-    from sqlalchemy import create_engine, text
+    from sqlalchemy import create_engine, text  # type: ignore
     _SQLA_OK = True
 except Exception:
     _SQLA_OK = False
 
-import sqlite3
-from contextlib import contextmanager
-import json
-import httpx
-
 DATABASE_URL = os.getenv("DATABASE_URL")
 _USE_PG = bool(DATABASE_URL and _SQLA_OK)
 if _USE_PG:
-    _engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True)
+    _engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True)  # type: ignore
 
 def _resolve_db_path() -> str:
     target = os.getenv("DB_PATH", "/data/kaspi-orders.sqlite3")
@@ -36,7 +35,7 @@ DB_PATH = _resolve_db_path()
 @contextmanager
 def _db():
     if _USE_PG:
-        with _engine.begin() as conn:
+        with _engine.begin() as conn:  # type: ignore
             yield conn
     else:
         conn = sqlite3.connect(DB_PATH)
@@ -46,16 +45,16 @@ def _db():
         finally:
             conn.close()
 
-def _q(sql: str): return text(sql) if _USE_PG else sql
+def _q(sql: str): return text(sql) if _USE_PG else sql  # type: ignore
 def _rows(rows): return [dict(r._mapping) for r in rows] if _USE_PG else [dict(r) for r in rows]
 
-# ---------- Auth ----------
+# ---------- Auth (как на фронте) ----------
 def require_api_key(req: Request) -> bool:
     required = os.getenv("API_KEY", "").strip()
     if not required:
         return True
     got = (req.headers.get("X-API-Key") or req.query_params.get("api_key") or "")
-    got = got.strip().strip('<>').strip('"').strip("'")
+    got = got.strip().strip("<>").strip('"').strip("'")
     if got != required:
         raise HTTPException(status_code=401, detail="Invalid API key")
     return True
@@ -72,7 +71,7 @@ def _kaspi_headers() -> Dict[str, str]:
         "Accept": "application/vnd.api+json",
     }
 
-# ---------- utils ----------
+# ---------- Утилиты времени/парсинга ----------
 def _tzinfo(name: str) -> pytz.BaseTzInfo:
     try:
         return pytz.timezone(name)
@@ -103,15 +102,19 @@ def _build_window(start: str, end: str, tz: str, use_bd: bool, bd_start: str) ->
 def _get_num(d: Any, keys: List[str], default: float = 0.0) -> float:
     for k in keys:
         if k in d and d[k] is not None:
-            try: return float(d[k])
-            except Exception: pass
+            try:
+                return float(d[k])
+            except Exception:
+                pass
     return default
 
 def _get_int(d: Any, keys: List[str], default: int = 0) -> int:
     for k in keys:
         if k in d and d[k] is not None:
-            try: return int(d[k])
-            except Exception: pass
+            try:
+                return int(d[k])
+            except Exception:
+                pass
     return default
 
 def _get_str(d: Any, keys: List[str], default: str = "") -> str:
@@ -129,7 +132,14 @@ def _parse_states_csv(s: Optional[str]) -> Optional[set[str]]:
         return None
     return { _norm_state(x) for x in s.replace(";", ",").split(",") if x.strip() }
 
-# ---------- schema ----------
+def _preview(obj: Any, limit: int = 600) -> str:
+    try:
+        s = json.dumps(obj) if not isinstance(obj, (str, bytes)) else (obj.decode() if isinstance(obj, bytes) else obj)
+        return (s[:limit] + ("…" if len(s) > limit else ""))
+    except Exception:
+        return "<unrepr>"
+
+# ---------- Схема (включая sales) ----------
 def _ensure_schema():
     with _db() as c:
         if _USE_PG:
@@ -190,7 +200,7 @@ def _ensure_schema():
             CREATE INDEX IF NOT EXISTS idx_sales_sku  ON sales(sku);
             """)
 
-# ---------- models ----------
+# ---------- Модели ----------
 class OrderItemIn(BaseModel):
     sku: str
     qty: int
@@ -199,19 +209,19 @@ class OrderItemIn(BaseModel):
 
 class OrderIn(BaseModel):
     id: str
-    date: str
+    date: str  # ISO
     customer: Optional[str] = None
     items: List[OrderItemIn]
 
-# ---------- Kaspi orders list ----------
+# ---------- Список заказов Kaspi ----------
 async def _iter_orders(start_ms: int, end_ms: int, tz: str, date_field: str,
                        inc_states: Optional[set[str]], exc_states: Optional[set[str]]) -> List[Dict[str, Any]]:
     """
-    Возвращает [{id, date_iso, number, customer}, ...]
+    Возвращает элементы вида: {"id","date","number","customer"}
     """
     out: List[Dict[str, Any]] = []
     headers = _kaspi_headers()
-    timeout = httpx.Timeout(15.0)
+    timeout = httpx.Timeout(connect=10.0, read=60.0, write=30.0, pool=60.0)
     async with httpx.AsyncClient(base_url=KASPI_BASE_URL, timeout=timeout) as cli:
         page = 0
         while True:
@@ -240,155 +250,168 @@ async def _iter_orders(start_ms: int, end_ms: int, tz: str, date_field: str,
                     ms = int(ms)
                 except Exception:
                     try:
-                        ms = int(datetime.fromisoformat(str(ms).replace("Z","+00:00")).timestamp()*1000)
+                        ms = int(datetime.fromisoformat(str(ms).replace("Z","+00:00")).timestamp() * 1000)
                     except Exception:
                         ms = start_ms
-                date_iso = datetime.utcfromtimestamp(ms/1000.0).isoformat()
-                number = _get_str(attrs, ["code","orderNumber","number","id"], "")
+                date_iso = datetime.utcfromtimestamp(ms / 1000.0).isoformat()
+                number = _get_str(attrs, ["code", "orderNumber", "number", "id"], "")
                 out.append({"id": oid, "date": date_iso, "customer": attrs.get("customer"), "number": number})
             page += 1
     return out
 
-# ---------- entries fetch with rich debug ----------
-def _preview(obj: Any, limit: int = 600) -> str:
-    try:
-        s = json.dumps(obj) if not isinstance(obj, (str, bytes)) else (obj.decode() if isinstance(obj, bytes) else obj)
-        return (s[:limit] + ("…" if len(s) > limit else ""))
-    except Exception:
-        return "<unrepr>"
-
+# ---------- Получение позиций (5 стратегий + подробный debug) ----------
 async def _fetch_entries_httpx(order_id: str, order_number: Optional[str], debug: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
-    Пробуем три способа:
-      A: /orderentries?filter[order.id]=<id>
-      B: /orders/{id}?include=entries.product
-      C: /orders?filter[code]=<number>&include=entries.product
-    Возвращаем [{"sku", "qty", "unit_price"}...]
+    Возвращаем список позиций: [{"sku","qty","unit_price"}...]
+    Стратегии:
+      A)  /orderentries?filter[order.id]=<id>
+      A2) /orderentries?filter[orders.id]=<id>
+      C)  /orders/{id}/entries?include=product
+      B)  /orders/{id}?include=entries.product
+      D)  /orders?filter[code]=<number>&include=entries.product
     """
     headers = _kaspi_headers()
-    timeout = httpx.Timeout(15.0)
+    timeout = httpx.Timeout(connect=10.0, read=60.0, write=30.0, pool=60.0)
     items: List[Dict[str, Any]] = []
 
+    def _extract_from_entry(entry: dict, included_map: Dict[str, dict]) -> Optional[Dict[str, Any]]:
+        attrs = entry.get("attributes", {}) or {}
+        qty = _get_int(attrs, ["quantity", "qty", "count"], 1)
+        price = _get_num(attrs, ["unitPrice", "basePrice", "price"], 0.0)
+        sku = _get_str(attrs, ["code", "productCode", "sku"], "")
+        if not sku:
+            rel = entry.get("relationships", {}) or {}
+            node = rel.get("product", {}) or rel.get("masterProduct", {})
+            data_node = node.get("data")
+            if isinstance(data_node, dict):
+                rid = data_node.get("id")
+                a2 = included_map.get(rid, {}).get("attributes", {}) if rid else {}
+                sku = _get_str(a2, ["code", "sku", "productCode"], "")
+        return {"sku": sku, "qty": qty, "unit_price": price} if sku else None
+
     async with httpx.AsyncClient(base_url=KASPI_BASE_URL, timeout=timeout) as cli:
-        # A) orderentries
+        # ---- A) orderentries: filter[order.id]
         try:
             params = {"filter[order.id]": order_id, "include": "product", "page[size]": "200"}
             r = await cli.get("/orderentries", params=params, headers=headers)
-            debug["orderentries_status"] = r.status_code
-            try:
-                j = r.json()
-            except Exception:
-                j = {"raw": (await r.aread())[:400]}
-            debug["orderentries_preview"] = _preview(j)
-            if r.status_code == 200:
-                data = j.get("data", []) if isinstance(j, dict) else []
-                included = {x["id"]: x for x in (j.get("included", []) or []) if isinstance(x, dict) and "id" in x} if isinstance(j, dict) else {}
+            debug["A_status"] = r.status_code
+            j = {}
+            try: j = r.json()
+            except Exception: j = {"raw": (await r.aread())[:400]}
+            debug["A_preview"] = _preview(j)
+            if r.status_code == 200 and isinstance(j, dict):
+                data = j.get("data", []) or []
+                included = {x["id"]: x for x in (j.get("included", []) or []) if isinstance(x, dict) and "id" in x}
                 for e in data:
-                    attrs = e.get("attributes", {}) or {}
-                    qty = _get_int(attrs, ["quantity","qty","count"], 1)
-                    price = _get_num(attrs, ["unitPrice","basePrice","price"], 0.0)
-                    sku = _get_str(attrs, ["code","productCode","sku"], "")
-                    if not sku:
-                        # попытка вытащить из связанного product
-                        rel = e.get("relationships", {}) or {}
-                        node = rel.get("product", {})
-                        data_node = node.get("data")
-                        if isinstance(data_node, dict):
-                            rid = data_node.get("id")
-                            a2 = included.get(rid, {}).get("attributes", {}) if rid else {}
-                            sku = _get_str(a2, ["code","sku","productCode"], "")
-                    if sku:
-                        items.append({"sku": sku, "qty": qty, "unit_price": price})
+                    it = _extract_from_entry(e, included)
+                    if it: items.append(it)
             if items:
-                debug["orderentries_count"] = len(items)
+                debug["A_count"] = len(items)
                 return items
-            else:
-                debug["orderentries_count"] = 0
+            debug["A_count"] = 0
         except httpx.HTTPError as e:
-            debug["orderentries_error"] = repr(e)
+            debug["A_error"] = repr(e)
 
-        # B) orders/{id}?include=entries.product
+        # ---- A2) orderentries: filter[orders.id]  (встречается у некоторых)
+        try:
+            params = {"filter[orders.id]": order_id, "include": "product", "page[size]": "200"}
+            r = await cli.get("/orderentries", params=params, headers=headers)
+            debug["A2_status"] = r.status_code
+            j = {}
+            try: j = r.json()
+            except Exception: j = {"raw": (await r.aread())[:400]}
+            debug["A2_preview"] = _preview(j)
+            if r.status_code == 200 and isinstance(j, dict):
+                data = j.get("data", []) or []
+                included = {x["id"]: x for x in (j.get("included", []) or []) if isinstance(x, dict) and "id" in x}
+                for e in data:
+                    it = _extract_from_entry(e, included)
+                    if it: items.append(it)
+            if items:
+                debug["A2_count"] = len(items)
+                return items
+            debug["A2_count"] = 0
+        except httpx.HTTPError as e:
+            debug["A2_error"] = repr(e)
+
+        # ---- C) сабресурс: /orders/{id}/entries?include=product
+        try:
+            params = {"include": "product", "page[size]": "200"}
+            r = await cli.get(f"/orders/{order_id}/entries", params=params, headers=headers)
+            debug["C_status"] = r.status_code
+            j = {}
+            try: j = r.json()
+            except Exception: j = {"raw": (await r.aread())[:400]}
+            debug["C_preview"] = _preview(j)
+            if r.status_code == 200 and isinstance(j, dict):
+                data = j.get("data", []) or []
+                included = {x["id"]: x for x in (j.get("included", []) or []) if isinstance(x, dict) and "id" in x}
+                for e in data:
+                    it = _extract_from_entry(e, included)
+                    if it: items.append(it)
+            if items:
+                debug["C_count"] = len(items)
+                return items
+            debug["C_count"] = 0
+        except httpx.HTTPError as e:
+            debug["C_error"] = repr(e)
+
+        # ---- B) /orders/{id}?include=entries.product
         try:
             params = {"include": "entries.product"}
             r = await cli.get(f"/orders/{order_id}", params=params, headers=headers)
-            debug["order_by_id_status"] = r.status_code
-            try:
-                j = r.json()
-            except Exception:
-                j = {"raw": (await r.aread())[:400]}
-            debug["order_by_id_preview"] = _preview(j)
+            debug["B_status"] = r.status_code
+            j = {}
+            try: j = r.json()
+            except Exception: j = {"raw": (await r.aread())[:400]}
+            debug["B_preview"] = _preview(j)
             if r.status_code == 200 and isinstance(j, dict):
                 included = j.get("included", []) or []
+                incl_map = {x["id"]: x for x in included if isinstance(x, dict) and "id" in x}
                 for inc in included:
-                    if "entry" not in str(inc.get("type","")).lower():
+                    if "entry" not in str(inc.get("type", "")).lower():
                         continue
-                    attrs = inc.get("attributes", {}) or {}
-                    qty = _get_int(attrs, ["quantity","qty","count"], 1)
-                    price = _get_num(attrs, ["unitPrice","basePrice","price"], 0.0)
-                    sku = _get_str(attrs, ["code","productCode","sku"], "")
-                    if not sku:
-                        # из связанного product
-                        rel = inc.get("relationships", {}) or {}
-                        node = rel.get("product", {})
-                        data_node = node.get("data")
-                        if isinstance(data_node, dict):
-                            rid = data_node.get("id")
-                            ref = next((x for x in included if x.get("id")==rid), None)
-                            a2 = (ref or {}).get("attributes", {}) or {}
-                            sku = _get_str(a2, ["code","sku","productCode"], "")
-                    if sku:
-                        items.append({"sku": sku, "qty": qty, "unit_price": price})
+                    it = _extract_from_entry(inc, incl_map)
+                    if it: items.append(it)
             if items:
-                debug["order_by_id_count"] = len(items)
+                debug["B_count"] = len(items)
                 return items
-            else:
-                debug["order_by_id_count"] = 0
+            debug["B_count"] = 0
         except httpx.HTTPError as e:
-            debug["order_by_id_error"] = repr(e)
+            debug["B_error"] = repr(e)
 
-        # C) orders?filter[code]=<number>
+        # ---- D) /orders?filter[code]=<number>&include=entries.product
         if order_number:
             try:
-                params = {"include":"entries.product", "page[size]":"1", "filter[code]": order_number}
+                params = {"include": "entries.product", "page[size]": "1", "filter[code]": order_number}
                 r = await cli.get("/orders", params=params, headers=headers)
-                debug["order_by_code_status"] = r.status_code
-                try:
-                    j = r.json()
-                except Exception:
-                    j = {"raw": (await r.aread())[:400]}
-                debug["order_by_code_preview"] = _preview(j)
+                debug["D_status"] = r.status_code
+                j = {}
+                try: j = r.json()
+                except Exception: j = {"raw": (await r.aread())[:400]}
+                debug["D_preview"] = _preview(j)
                 if r.status_code == 200 and isinstance(j, dict):
                     included = j.get("included", []) or []
+                    incl_map = {x["id"]: x for x in included if isinstance(x, dict) and "id" in x}
                     for inc in included:
-                        if "entry" not in str(inc.get("type","")).lower():
+                        if "entry" not in str(inc.get("type", "")).lower():
                             continue
-                        attrs = inc.get("attributes", {}) or {}
-                        qty = _get_int(attrs, ["quantity","qty","count"], 1)
-                        price = _get_num(attrs, ["unitPrice","basePrice","price"], 0.0)
-                        sku = _get_str(attrs, ["code","productCode","sku"], "")
-                        if not sku:
-                            rel = inc.get("relationships", {}) or {}
-                            node = rel.get("product", {})
-                            data_node = node.get("data")
-                            if isinstance(data_node, dict):
-                                rid = data_node.get("id")
-                                ref = next((x for x in included if x.get("id")==rid), None)
-                                a2 = (ref or {}).get("attributes", {}) or {}
-                                sku = _get_str(a2, ["code","sku","productCode"], "")
-                        if sku:
-                            items.append({"sku": sku, "qty": qty, "unit_price": price})
-                debug["order_by_code_count"] = len(items)
+                        it = _extract_from_entry(inc, incl_map)
+                        if it: items.append(it)
+                debug["D_count"] = len(items)
+                if items:
+                    return items
             except httpx.HTTPError as e:
-                debug["order_by_code_error"] = repr(e)
+                debug["D_error"] = repr(e)
 
     return items
 
-# ---------- write to DB ----------
+# ---------- Запись в БД ----------
 def _upsert_order_with_items(o: OrderIn) -> Tuple[int, int]:
     _ensure_schema()
     ins_o = ins_i = 0
     with _db() as c:
-        # order
+        # upsert order
         if _USE_PG:
             existed = c.execute(_q("SELECT 1 FROM orders WHERE id=:id"), {"id": o.id}).first()
             c.execute(_q("""
@@ -404,7 +427,7 @@ def _upsert_order_with_items(o: OrderIn) -> Tuple[int, int]:
             """, (o.id, o.date, o.customer))
         ins_o += 0 if existed else 1
 
-        # replace items
+        # replace items for this order in both tables
         if _USE_PG:
             c.execute(_q("DELETE FROM order_items WHERE order_id=:id"), {"id": o.id})
             c.execute(_q("DELETE FROM sales       WHERE order_id=:id"), {"id": o.id})
@@ -475,7 +498,7 @@ async def db_stats(_auth: bool = Depends(require_api_key)):
             last   = [dict(r) for r in c.execute("SELECT * FROM sales ORDER BY date DESC LIMIT 10").fetchall()]
     return {"orders": orders, "order_items": items, "sales": sales, "last_sales": last}
 
-# Диагностика одной продажи
+# Диагностика получения позиций по одному заказу
 @router.get("/bridge/diag")
 @router.get("/diag")
 async def diag_bridge(order_id: Optional[str] = Query(None),
@@ -487,25 +510,23 @@ async def diag_bridge(order_id: Optional[str] = Query(None),
                       business_day_start: str = Query("20:00"),
                       _auth: bool = Depends(require_api_key)):
     debug: Dict[str, Any] = {}
+    order_number: Optional[str] = None
     if not order_id:
         if not (start and end):
             raise HTTPException(400, "Provide order_id OR (start & end)")
         s_ms, e_ms = _build_window(start, end, tz, use_bd, business_day_start or "20:00")
         orders = await _iter_orders(s_ms, e_ms, tz, date_field, None, None)
         if not orders:
-            return {"order_id": None, "items": [], "debug": {"msg":"no orders in period"}}
-        # возьмём первый из периода
+            return {"order_id": None, "items": [], "debug": {"msg": "no orders in period"}}
         cand = orders[0]
         order_id = cand["id"]
-        order_number = cand.get("number")
-    else:
-        order_number = None
+        order_number = cand.get("number") or None
 
     items = await _fetch_entries_httpx(order_id, order_number, debug)
     return {"order_id": order_id, "items": items, "debug": debug,
             "hint": "если статус 401/403/404 — проверь права токена на orderentries / include entries"}
 
-# Синхронизация
+# Синхронизация периода в локальную БД (sales + order_items)
 @router.api_route("/bridge/sync", methods=["POST", "GET"])
 @router.api_route("/sync", methods=["POST", "GET"])
 async def profit_sync(
@@ -529,17 +550,26 @@ async def profit_sync(
     s_ms, e_ms = _build_window(start, end, tz, bool(use_bd), business_day_start or "20:00")
     orders = await _iter_orders(s_ms, e_ms, tz, date_field, inc, exc)
     if not orders:
-        return {"status": "ok", "synced_orders": 0, "items_inserted": 0, "skipped": 0}
+        return {"status": "ok", "synced_orders": 0, "items_inserted": 0, "skipped": 0, "skipped_timeouts": 0, "skipped_errors": 0}
 
-    total_o = total_i = skipped = 0
+    total_o = total_i = skipped = skipped_timeouts = skipped_errors = 0
     for od in orders[:max_orders]:
         oid = str(od["id"])
-        onum = od.get("number")
-        debug: Dict[str, Any] = {}
-        items = await _fetch_entries_httpx(oid, onum, debug)
+        onum = od.get("number") or None
+        dbg: Dict[str, Any] = {}
+        try:
+            items = await _fetch_entries_httpx(oid, onum, dbg)
+        except httpx.ReadTimeout:
+            skipped_timeouts += 1
+            continue
+        except Exception:
+            skipped_errors += 1
+            continue
+
         if not items:
             skipped += 1
             continue
+
         o = OrderIn(
             id=oid,
             date=od["date"],
@@ -550,7 +580,14 @@ async def profit_sync(
         total_o += io
         total_i += ii
 
-    return {"status": "ok", "synced_orders": total_o, "items_inserted": total_i, "skipped": skipped}
+    return {
+        "status": "ok",
+        "synced_orders": total_o,
+        "items_inserted": total_i,
+        "skipped": skipped,
+        "skipped_timeouts": skipped_timeouts,
+        "skipped_errors": skipped_errors
+    }
 
 def get_profit_bridge_router() -> APIRouter:
     return router
