@@ -511,7 +511,7 @@ async function syncProfit(){
   if(!df || !dt){ setNote('Сначала задайте период (начало/конец).'); return; }
   try{
     const p = buildSyncParams();
-    const res = await fetchProfitJSON('/profit/sync?' + p.toString(), { method:'POST' });
+    const res = await postProfitWithFallback('/profit/sync', '/profit/bridge/sync', p);
     setNote(`Синхронизация FIFO: заказов=${res?.synced_orders||0}, вставлено позиций=${res?.items_inserted||0}`, true);
     await loadProfitFIFO();
     await checkProfitStatus(); // обновим индикатор
