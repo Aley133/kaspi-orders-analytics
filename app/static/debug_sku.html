@@ -208,7 +208,7 @@ async function run(){
           const det=el('details',{},
             el('summary',{},'raw записи позиции'),
             el('pre',{}, JSON.stringify(row.raw,null,2))
-          ); // ← фикс: без лишней скобки
+          );
           sub.appendChild(det);
           card.appendChild(sub);
         });
