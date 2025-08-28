@@ -14,6 +14,151 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from cachetools import TTLCache
 from httpx import HTTPStatusError, RequestError
+# === DEBUG SKU endpoints ======================================================
+from fastapi.responses import HTMLResponse
+
+def _dbg_safe_get(d: dict, key: str):
+    return d.get(key) if isinstance(d, dict) else None
+
+def _dbg_find_entries(attrs: dict) -> list[dict]:
+    # возможные имена массива позиций
+    for k in ("entries", "items", "positions", "orderItems", "products", "lines", "orderLines"):
+        v = _dbg_safe_get(attrs, k)
+        if isinstance(v, list) and v and isinstance(v[0], dict):
+            return v
+    # fallback: первый list[dict] на 1 уровне
+    for v in attrs.values():
+        if isinstance(v, list) and v and isinstance(v[0], dict):
+            return v
+    return []
+
+_DBG_SKU_KEYS = (
+    "merchantProductCode", "article", "sku", "code", "productCode",
+    "offerId", "vendorCode", "barcode", "skuId", "id"
+)
+_DBG_TITLE_KEYS = (
+    "productName", "name", "title", "itemName", "productTitle", "merchantProductName"
+)
+
+def _dbg_sku_candidates(d: dict) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for k in _DBG_SKU_KEYS:
+        v = _dbg_safe_get(d, k)
+        if isinstance(v, (str, int, float)) and str(v).strip():
+            out[k] = str(v).strip()
+    return out
+
+def _dbg_title_candidates(entry: dict) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for k in _DBG_TITLE_KEYS:
+        v = _dbg_safe_get(entry, k)
+        if isinstance(v, str) and v.strip():
+            out[k] = v.strip()
+    prod = _dbg_safe_get(entry, "product")
+    if isinstance(prod, dict):
+        for k in _DBG_TITLE_KEYS:
+            v = _dbg_safe_get(prod, k)
+            if isinstance(v, str) and v.strip():
+                out[f"product.{k}"] = v.strip()
+    return out
+
+@app.get("/debug/order-by-number")
+async def debug_order_by_number(
+    number: str = Query(..., description="Номер заказа, напр. 624374271"),
+    start: str = Query(..., description="YYYY-MM-DD"),
+    end: str = Query(..., description="YYYY-MM-DD"),
+    tz: str = Query(DEFAULT_TZ),
+    date_field: str = Query("creationDate")
+):
+    if client is None:
+        raise HTTPException(status_code=500, detail="KASPI_TOKEN is not set")
+
+    tzinfo = tzinfo_of(tz)
+    start_dt = parse_date_local(start, tz)
+    end_dt = parse_date_local(end, tz) + timedelta(days=1) - timedelta(milliseconds=1)
+
+    found: list[dict] = []
+    for s, e in iter_chunks(start_dt, end_dt, CHUNK_DAYS):
+        try_field = date_field
+        while True:
+            try:
+                for order in client.iter_orders(start=s, end=e, filter_field=try_field):
+                    attrs = order.get("attributes", {}) or {}
+                    num = _guess_number(attrs, order.get("id"))
+                    if str(num) != str(number):
+                        continue
+
+                    entries = _dbg_find_entries(attrs)
+                    rows = []
+                    for i, ent in enumerate(entries):
+                        rows.append({
+                            "index": i,
+                            "title_candidates": _dbg_title_candidates(ent),
+                            "sku_candidates": _dbg_sku_candidates(ent),
+                            "all_keys": sorted(list(ent.keys())),
+                            "raw": ent,
+                        })
+
+                    ms = extract_ms(attrs, date_field if date_field in attrs else try_field)
+                    found.append({
+                        "order_id": order.get("id"),
+                        "number": num,
+                        "state": attrs.get("state"),
+                        "date_ms": ms,
+                        "date_iso": datetime.fromtimestamp(ms/1000.0, tz=pytz.UTC).astimezone(tzinfo).isoformat() if ms else None,
+                        "top_level_sku_candidates": _dbg_sku_candidates(attrs),
+                        "entries_count": len(entries),
+                        "entries": rows,
+                        "attrs_keys": sorted(list(attrs.keys())),
+                        "attrs_raw": attrs,
+                    })
+                break
+            except HTTPStatusError as ee:
+                if ee.response.status_code in (400, 422) and try_field != "creationDate":
+                    try_field = "creationDate"
+                    continue
+                raise
+
+    return {"ok": True, "items": found}
+
+@app.get("/debug/sample")
+async def debug_sample(
+    start: str = Query(...), end: str = Query(...),
+    tz: str = Query(DEFAULT_TZ), date_field: str = Query("creationDate"),
+    limit: int = Query(10)
+):
+    if client is None:
+        raise HTTPException(status_code=500, detail="KASPI_TOKEN is not set")
+
+    start_dt = parse_date_local(start, tz)
+    end_dt = parse_date_local(end, tz) + timedelta(days=1) - timedelta(milliseconds=1)
+
+    out: list[dict] = []
+    for s, e in iter_chunks(start_dt, end_dt, CHUNK_DAYS):
+        try_field = date_field
+        while True:
+            try:
+                for order in client.iter_orders(start=s, end=e, filter_field=try_field):
+                    attrs = order.get("attributes", {}) or {}
+                    entries = _dbg_find_entries(attrs)
+                    first = entries[0] if entries else {}
+                    out.append({
+                        "order_id": order.get("id"),
+                        "number": _guess_number(attrs, order.get("id")),
+                        "state": attrs.get("state"),
+                        "title_candidates": _dbg_title_candidates(first) if first else {},
+                        "sku_candidates": _dbg_sku_candidates(first) if first else {},
+                    })
+                    if len(out) >= limit:
+                        return {"ok": True, "items": out}
+                break
+            except HTTPStatusError as ee:
+                if ee.response.status_code in (400, 422) and try_field != "creationDate":
+                    try_field = "creationDate"
+                    continue
+                raise
+    return {"ok": True, "items": out}
+
 
 # FIFO router (используется фронтом под /profit)
 from app.api.profit_fifo import get_profit_fifo_router
