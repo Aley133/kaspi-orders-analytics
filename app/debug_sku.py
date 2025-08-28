@@ -3,27 +3,31 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timedelta, time as dt_time
-from typing import Any, Iterable, Tuple, List, Dict, Optional
+from typing import Any, Tuple, List, Dict, Optional
 
 import pytz
 import httpx
 from fastapi import APIRouter, Query, HTTPException
 
 # ─────────────────────────────────────────────────────────────────────────────
-# HTTPX: таймауты и лимиты (все 4 параметра заданы, чтобы избежать ошибок)
+# HTTPX: таймауты и лимиты
 # ─────────────────────────────────────────────────────────────────────────────
-HTTPX_TIMEOUT = httpx.Timeout(connect=10.0, read=45.0, write=15.0, pool=60.0)
-HTTPX_LIMITS  = httpx.Limits(max_connections=20, max_keepalive_connections=10)
+HTTPX_TIMEOUT = httpx.Timeout(connect=10.0, read=70.0, write=15.0, pool=60.0)  # оставляем повышенные таймауты
+HTTPX_LIMITS = httpx.Limits(max_connections=20, max_keepalive_connections=10)
 HTTPX_KW = dict(timeout=HTTPX_TIMEOUT, limits=HTTPX_LIMITS)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ENV
 # ─────────────────────────────────────────────────────────────────────────────
-KASPI_TOKEN   = os.getenv("KASPI_TOKEN", "").strip()
+KASPI_TOKEN = os.getenv("KASPI_TOKEN", "").strip()
 KASPI_BASEURL = os.getenv("KASPI_BASE_URL", "https://kaspi.kz/shop/api/v2").rstrip("/")
 # опционально можно перечислить альтернативы через запятую
-KASPI_BASEURLS_EXTRA = [u.strip().rstrip("/") for u in (os.getenv("KASPI_BASE_URLS","").split(",") if os.getenv("KASPI_BASE_URLS") else []) if u.strip()]
+KASPI_BASEURLS_EXTRA = [
+    u.strip().rstrip("/") for u in (os.getenv("KASPI_BASE_URLS", "").split(",") if os.getenv("KASPI_BASE_URLS") else [])
+    if u.strip()
+]
 KASPI_FALLBACKS = ["https://seller-api.kaspi.kz/shop/api/v2"]
+
 
 def _headers() -> Dict[str, str]:
     if not KASPI_TOKEN:
@@ -32,7 +36,9 @@ def _headers() -> Dict[str, str]:
         "X-Auth-Token": KASPI_TOKEN,
         "Accept": "application/vnd.api+json",
         "Content-Type": "application/vnd.api+json",
+        "User-Agent": "Mozilla/5.0",  # как в консоли
     }
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ВРЕМЯ / ОКНА
@@ -43,10 +49,12 @@ def tzinfo_of(name: str) -> pytz.BaseTzInfo:
     except Exception:
         raise HTTPException(status_code=400, detail=f"Bad timezone: {name}")
 
+
 def parse_date_local(d: str, tz: str) -> datetime:
     z = tzinfo_of(tz)
     y, m, dd = map(int, d.split("-"))
     return z.localize(datetime(y, m, dd, 0, 0, 0, 0))
+
 
 def parse_hhmm(s: Optional[str]) -> Optional[dt_time]:
     if not s:
@@ -57,12 +65,13 @@ def parse_hhmm(s: Optional[str]) -> Optional[dt_time]:
     except Exception:
         return None
 
+
 def build_window_ms(
     start: str,
     end: str,
     tz: str,
     start_time: Optional[str] = None,
-    end_time: Optional[str]   = None,
+    end_time: Optional[str] = None,
 ) -> Tuple[int, int]:
     """
     Возвращает (start_ms, end_ms) в UTC миллисекундах.
@@ -70,18 +79,22 @@ def build_window_ms(
     """
     z = tzinfo_of(tz)
     s0 = parse_date_local(start, tz)
-    e0 = parse_date_local(end,   tz)
+    e0 = parse_date_local(end, tz)
 
     st = parse_hhmm(start_time)
     et = parse_hhmm(end_time)
 
     s_local = s0 if st is None else z.localize(datetime.combine(s0.date(), st))
-    e_local = z.localize(datetime.combine(e0.date(), dt_time(23, 59, 59, 999000))) if et is None \
-              else z.localize(datetime.combine(e0.date(), et))
+    e_local = (
+        z.localize(datetime.combine(e0.date(), dt_time(23, 59, 59, 999000)))
+        if et is None
+        else z.localize(datetime.combine(e0.date(), et))
+    )
 
     s_ms = int(s_local.astimezone(pytz.UTC).timestamp() * 1000)
     e_ms = int(e_local.astimezone(pytz.UTC).timestamp() * 1000)
     return s_ms, e_ms
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ПАРСИНГ ПОЛЕЙ
@@ -89,12 +102,14 @@ def build_window_ms(
 def _safe_get(d: dict, k: str):
     return d.get(k) if isinstance(d, dict) else None
 
+
 def _guess_number(attrs: dict, fallback_id: str) -> str:
     for k in ("code", "orderNumber", "number"):
         v = attrs.get(k)
         if isinstance(v, str) and v.strip():
             return v.strip()
     return str(fallback_id)
+
 
 def extract_ms(attrs: dict, field: str) -> Optional[int]:
     v = attrs.get(field)
@@ -108,13 +123,23 @@ def extract_ms(attrs: dict, field: str) -> Optional[int]:
         except Exception:
             return None
 
+
 # кандидаты для SKU/Title
 SKU_KEYS = (
-    "merchantProductCode","article","sku","code",
-    "productCode","offerId","vendorCode","barcode",
-    "skuId","id","merchantProductId",
+    "merchantProductCode",
+    "article",
+    "sku",
+    "code",
+    "productCode",
+    "offerId",
+    "vendorCode",
+    "barcode",
+    "skuId",
+    "id",
+    "merchantProductId",
 )
-TITLE_KEYS = ("productName","name","title","itemName","productTitle","merchantProductName")
+TITLE_KEYS = ("productName", "name", "title", "itemName", "productTitle", "merchantProductName")
+
 
 def sku_candidates(d: dict) -> Dict[str, str]:
     out: Dict[str, str] = {}
@@ -123,6 +148,7 @@ def sku_candidates(d: dict) -> Dict[str, str]:
         if isinstance(v, (str, int, float)) and str(v).strip():
             out[k] = str(v).strip()
     return out
+
 
 def title_candidates(entry: dict) -> Dict[str, str]:
     out: Dict[str, str] = {}
@@ -138,13 +164,16 @@ def title_candidates(entry: dict) -> Dict[str, str]:
                 out[f"product.{k}"] = v.strip()
     return out
 
+
 def _index_included(included: List[dict]) -> Dict[Tuple[str, str], dict]:
     idx: Dict[Tuple[str, str], dict] = {}
     for it in included or []:
-        t = it.get("type"); i = it.get("id")
+        t = it.get("type")
+        i = it.get("id")
         if t and i:
             idx[(str(t), str(i))] = it
     return idx
+
 
 def _rel_id(entry: dict, rel_name: str) -> Tuple[Optional[str], Optional[str]]:
     rel = entry.get("relationships", {}).get(rel_name, {})
@@ -153,12 +182,13 @@ def _rel_id(entry: dict, rel_name: str) -> Tuple[Optional[str], Optional[str]]:
         return data.get("type"), data.get("id")
     return None, None
 
+
 def _extract_entry(entry: dict, incl_index: Dict[Tuple[str, str], dict]) -> Optional[Dict[str, Any]]:
     """
     Универсальный извлекатель позиции: SKU, qty, unit_price + устойчивые хаки.
     """
     attrs = entry.get("attributes", {}) if "attributes" in entry else entry
-    qty   = int(attrs.get("quantity") or attrs.get("qty") or attrs.get("count") or 1)
+    qty = int(attrs.get("quantity") or attrs.get("qty") or attrs.get("count") or 1)
     price = float(attrs.get("unitPrice") or attrs.get("basePrice") or attrs.get("price") or 0.0)
 
     # 1) пробуем SKU напрямую из атрибутов
@@ -175,7 +205,7 @@ def _extract_entry(entry: dict, incl_index: Dict[Tuple[str, str], dict]) -> Opti
         if not t or not i:
             return None
         ref = incl_index.get((str(t), str(i)), {}) or {}
-        a   = ref.get("attributes", {}) if isinstance(ref, dict) else {}
+        a = ref.get("attributes", {}) if isinstance(ref, dict) else {}
         if "master" in str(t).lower():
             return i or a.get("id") or a.get("code") or a.get("sku") or a.get("productCode")
         return a.get("code") or a.get("sku") or a.get("productCode") or i
@@ -184,9 +214,11 @@ def _extract_entry(entry: dict, incl_index: Dict[Tuple[str, str], dict]) -> Opti
         sku = from_rel("product") or from_rel("masterProduct") or from_rel("merchantProduct") or ""
 
     # 3) композит, если есть offer-like ID
-    prod_t, prod_id = _rel_id(entry, "product")
-    _mp_t, mp_id    = _rel_id(entry, "merchantProduct")
-    offer_like = attrs.get("offerId") or attrs.get("merchantProductId") or mp_id
+    _prod_t, prod_id = _rel_id(entry, "product")
+    _mp_t, mp_id = _rel_id(entry, "merchantProduct")
+    offer_like = (entry.get("attributes", {}) or {}).get("offerId") or (entry.get("attributes", {}) or {}).get(
+        "merchantProductId"
+    ) or mp_id
     if (prod_id or mp_id) and offer_like:
         composed = f"{(prod_id or mp_id)}_{offer_like}"
         if not sku or str(offer_like) not in sku:
@@ -207,15 +239,67 @@ def _extract_entry(entry: dict, incl_index: Dict[Tuple[str, str], dict]) -> Opti
 
     return {"sku": str(sku).strip(), "qty": qty, "unit_price": price}
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # /orders: гибкие фильтры по дате (несколько форм синтаксиса)
 # ─────────────────────────────────────────────────────────────────────────────
 FILTER_FORMS = (
     lambda f, s, e: {f"filter[orders][{f}][$ge]": str(s), f"filter[orders][{f}][$le]": str(e)},
-    lambda f, s, e: {f"filter[{f}][$ge]": str(s),         f"filter[{f}][$le]": str(e)},
-    lambda f, s, e: {f"filter[{f}][ge]": str(s),          f"filter[{f}][le]": str(e)},
+    lambda f, s, e: {f"filter[{f}][$ge]": str(s), f"filter[{f}][$le]": str(e)},
+    lambda f, s, e: {f"filter[{f}][ge]": str(s), f"filter[{f}][le]": str(e)},
 )
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ПОМОЩНИК ПОИСКА ПО НОМЕРУ (может пригодиться в других ручках)
+# ─────────────────────────────────────────────────────────────────────────────
+async def _find_order_id_by_code(
+    code: str,
+    start_ms: int,
+    end_ms: int,
+    date_field: str,
+    page_size: int = 20,
+    max_pages: int = 200,
+) -> Optional[Tuple[str, dict]]:
+    """
+    Идём по страницам /orders c фильтром по времени и возвращаем (order_id, attrs)
+    как только найдём совпадение по code.
+    """
+    headers = _headers()
+    ok_form = None  # запоминаем сработавший синтаксис фильтра
+    async with httpx.AsyncClient(base_url=KASPI_BASEURL, **HTTPX_KW) as cli:
+        for page in range(max_pages):
+            last_exc = None
+            for make_filter in ((ok_form,) if ok_form else FILTER_FORMS):
+                params = {"page[number]": str(page), "page[size]": str(page_size)}
+                params.update(make_filter(date_field or "creationDate", start_ms, end_ms))
+                try:
+                    r = await cli.get("/orders", params=params, headers=headers)
+                    r.raise_for_status()
+                    j = r.json()
+                    data = j.get("data", []) or []
+                    if not data:
+                        return None
+                    for od in data:
+                        oid = od.get("id")
+                        attrs = od.get("attributes", {}) or {}
+                        code_here = _guess_number(attrs, oid)
+                        if str(code_here) == str(code):
+                            return str(oid), attrs
+                    ok_form = make_filter
+                    break  # к следующей странице
+                except httpx.HTTPError as e:
+                    last_exc = e
+                    continue
+            else:
+                # ни одна форма фильтра не прошла
+                raise HTTPException(status_code=502, detail=f"Kaspi /orders failed: {repr(last_exc)}")
+    return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Пагинация по /orders (возвращает «сырые» JSON:API элементы)
+# ─────────────────────────────────────────────────────────────────────────────
 async def _iter_orders_httpx(
     start_ms: int,
     end_ms: int,
@@ -235,7 +319,7 @@ async def _iter_orders_httpx(
         while page < max_pages:
             last_exc: Optional[Exception] = None
             # сначала пробуем известную «успешную» форму, затем остальные
-            forms = ( (ok_form,) if ok_form else FILTER_FORMS )
+            forms = (ok_form,) if ok_form else FILTER_FORMS
             for make_filter in forms:
                 params = {"page[number]": str(page), "page[size]": str(page_size)}
                 params.update(make_filter(date_field or "creationDate", start_ms, end_ms))
@@ -258,13 +342,58 @@ async def _iter_orders_httpx(
             page += 1
     return out
 
+
 # ─────────────────────────────────────────────────────────────────────────────
-# ПОЛУЧЕНИЕ ПОЗИЦИЙ ЗАКАЗА (3 стратегии)
+# ПОЛУЧЕНИЕ ПОЗИЦИЙ ЗАКАЗА (3 стратегии) + ПАКОВЩИК
 # ─────────────────────────────────────────────────────────────────────────────
 async def _fetch_by_order_id(order_id: str) -> Dict[str, Any]:
     headers = _headers()
     debug_info: Dict[str, Any] = {}
     entries_out: List[dict] = []
+
+    # собираем удобный объект позиции: название(я), sku(все кандидаты), qty/цены, id связей
+    def _pack_entry(entry: dict, included_index: Dict[Tuple[str, str], dict], ex: Dict[str, Any], idx: int) -> dict:
+        attrs_e = entry.get("attributes", {}) or {}
+        titles = title_candidates(attrs_e)       # базовые заголовки из атрибутов
+        sku_c = {"extracted": ex["sku"]}         # уже извлечённый артикул
+
+        # offer.{name,code} прямо из атрибутов
+        off = attrs_e.get("offer") or {}
+        if isinstance(off, dict):
+            if off.get("name"):
+                titles["offer.name"] = off["name"]
+            if off.get("code"):
+                sku_c["offer.code"] = str(off["code"])
+
+        ids: Dict[str, Any] = {}
+        # пробегаемся по product / merchantProduct / masterProduct
+        for rel_key in ("product", "merchantProduct", "masterProduct"):
+            t, rel_id = _rel_id(entry, rel_key)
+            if not (t and rel_id):
+                continue
+            ids[rel_key] = rel_id
+            inc = included_index.get((str(t), str(rel_id))) or {}
+            inc_attrs = inc.get("attributes", {}) or {}
+            # подтянем возможные названия из включённых сущностей
+            for k in TITLE_KEYS:
+                v = _safe_get(inc_attrs, k)
+                if isinstance(v, str) and v.strip():
+                    titles[f"{rel_key}.{k}"] = v.strip()
+            # и коды как кандидаты SKU
+            code_inc = _safe_get(inc_attrs, "code")
+            if code_inc:
+                sku_c[f"{rel_key}.code"] = str(code_inc)
+
+        return {
+            "index": idx,
+            "qty": attrs_e.get("quantity"),
+            "basePrice": attrs_e.get("basePrice"),
+            "totalPrice": attrs_e.get("totalPrice"),
+            "title_candidates": titles,
+            "sku_candidates": sku_c,
+            "ids": ids,
+            "raw": entry,
+        }
 
     async with httpx.AsyncClient(base_url=KASPI_BASEURL, **HTTPX_KW) as cli:
         # S1: сабресурс с include product/merchantProduct/masterProduct
@@ -272,29 +401,15 @@ async def _fetch_by_order_id(order_id: str) -> Dict[str, Any]:
             params = {"page[size]": "200", "include": "product,merchantProduct,masterProduct"}
             r = await cli.get(f"/orders/{order_id}/entries", params=params, headers=headers)
             debug_info["entries_sub_status"] = r.status_code
-            j = r.json() if r.headers.get("content-type","").startswith("application/vnd.api+json") else {}
+            j = r.json() if r.headers.get("content-type", "").startswith("application/vnd.api+json") else {}
             data_list = j.get("data", []) if isinstance(j, dict) else []
-            included  = _index_included(j.get("included", [])) if isinstance(j, dict) else {}
+            included = _index_included(j.get("included", [])) if isinstance(j, dict) else {}
             for i, entry in enumerate(data_list):
                 ex = _extract_entry(entry, included)
                 if not ex:
                     continue
-                titles = title_candidates(entry.get("attributes", {}) or {})
-                for rel_key in ("product", "merchantProduct", "masterProduct"):
-                    t, rel_id = _rel_id(entry, rel_key)
-                    if t and rel_id:
-                        inc = included.get((str(t), str(rel_id))) or {}
-                        inc_attrs = inc.get("attributes", {}) or {}
-                        for k in TITLE_KEYS:
-                            v = _safe_get(inc_attrs, k)
-                            if isinstance(v, str) and v.strip():
-                                titles[f"{rel_key}.{k}"] = v.strip()
-                entries_out.append({
-                    "index": i,
-                    "title_candidates": titles,
-                    "sku_candidates": {"extracted": ex["sku"]},
-                    "raw": entry,
-                })
+                # УПАКОВКА (новая)
+                entries_out.append(_pack_entry(entry, included, ex, i))
             if entries_out:
                 return {"source": "orders/{id}/entries", "entries": entries_out, "debug": debug_info}
         except httpx.HTTPError as e:
@@ -309,34 +424,20 @@ async def _fetch_by_order_id(order_id: str) -> Dict[str, Any]:
             included = _index_included(j.get("included", [])) if isinstance(j, dict) else {}
             irow = 0
             for inc_obj in (j.get("included", []) or []):
-                if "entry" not in str(inc_obj.get("type","")).lower():
+                if "entry" not in str(inc_obj.get("type", "")).lower():
                     continue
                 ex = _extract_entry(inc_obj, included)
                 if not ex:
                     continue
-                titles = title_candidates(inc_obj.get("attributes", {}) or {})
-                for rel_key in ("product", "merchantProduct", "masterProduct"):
-                    t, rel_id = _rel_id(inc_obj, rel_key)
-                    if t and rel_id:
-                        ref = included.get((str(t), str(rel_id))) or {}
-                        ref_attrs = ref.get("attributes", {}) or {}
-                        for k in TITLE_KEYS:
-                            v = _safe_get(ref_attrs, k)
-                            if isinstance(v, str) and v.strip():
-                                titles[f"{rel_key}.{k}"] = v.strip()
-                entries_out.append({
-                    "index": irow,
-                    "title_candidates": titles,
-                    "sku_candidates": {"extracted": ex["sku"]},
-                    "raw": inc_obj,
-                })
+                # УПАКОВКА (новая)
+                entries_out.append(_pack_entry(inc_obj, included, ex, irow))
                 irow += 1
             if entries_out:
                 return {"source": "orders?include=entries.product", "entries": entries_out, "debug": debug_info}
         except httpx.HTTPError as e:
             debug_info["order_inc_prod_error"] = repr(e)
 
-        # S3: /orderentries по order.id
+        # S3: /orderentries по order.id (оставим прежнюю простую схему)
         try:
             params = {"filter[order.id]": order_id, "page[size]": "200"}
             r = await cli.get("/orderentries", params=params, headers=headers)
@@ -348,18 +449,21 @@ async def _fetch_by_order_id(order_id: str) -> Dict[str, Any]:
                 if not ex:
                     continue
                 titles = title_candidates(entry.get("attributes", {}) or {})
-                entries_out.append({
-                    "index": i,
-                    "title_candidates": titles,
-                    "sku_candidates": {"extracted": ex["sku"]},
-                    "raw": entry,
-                })
+                entries_out.append(
+                    {
+                        "index": i,
+                        "title_candidates": titles,
+                        "sku_candidates": {"extracted": ex["sku"]},
+                        "raw": entry,
+                    }
+                )
             if entries_out:
                 return {"source": "orderentries?filter[order.id]", "entries": entries_out, "debug": debug_info}
         except httpx.HTTPError as e:
             debug_info["orderentries_error"] = repr(e)
 
     return {"source": "none", "entries": entries_out, "debug": debug_info}
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ПРОВЕРКА ПРАВ: лёгкие запросы + альтернативные хосты
@@ -368,8 +472,10 @@ def _all_bases() -> List[str]:
     seen, out = set(), []
     for u in [KASPI_BASEURL, *KASPI_BASEURLS_EXTRA, *KASPI_FALLBACKS]:
         if u and u not in seen:
-            seen.add(u); out.append(u)
+            seen.add(u)
+            out.append(u)
     return out
+
 
 async def _probe_on_base(
     base: str,
@@ -380,7 +486,7 @@ async def _probe_on_base(
 ) -> Dict[str, Any]:
     result: Dict[str, Any] = {"base": base, "orders": {}, "orderentries": {}, "entries_product": {}}
     tiny_timeout = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=10.0)
-    tiny_limits  = httpx.Limits(max_connections=5, max_keepalive_connections=2)
+    tiny_limits = httpx.Limits(max_connections=5, max_keepalive_connections=2)
     async with httpx.AsyncClient(base_url=base, timeout=tiny_timeout, limits=tiny_limits) as cli:
         # /orders — 1 элемент, узкое окно, корректный синтаксис
         params_orders = {
@@ -395,7 +501,7 @@ async def _probe_on_base(
             r = await cli.get("/orders", params=params_orders, headers=_headers())
             result["orders"]["status"] = r.status_code
             r.raise_for_status()
-            j = r.json() if r.headers.get("content-type","").startswith("application/vnd.api+json") else {}
+            j = r.json() if r.headers.get("content-type", "").startswith("application/vnd.api+json") else {}
             data = j.get("data", []) if isinstance(j, dict) else []
             result["orders"]["ok"] = True
             result["orders"]["count"] = len(data)
@@ -416,7 +522,7 @@ async def _probe_on_base(
             r = await cli.get("/orderentries", params={"filter[order.id]": order_id, "page[size]": "1"}, headers=_headers())
             result["orderentries"]["status"] = r.status_code
             r.raise_for_status()
-            j = r.json() if r.headers.get("content-type","").startswith("application/vnd.api+json") else {}
+            j = r.json() if r.headers.get("content-type", "").startswith("application/vnd.api+json") else {}
             data = j.get("data", []) if isinstance(j, dict) else []
             result["orderentries"]["ok"] = True
             result["orderentries"]["count"] = len(data)
@@ -432,7 +538,7 @@ async def _probe_on_base(
             r = await cli.get(f"/orders/{order_id}", params={"include": "entries.product"}, headers=_headers())
             result["entries_product"]["status"] = r.status_code
             r.raise_for_status()
-            j = r.json() if r.headers.get("content-type","").startswith("application/vnd.api+json") else {}
+            j = r.json() if r.headers.get("content-type", "").startswith("application/vnd.api+json") else {}
             inc = j.get("included", []) if isinstance(j, dict) else []
             result["entries_product"]["ok"] = True
             result["entries_product"]["included"] = len(inc)
@@ -445,6 +551,7 @@ async def _probe_on_base(
 
     return result
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # РОУТЕР
 # ─────────────────────────────────────────────────────────────────────────────
@@ -453,88 +560,152 @@ def get_debug_router(default_tz: str = "Asia/Almaty", chunk_days: int = 3) -> AP
     Роуты:
       GET /debug/order-by-number?number=...&start=YYYY-MM-DD&end=YYYY-MM-DD&start_time=HH:MM&end_time=HH:MM&tz=...&date_field=...
       GET /debug/sample?start=YYYY-MM-DD&end=YYYY-MM-DD&start_time=HH:MM&end_time=HH:MM&tz=...&date_field=...&limit=10
-      GET /debug/perm-check?order_id=...&start=YYYY-MM-DD&end=YYYY-MM-DD&start_time=HH:MM&end_time=HH:MM&tz=...&date_field=...
+      GET /debug/sample-full?start=YYYY-MM-DD&end=YYYY-MM-DD&... — 10 заказов → все позиции
+      GET /debug/perm-check?order_id=...&start=YYYY-MM-DD&end=YYYY-MM-DD&...
     """
     router = APIRouter()
 
+    # ── «как в консоли»: прямой поиск кода, крупная пагинация + явный сорт
     @router.get("/debug/order-by-number")
     async def order_by_number(
-        number: str = Query(..., description="Номер заказа (code)"),
-        start: str = Query(..., description="YYYY-MM-DD"),
-        end: str   = Query(..., description="YYYY-MM-DD"),
+        number: str = Query(...),
+        start: str = Query(...),
+        end: str = Query(...),
         tz: str = Query(default_tz),
         date_field: str = Query("creationDate"),
-        start_time: Optional[str] = Query(None, description="HH:MM"),
-        end_time:   Optional[str] = Query(None, description="HH:MM"),
+        start_time: Optional[str] = Query(None),
+        end_time: Optional[str] = Query(None),
+        page_size: int = Query(100, ge=1, le=200),  # по умолчанию 100 как в консоли
+        max_pages: int = Query(150, ge=1, le=1000),
     ):
         if not number.strip():
-            raise HTTPException(status_code=400, detail="number is empty")
+            raise HTTPException(400, "number is empty")
 
         tzinfo = tzinfo_of(tz)
         s_ms, e_ms = build_window_ms(start, end, tz, start_time, end_time)
 
-        results: List[dict] = []
-        # идём кусками (по chunk_days), чтобы не ловить тяжёлые запросы
-        s_local = datetime.fromtimestamp(s_ms/1000.0, tz=pytz.UTC).astimezone(tzinfo)
-        e_local = datetime.fromtimestamp(e_ms/1000.0, tz=pytz.UTC).astimezone(tzinfo)
-        cur_s = s_local
-        while cur_s <= e_local:
-            cur_e = min(cur_s + timedelta(days=chunk_days) - timedelta(milliseconds=1), e_local)
-            cs_ms = int(cur_s.astimezone(pytz.UTC).timestamp() * 1000)
-            ce_ms = int(cur_e.astimezone(pytz.UTC).timestamp() * 1000)
+        headers = _headers()
+        async with httpx.AsyncClient(base_url=KASPI_BASEURL, **HTTPX_KW) as cli:
+            # 1) быстро ищем order_id по коду
+            order_id: Optional[str] = None
+            attrs: Dict[str, Any] = {}
+            for page in range(max_pages):
+                params = {
+                    "page[number]": str(page),
+                    "page[size]": str(page_size),
+                    "sort": f"-{date_field or 'creationDate'}",
+                    f"filter[orders][{date_field or 'creationDate'}][$ge]": str(s_ms),
+                    f"filter[orders][{date_field or 'creationDate'}][$le]": str(e_ms),
+                }
+                r = await cli.get("/orders", params=params, headers=headers)
+                r.raise_for_status()
+                j = r.json()
+                data = j.get("data", []) or []
+                if not data:
+                    break
+                for od in data:
+                    oid = od.get("id")
+                    a = od.get("attributes", {}) or {}
+                    code_here = _guess_number(a, oid)
+                    if str(code_here) == str(number):
+                        order_id, attrs = str(oid), a
+                        break
+                if order_id:
+                    break
 
-            try:
-                orders = await _iter_orders_httpx(cs_ms, ce_ms, date_field)
-            except HTTPException as e:
-                # пробрасываем понятную ошибку вверх
-                raise e
-            except httpx.RequestError as e:
-                raise HTTPException(status_code=502, detail=f"Network: {e!r}")
+            if not order_id:
+                return {"ok": True, "items": []}
 
-            for od in orders:
-                oid   = od.get("id")
-                attrs = od.get("attributes", {}) or {}
-                code  = _guess_number(attrs, oid)
-                if str(code) != str(number):
+            # 2) позиции заказа (+ include, чтобы достать SKU/название)
+            r = await cli.get(
+                f"/orders/{order_id}/entries",
+                params={"page[size]": "200", "include": "product,merchantProduct,masterProduct"},
+                headers=headers,
+            )
+            r.raise_for_status()
+            j = r.json()
+            included = _index_included(j.get("included", []) or [])
+            entries: List[Dict[str, Any]] = []
+            for i, entry in enumerate(j.get("data", []) or []):
+                ex = _extract_entry(entry, included)
+                if not ex:
                     continue
+                # упаковываем через новый хелпер, чтобы добавить offer/product/merchant/master информацию
+                # (дублируем логику packer из _fetch_by_order_id, чтобы ответ был идентичным формату)
+                attrs_e = entry.get("attributes", {}) or {}
+                titles = title_candidates(attrs_e)
+                sku_c = {"extracted": ex["sku"]}
+                off = attrs_e.get("offer") or {}
+                if isinstance(off, dict):
+                    if off.get("name"):
+                        titles["offer.name"] = off["name"]
+                    if off.get("code"):
+                        sku_c["offer.code"] = str(off["code"])
+                ids: Dict[str, Any] = {}
+                for rel_key in ("product", "merchantProduct", "masterProduct"):
+                    t, rel_id = _rel_id(entry, rel_key)
+                    if t and rel_id:
+                        ids[rel_key] = rel_id
+                        ref = included.get((str(t), str(rel_id))) or {}
+                        ref_attrs = ref.get("attributes", {}) or {}
+                        for k in TITLE_KEYS:
+                            v = _safe_get(ref_attrs, k)
+                            if isinstance(v, str) and v.strip():
+                                titles[f"{rel_key}.{k}"] = v.strip()
+                        code_inc = _safe_get(ref_attrs, "code")
+                        if code_inc:
+                            sku_c[f"{rel_key}.code"] = str(code_inc)
+                entries.append(
+                    {
+                        "index": i,
+                        "qty": attrs_e.get("quantity"),
+                        "basePrice": attrs_e.get("basePrice"),
+                        "totalPrice": attrs_e.get("totalPrice"),
+                        "title_candidates": titles,
+                        "sku_candidates": sku_c,
+                        "ids": ids,
+                        "raw": entry,
+                    }
+                )
 
-                entries_data = await _fetch_by_order_id(oid)
-                ms  = extract_ms(attrs, date_field if date_field in attrs else "creationDate")
-                results.append({
-                    "order_id": oid,
-                    "number": code,
-                    "state": attrs.get("state"),
-                    "date_ms": ms,
-                    "date_iso": (datetime.fromtimestamp(ms/1000.0, tz=pytz.UTC).astimezone(tzinfo).isoformat() if ms else None),
-                    "top_level_sku_candidates": sku_candidates(attrs),
-                    "entries_count": len(entries_data.get("entries", [])),
-                    "entries": entries_data.get("entries", []),
-                    "attributes_keys": sorted(list(attrs.keys())),
-                    "attributes_raw": attrs,
-                    "entries_api_debug": entries_data.get("debug", {}),
-                    "source": entries_data.get("source"),
-                })
+            ms = extract_ms(attrs, date_field if date_field in attrs else "creationDate")
+            tz_dt = datetime.fromtimestamp(ms / 1000, pytz.UTC).astimezone(tzinfo).isoformat() if ms else None
+            return {
+                "ok": True,
+                "items": [
+                    {
+                        "order_id": order_id,
+                        "number": _guess_number(attrs, order_id),
+                        "state": attrs.get("state"),
+                        "date_ms": ms,
+                        "date_iso": tz_dt,
+                        "top_level_sku_candidates": sku_candidates(attrs),
+                        "entries_count": len(entries),
+                        "entries": entries,
+                        "attributes_keys": sorted(list(attrs.keys())),
+                        "attributes_raw": attrs,
+                        "source": "orders/{id}/entries",
+                    }
+                ],
+            }
 
-            cur_s = cur_e + timedelta(milliseconds=1)
-
-        return {"ok": True, "items": results}
-
+    # ── семплирование заказов и извлечение первой позиции
     @router.get("/debug/sample")
     async def debug_sample(
         start: str = Query(..., description="YYYY-MM-DD"),
-        end: str   = Query(..., description="YYYY-MM-DD"),
+        end: str = Query(..., description="YYYY-MM-DD"),
         tz: str = Query(default_tz),
         date_field: str = Query("creationDate"),
         start_time: Optional[str] = Query(None, description="HH:MM"),
-        end_time:   Optional[str] = Query(None, description="HH:MM"),
+        end_time: Optional[str] = Query(None, description="HH:MM"),
         limit: int = Query(10, ge=1, le=200),
     ):
         tzinfo = tzinfo_of(tz)
         s_ms, e_ms = build_window_ms(start, end, tz, start_time, end_time)
 
         out: List[dict] = []
-        s_local = datetime.fromtimestamp(s_ms/1000.0, tz=pytz.UTC).astimezone(tzinfo)
-        e_local = datetime.fromtimestamp(e_ms/1000.0, tz=pytz.UTC).astimezone(tzinfo)
+        s_local = datetime.fromtimestamp(s_ms / 1000.0, tz=pytz.UTC).astimezone(tzinfo)
+        e_local = datetime.fromtimestamp(e_ms / 1000.0, tz=pytz.UTC).astimezone(tzinfo)
         cur_s = s_local
         while cur_s <= e_local and len(out) < limit:
             cur_e = min(cur_s + timedelta(days=chunk_days) - timedelta(milliseconds=1), e_local)
@@ -549,17 +720,19 @@ def get_debug_router(default_tz: str = "Asia/Almaty", chunk_days: int = 3) -> AP
                 raise HTTPException(status_code=502, detail=f"Network: {e!r}")
 
             for od in orders:
-                oid   = od.get("id")
+                oid = od.get("id")
                 attrs = od.get("attributes", {}) or {}
                 brief = await _fetch_by_order_id(oid)
                 first = (brief.get("entries") or [{}])[0] if brief.get("entries") else {}
-                out.append({
-                    "order_id": oid,
-                    "number": _guess_number(attrs, oid),
-                    "state": attrs.get("state"),
-                    "title_candidates": first.get("title_candidates") or {},
-                    "sku_candidates": first.get("sku_candidates") or {},
-                })
+                out.append(
+                    {
+                        "order_id": oid,
+                        "number": _guess_number(attrs, oid),
+                        "state": attrs.get("state"),
+                        "title_candidates": first.get("title_candidates") or {},
+                        "sku_candidates": first.get("sku_candidates") or {},
+                    }
+                )
                 if len(out) >= limit:
                     break
 
@@ -567,13 +740,59 @@ def get_debug_router(default_tz: str = "Asia/Almaty", chunk_days: int = 3) -> AP
 
         return {"ok": True, "items": out}
 
+    # ── НОВОЕ: 10 заказов → все позиции (название + SKU + кандидаты)
+    @router.get("/debug/sample-full")
+    async def debug_sample_full(
+        start: str = Query(..., description="YYYY-MM-DD"),
+        end: str = Query(..., description="YYYY-MM-DD"),
+        tz: str = Query(default_tz),
+        date_field: str = Query("creationDate"),
+        start_time: Optional[str] = Query(None, description="HH:MM"),
+        end_time: Optional[str] = Query(None, description="HH:MM"),
+        limit: int = Query(10, ge=1, le=200),
+    ):
+        tzinfo = tzinfo_of(tz)
+        s_ms, e_ms = build_window_ms(start, end, tz, start_time, end_time)
+
+        out: List[dict] = []
+        s_local = datetime.fromtimestamp(s_ms / 1000.0, tz=pytz.UTC).astimezone(tzinfo)
+        e_local = datetime.fromtimestamp(e_ms / 1000.0, tz=pytz.UTC).astimezone(tzinfo)
+        cur_s = s_local
+
+        while cur_s <= e_local and len(out) < limit:
+            cur_e = min(cur_s + timedelta(days=3) - timedelta(milliseconds=1), e_local)
+            cs_ms = int(cur_s.astimezone(pytz.UTC).timestamp() * 1000)
+            ce_ms = int(cur_e.astimezone(pytz.UTC).timestamp() * 1000)
+
+            orders = await _iter_orders_httpx(cs_ms, ce_ms, date_field)
+            for od in orders:
+                if len(out) >= limit:
+                    break
+                oid = od.get("id")
+                attrs = od.get("attributes", {}) or {}
+                brief = await _fetch_by_order_id(oid)
+                out.append(
+                    {
+                        "order_id": oid,
+                        "number": _guess_number(attrs, oid),
+                        "state": attrs.get("state"),
+                        # все позиции заказа со всеми кандидатами названий и SKU
+                        "entries": brief.get("entries", []),
+                    }
+                )
+
+            cur_s = cur_e + timedelta(milliseconds=1)
+
+        return {"ok": True, "items": out}
+
+    # ── проверка прав/доступности ручек на всех базовых хостах
     @router.get("/debug/perm-check")
     async def perm_check(
         order_id: Optional[str] = Query(None, description="Опционально: известный order_id"),
         start: Optional[str] = Query(None, description="YYYY-MM-DD (если пропустить — последние 2 часа)"),
-        end:   Optional[str] = Query(None, description="YYYY-MM-DD"),
+        end: Optional[str] = Query(None, description="YYYY-MM-DD"),
         start_time: Optional[str] = Query(None, description="HH:MM"),
-        end_time:   Optional[str] = Query(None, description="HH:MM"),
+        end_time: Optional[str] = Query(None, description="HH:MM"),
         tz: str = Query(default_tz),
         date_field: str = Query("creationDate"),
     ):
@@ -584,27 +803,31 @@ def get_debug_router(default_tz: str = "Asia/Almaty", chunk_days: int = 3) -> AP
             z = tzinfo_of(tz)
             now = datetime.now(z)
             s = now - timedelta(hours=2)
-            s_ms = int(s.astimezone(pytz.UTC).timestamp()*1000)
-            e_ms = int(now.astimezone(pytz.UTC).timestamp()*1000)
+            s_ms = int(s.astimezone(pytz.UTC).timestamp() * 1000)
+            e_ms = int(now.astimezone(pytz.UTC).timestamp() * 1000)
 
         checks_per_host: List[Dict[str, Any]] = []
         for base in _all_bases():
             tiny_timeout = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=10.0)
-            tiny_limits  = httpx.Limits(max_connections=5, max_keepalive_connections=2)
+            tiny_limits = httpx.Limits(max_connections=5, max_keepalive_connections=2)
             async with httpx.AsyncClient(base_url=base, timeout=tiny_timeout, limits=tiny_limits) as cli:
                 one: Dict[str, Any] = {"base": base}
                 # /orders
                 try:
-                    r = await cli.get("/orders", params={
-                        "page[number]": "0",
-                        "page[size]": "1",
-                        "sort": f"-{date_field or 'creationDate'}",
-                        f"filter[orders][{date_field or 'creationDate'}][$ge]": str(s_ms),
-                        f"filter[orders][{date_field or 'creationDate'}][$le]": str(e_ms),
-                    }, headers=_headers())
+                    r = await cli.get(
+                        "/orders",
+                        params={
+                            "page[number]": "0",
+                            "page[size]": "1",
+                            "sort": f"-{date_field or 'creationDate'}",
+                            f"filter[orders][{date_field or 'creationDate'}][$ge]": str(s_ms),
+                            f"filter[orders][{date_field or 'creationDate'}][$le]": str(e_ms),
+                        },
+                        headers=_headers(),
+                    )
                     one["orders_status"] = r.status_code
                     r.raise_for_status()
-                    j = r.json() if r.headers.get("content-type","").startswith("application/vnd.api+json") else {}
+                    j = r.json() if r.headers.get("content-type", "").startswith("application/vnd.api+json") else {}
                     data = j.get("data", []) if isinstance(j, dict) else []
                     one["orders_ok"] = True
                     one["orders_count"] = len(data)
@@ -620,10 +843,14 @@ def get_debug_router(default_tz: str = "Asia/Almaty", chunk_days: int = 3) -> AP
                 if order_id:
                     # /orderentries
                     try:
-                        r = await cli.get("/orderentries", params={"filter[order.id]": order_id, "page[size]":"1"}, headers=_headers())
+                        r = await cli.get(
+                            "/orderentries",
+                            params={"filter[order.id]": order_id, "page[size]": "1"},
+                            headers=_headers(),
+                        )
                         one["orderentries_status"] = r.status_code
                         r.raise_for_status()
-                        j = r.json() if r.headers.get("content-type","").startswith("application/vnd.api+json") else {}
+                        j = r.json() if r.headers.get("content-type", "").startswith("application/vnd.api+json") else {}
                         data = j.get("data", []) if isinstance(j, dict) else []
                         one["orderentries_ok"] = True
                         one["orderentries_count"] = len(data)
@@ -636,10 +863,10 @@ def get_debug_router(default_tz: str = "Asia/Almaty", chunk_days: int = 3) -> AP
 
                     # include=entries.product
                     try:
-                        r = await cli.get(f"/orders/{order_id}", params={"include":"entries.product"}, headers=_headers())
+                        r = await cli.get(f"/orders/{order_id}", params={"include": "entries.product"}, headers=_headers())
                         one["entries_product_status"] = r.status_code
                         r.raise_for_status()
-                        j = r.json() if r.headers.get("content-type","").startswith("application/vnd.api+json") else {}
+                        j = r.json() if r.headers.get("content-type", "").startswith("application/vnd.api+json") else {}
                         inc = j.get("included", []) if isinstance(j, dict) else []
                         one["entries_product_ok"] = True
                         one["entries_product_included"] = len(inc)
