@@ -18,6 +18,7 @@ from httpx import HTTPStatusError, RequestError
 # FIFO router (используется фронтом под /profit)
 from app.api.profit_fifo import get_profit_fifo_router
 from app.api.profit_bridge import get_profit_bridge_router   # <= именно так
+from app.debug_sku import get_debug_router
 # --- Kaspi client import (robust) ---
 try:
     from app.kaspi_client import KaspiClient  # type: ignore
