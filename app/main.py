@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from cachetools import TTLCache
 from httpx import HTTPStatusError, RequestError
-
+from app.api.bridge_v2 import get_profit_router_v2
 # FIFO/Bridge
 from app.api.profit_fifo import get_profit_fifo_router
 from app.api.profit_bridge import get_profit_bridge_router
@@ -108,6 +108,7 @@ app.include_router(get_products_router(client), prefix="/products")
 app.include_router(get_profit_fifo_router(),   prefix="/profit")
 app.include_router(get_profit_bridge_router(), prefix="/profit/bridge")
 app.include_router(get_debug_router())
+app.include_router(get_profit_router_v2(), prefix="/profit")
 
 # -------------------- Utils --------------------
 def tzinfo_of(name: str) -> pytz.BaseTzInfo:
