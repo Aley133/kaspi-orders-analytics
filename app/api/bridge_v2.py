@@ -47,6 +47,24 @@ def _q(sql: str):
 def _rows(rows):
     return [dict(r._mapping) for r in rows] if _USE_PG else [dict(r) for r in rows]
 
+# ===== Таблицы: проверка существования (безопасные заглушки) =====
+def _table_exists_on(conn, name: str) -> bool:
+    if _USE_PG:
+        row = conn.execute(_q("""
+            SELECT EXISTS (
+              SELECT 1 FROM information_schema.tables
+              WHERE table_schema = 'public' AND table_name = :n
+            ) AS ok
+        """), {"n": name}).first()
+        return bool(row and row._mapping["ok"])
+    else:
+        row = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone()
+        return bool(row)
+
+def _table_exists(name: str) -> bool:
+    with _db() as c:
+        return _table_exists_on(c, name)
+
 # ===== API key =====
 def require_api_key(req: Request) -> bool:
     key = os.getenv("API_KEY")
@@ -124,6 +142,9 @@ def _ensure_schema():
 
 # ===== Categories (комиссия) и продукты =====
 def _categories() -> Dict[str, Dict[str, float]]:
+    # Если категорий ещё нет — вернём пусто (комиссия = 0)
+    if not _table_exists("categories"):
+        return {}
     with _db() as c:
         if _USE_PG:
             rows = c.execute(_q(
@@ -137,7 +158,7 @@ def _categories() -> Dict[str, Dict[str, float]]:
             return {r["name"]: dict(r) for r in rows}
 
 def _sku_to_category(skus: List[str]) -> Dict[str, str]:
-    if not skus:
+    if not skus or not _table_exists("products"):
         return {}
     with _db() as c:
         if _USE_PG:
@@ -313,6 +334,9 @@ def _upsert_order_with_items(o: OrderIn) -> Tuple[int, int]:
 def _fifo_consume_for_item(conn, sale_item_id: int, sku: str, need_qty: int):
     if need_qty <= 0:
         return
+    # Если склад ещё не завезён — списывать нечего, выходим без ошибки
+    if not _table_exists_on(conn, "batches"):
+        return
     if _USE_PG:
         rows = conn.execute(_q("""
             SELECT b.id, b.qty,
@@ -481,8 +505,12 @@ def get_profit_router_v2() -> APIRouter:
                 data = []
                 for r in rows:
                     iid = r["iid"]
-                    cost = c.execute("SELECT COALESCE(SUM(qty*unit_cost),0) AS c FROM batch_consumption WHERE sale_item_id=?",
-                                     (iid,)).fetchone()["c"]
+                    # если таблицы нет — cost остаётся 0
+                    if _table_exists_on(c, "batch_consumption"):
+                        cost = c.execute("SELECT COALESCE(SUM(qty*unit_cost),0) AS c FROM batch_consumption WHERE sale_item_id=?",
+                                         (iid,)).fetchone()["c"]
+                    else:
+                        cost = 0.0
                     it = dict(r); it["cost"] = float(cost); data.append(it)
 
         skus = [d["sku"] for d in data]
@@ -538,8 +566,11 @@ def get_profit_router_v2() -> APIRouter:
                 data = []
                 for r in rows:
                     iid = r["id"]
-                    cost = c.execute("SELECT COALESCE(SUM(qty*unit_cost),0) AS c FROM batch_consumption WHERE sale_item_id=?",
-                                     (iid,)).fetchone()["c"]
+                    if _table_exists_on(c, "batch_consumption"):
+                        cost = c.execute("SELECT COALESCE(SUM(qty*unit_cost),0) AS c FROM batch_consumption WHERE sale_item_id=?",
+                                         (iid,)).fetchone()["c"]
+                    else:
+                        cost = 0.0
                     it = dict(r); it["cost"] = float(cost); data.append(it)
 
         cats = _categories()
