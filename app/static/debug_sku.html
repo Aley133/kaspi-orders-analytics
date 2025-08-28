@@ -42,7 +42,7 @@
       <button id="demo" class="secondary">10 примеров</button>
       <span id="busy" class="muted" style="display:none">загрузка<span class="spinner"></span></span>
     </div>
-    <div class="muted" style="margin-top:6px">Сервис берёт KASPI_TOKEN из переменных окружения бэкенда.</div>
+    <div class="muted" style="margin-top:6px">Сервис берёт <code>KASPI_TOKEN</code> из переменных окружения бэкенда.</div>
   </div>
 
   <div id="out"></div>
@@ -50,16 +50,34 @@
 <script>
 const api = {
   async orderByNumber({number,start,end,date_field}) {
-    const p = new URLSearchParams({number, start, end, date_field});
-    const r = await fetch(`/debug/order-by-number?`+p.toString());
-    if(!r.ok) throw new Error(await r.text());
-    return r.json();
+    const p = new URLSearchParams({number, start, end, date_field, tz:"Asia/Almaty"});
+    const ctrl = new AbortController();
+    const t = setTimeout(()=>ctrl.abort(), 65000); // фронтовый таймаут 65с
+    try{
+      const r = await fetch(`/debug/order-by-number?`+p.toString(), {signal: ctrl.signal});
+      if(!r.ok){
+        const text = await r.text();
+        throw new Error(`[${r.status}] ${text}`);
+      }
+      return r.json();
+    } finally {
+      clearTimeout(t);
+    }
   },
   async sample({start,end,date_field,limit=10}) {
-    const p=new URLSearchParams({start,end,date_field,limit:String(limit)});
-    const r=await fetch(`/debug/sample?`+p.toString());
-    if(!r.ok) throw new Error(await r.text());
-    return r.json();
+    const p=new URLSearchParams({start,end,date_field,limit:String(limit), tz:"Asia/Almaty"});
+    const ctrl = new AbortController();
+    const t = setTimeout(()=>ctrl.abort(), 65000);
+    try{
+      const r=await fetch(`/debug/sample?`+p.toString(), {signal: ctrl.signal});
+      if(!r.ok){
+        const text = await r.text();
+        throw new Error(`[${r.status}] ${text}`);
+      }
+      return r.json();
+    } finally {
+      clearTimeout(t);
+    }
   }
 };
 
@@ -83,12 +101,33 @@ function kvTable(obj){
   t.appendChild(thead); t.appendChild(tb); return t;
 }
 
+function saveForm(){
+  const v = {
+    num: document.getElementById('num').value.trim(),
+    start: document.getElementById('start').value,
+    end: document.getElementById('end').value,
+    df: document.getElementById('df').value,
+  };
+  localStorage.setItem('kaspi-debug-form', JSON.stringify(v));
+}
+function loadForm(){
+  try{
+    const v = JSON.parse(localStorage.getItem('kaspi-debug-form')||'{}');
+    if(v.num)   document.getElementById('num').value = v.num;
+    if(v.start) document.getElementById('start').value = v.start;
+    if(v.end)   document.getElementById('end').value = v.end;
+    if(v.df)    document.getElementById('df').value = v.df;
+  }catch{}
+}
+
 async function run(){
   const number=document.getElementById('num').value.trim();
   const start =document.getElementById('start').value;
   const end   =document.getElementById('end').value;
   const df    =document.getElementById('df').value;
   if(!number||!start||!end){ alert('Заполните номер, начало, конец.'); return; }
+
+  saveForm();
 
   const busy=document.getElementById('busy'); busy.style.display='inline';
   const out = document.getElementById('out'); out.innerHTML='';
@@ -125,33 +164,27 @@ async function run(){
             sub.appendChild(el('div',{class:'muted'},'SKU (кандидаты):'));
             sub.appendChild(kvTable(row.sku_candidates));
           }
-          const det=el('details',{}, el('summary',{},'raw записи позиции'), el('pre',{}, JSON.stringify(row.raw,null,2)));
+          const det=el('details',{}, el('summary',{},'raw записи позиции'), el('pre',{}, JSON.stringify(row.raw,null,2))));
           sub.appendChild(det);
           card.appendChild(sub);
         });
       }
 
-      // кнопка показать DEBUG (из бэкенда: entries_api_debug)
-      const btnDbg = el('button',{class:'secondary'},'Показать DEBUG по запросам');
-      const dbgBox = el('div');
-      btnDbg.onclick = async ()=>{
-        btnDbg.disabled=true; btnDbg.textContent='Загрузка...';
-        try{
-          const full = await api.orderByNumber({number,start,end,date_field:df});
-          const rec = (full.items||[]).find(x=>x.order_id===itm.order_id) || full.items?.[0];
-          const debug = rec?.entries_api_debug || {};
-          const det = el('details',{}, el('summary',{},'entries_api_debug (статусы/превью)'), el('pre',{}, JSON.stringify(debug, null, 2)));
-          dbgBox.innerHTML=''; dbgBox.appendChild(det);
-        }catch(e){ dbgBox.textContent='Ошибка загрузки debug: '+e.message; }
-        finally{ btnDbg.disabled=false; btnDbg.textContent='Показать DEBUG по запросам'; }
-      };
-      card.appendChild(el('div',{class:'row'}, btnDbg));
-      card.appendChild(dbgBox);
+      // DEBUG из ответа бэкенда (entries_api_debug)
+      if(itm.entries_api_debug && Object.keys(itm.entries_api_debug).length){
+        const det = el('details',{}, el('summary',{},'entries_api_debug (статусы/превью)'), el('pre',{}, JSON.stringify(itm.entries_api_debug, null, 2)));
+        card.appendChild(det);
+      }
 
       out.appendChild(card);
     }
   }catch(e){
-    document.getElementById('out').textContent='Ошибка: '+e.message;
+    const msg = String(e && e.message ? e.message : e);
+    const human =
+      msg.includes('[502]') ? 'Kaspi API вернул 502/таймаут. Сузьте окно по датам и повторите.' :
+      msg.includes('AbortError') ? 'Запрос отменён по таймауту на клиенте.' :
+      msg;
+    out.appendChild(el('div',{class:'card'}, el('h3',{},'Ошибка запроса'), el('pre',{}, human)));
   }finally{
     busy.style.display='none';
   }
@@ -167,17 +200,23 @@ async function sample(){
     const data = await api.sample({start,end,date_field:df,limit:10});
     out.appendChild(el('div',{class:'card'}, el('h3',{},'Примеры (по 1й позиции каждого заказа)'),
       el('pre',{}, JSON.stringify(data.items||[], null, 2))));
-  }catch(e){ out.textContent='Ошибка: '+e.message; }
-  finally{ document.getElementById('busy').style.display='none'; }
+  }catch(e){
+    const msg = String(e && e.message ? e.message : e);
+    out.appendChild(el('div',{class:'card'}, el('h3',{},'Ошибка запроса'), el('pre',{}, msg)));
+  } finally {
+    document.getElementById('busy').style.display='none';
+  }
 }
 
 document.getElementById('go').addEventListener('click', run);
 document.getElementById('demo').addEventListener('click', sample);
 
+// авто-даты и восстановление формы
 const iso = (d)=> d.toISOString().slice(0,10);
 const today = new Date();
-document.getElementById('start').value = iso(today);
-document.getElementById('end').value   = iso(today);
+document.getElementById('start').value = document.getElementById('start').value || iso(today);
+document.getElementById('end').value   = document.getElementById('end').value   || iso(today);
+loadForm();
 </script>
 </body>
 </html>
