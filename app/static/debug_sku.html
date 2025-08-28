@@ -5,79 +5,107 @@
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>Kaspi Debug — поиск SKU/названия</title>
   <style>
-    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial,sans-serif;margin:20px;color:#111}
+    :root{--border:#e5e7eb;--muted:#6b7280;--ink:#111}
+    *{box-sizing:border-box}
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial,sans-serif;margin:20px;color:var(--ink)}
     .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
-    input,select,button{padding:8px 10px;border:1px solid #e5e7eb;border-radius:8px}
-    button{background:#111;color:#fff;cursor:pointer}
-    button.secondary{background:#fff;color:#111;border-color:#d1d5db}
-    .card{border:1px solid #e5e7eb;border-radius:12px;padding:12px;margin-top:12px}
-    table{width:100%;border-collapse:collapse}
-    th,td{border-bottom:1px solid #eee;padding:6px 8px;text-align:left}
-    .muted{color:#6b7280}
+    input,select,button{padding:8px 10px;border:1px solid var(--border);border-radius:8px}
+    input[type="date"],input[type="time"]{min-width:135px}
+    input#num{width:160px}
+    button{background:var(--ink);color:#fff;cursor:pointer}
+    button.secondary{background:#fff;color:var(--ink);border-color:#d1d5db}
+    .card{border:1px solid var(--border);border-radius:12px;padding:12px;margin-top:12px}
+    table{width:100%;border-collapse:collapse;font-size:14px}
+    th,td{border-bottom:1px solid #eee;padding:6px 8px;text-align:left;vertical-align:top}
+    .muted{color:var(--muted)}
     .spinner{display:inline-block;width:14px;height:14px;border:2px solid #e5e7eb;border-top-color:#111;border-radius:50%;animation:s .8s linear infinite;vertical-align:middle;margin-left:6px}
     @keyframes s{to{transform:rotate(1turn)}}
     details>pre{white-space:pre-wrap;background:#fafafa;padding:8px;border:1px solid #eee;border-radius:8px;max-height:400px;overflow:auto}
     code{background:#f5f5f5;padding:2px 4px;border-radius:6px}
+    h4{margin:10px 0 6px}
+    .actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    .sep{height:1px;background:#eee;margin:10px -12px}
   </style>
 </head>
 <body>
   <h1>Kaspi Debug — поиск SKU/названия по номеру заказа</h1>
 
   <div class="card">
-    <div class="row">
-      <label>Номер заказа</label>
-      <input id="num" placeholder="624374271" style="width:140px">
-      <label>Начало (YYYY-MM-DD)</label>
+    <div class="row" style="row-gap:10px">
+      <label for="num">Номер заказа</label>
+      <input id="num" placeholder="624374271">
+
+      <label for="start">Начало (дата)</label>
       <input id="start" type="date">
-      <label>Конец</label>
+
+      <label for="startTime">Время</label>
+      <input id="startTime" type="time" value="00:00">
+
+      <label for="end">Конец (дата)</label>
       <input id="end" type="date">
-      <label>Поле даты</label>
+
+      <label for="endTime">Время</label>
+      <input id="endTime" type="time" value="23:59">
+
+      <label for="df">Поле даты</label>
       <select id="df">
         <option value="creationDate">creationDate</option>
         <option value="plannedShipmentDate">plannedShipmentDate</option>
         <option value="shipmentDate">shipmentDate</option>
         <option value="deliveryDate">deliveryDate</option>
       </select>
+    </div>
+
+    <div class="actions" style="margin-top:10px">
       <button id="go">Найти</button>
       <button id="demo" class="secondary">10 примеров</button>
+
+      <span class="sep" style="flex-basis:100%"></span>
+
+      <input id="permOrderId" placeholder="order_id для проверки прав (опц.)" style="width:260px">
+      <button id="perm" class="secondary">Проверить права токена</button>
+
       <span id="busy" class="muted" style="display:none">загрузка<span class="spinner"></span></span>
     </div>
-    <div class="muted" style="margin-top:6px">Сервис берёт <code>KASPI_TOKEN</code> из переменных окружения бэкенда.</div>
+
+    <div class="muted" style="margin-top:6px">
+      Сервис берёт <code>KASPI_TOKEN</code> из переменных окружения бэкенда. Время — в TZ <code>Asia/Almaty</code>.
+    </div>
   </div>
 
   <div id="out"></div>
 
 <script>
 const api = {
-  async orderByNumber({number,start,end,date_field}) {
-    const p = new URLSearchParams({number, start, end, date_field, tz:"Asia/Almaty"});
-    const ctrl = new AbortController();
-    const t = setTimeout(()=>ctrl.abort(), 65000); // фронтовый таймаут 65с
+  async orderByNumber({number,start,end,date_field,start_time,end_time}) {
+    const p = new URLSearchParams({
+      number, start, end, date_field, tz:"Asia/Almaty",
+      start_time: start_time || "", end_time: end_time || ""
+    });
+    const ctrl = new AbortController(); const t = setTimeout(()=>ctrl.abort(), 65000);
     try{
       const r = await fetch(`/debug/order-by-number?`+p.toString(), {signal: ctrl.signal});
-      if(!r.ok){
-        const text = await r.text();
-        throw new Error(`[${r.status}] ${text}`);
-      }
+      if(!r.ok){ throw new Error(`[${r.status}] ` + await r.text()); }
       return r.json();
-    } finally {
-      clearTimeout(t);
-    }
+    } finally { clearTimeout(t); }
   },
-  async sample({start,end,date_field,limit=10}) {
-    const p=new URLSearchParams({start,end,date_field,limit:String(limit), tz:"Asia/Almaty"});
-    const ctrl = new AbortController();
-    const t = setTimeout(()=>ctrl.abort(), 65000);
+  async sample({start,end,date_field,start_time,end_time,limit=10}) {
+    const p = new URLSearchParams({
+      start, end, date_field, limit:String(limit), tz:"Asia/Almaty",
+      start_time: start_time || "", end_time: end_time || ""
+    });
+    const ctrl = new AbortController(); const t = setTimeout(()=>ctrl.abort(), 65000);
     try{
-      const r=await fetch(`/debug/sample?`+p.toString(), {signal: ctrl.signal});
-      if(!r.ok){
-        const text = await r.text();
-        throw new Error(`[${r.status}] ${text}`);
-      }
+      const r = await fetch(`/debug/sample?`+p.toString(), {signal: ctrl.signal});
+      if(!r.ok){ throw new Error(`[${r.status}] ` + await r.text()); }
       return r.json();
-    } finally {
-      clearTimeout(t);
-    }
+    } finally { clearTimeout(t); }
+  },
+  async permCheck(order_id){
+    const qs = order_id ? `?order_id=${encodeURIComponent(order_id)}` : "";
+    const r = await fetch(`/debug/perm-check${qs}`);
+    if(!r.ok){ throw new Error(`[${r.status}] ` + await r.text()); }
+    return r.json();
   }
 };
 
@@ -107,6 +135,8 @@ function saveForm(){
     start: document.getElementById('start').value,
     end: document.getElementById('end').value,
     df: document.getElementById('df').value,
+    st: document.getElementById('startTime').value,
+    et: document.getElementById('endTime').value
   };
   localStorage.setItem('kaspi-debug-form', JSON.stringify(v));
 }
@@ -117,7 +147,16 @@ function loadForm(){
     if(v.start) document.getElementById('start').value = v.start;
     if(v.end)   document.getElementById('end').value = v.end;
     if(v.df)    document.getElementById('df').value = v.df;
+    if(v.st)    document.getElementById('startTime').value = v.st;
+    if(v.et)    document.getElementById('endTime').value = v.et;
   }catch{}
+}
+
+function errToHuman(e){
+  const msg = String(e && e.message ? e.message : e);
+  if(msg.includes('[502]')) return 'Kaspi API таймаут/ошибка 502. Сузьте окно по времени и повторите.';
+  if(msg.includes('AbortError')) return 'Запрос отменён по таймауту на клиенте.';
+  return msg;
 }
 
 async function run(){
@@ -125,6 +164,8 @@ async function run(){
   const start =document.getElementById('start').value;
   const end   =document.getElementById('end').value;
   const df    =document.getElementById('df').value;
+  const st    =document.getElementById('startTime').value;
+  const et    =document.getElementById('endTime').value;
   if(!number||!start||!end){ alert('Заполните номер, начало, конец.'); return; }
 
   saveForm();
@@ -133,7 +174,7 @@ async function run(){
   const out = document.getElementById('out'); out.innerHTML='';
 
   try{
-    const data = await api.orderByNumber({number,start,end,date_field:df});
+    const data = await api.orderByNumber({number,start,end,date_field:df,start_time:st,end_time:et});
     if(!data.items || !data.items.length){ out.textContent='Ничего не найдено.'; return; }
 
     for(const itm of data.items){
@@ -164,27 +205,30 @@ async function run(){
             sub.appendChild(el('div',{class:'muted'},'SKU (кандидаты):'));
             sub.appendChild(kvTable(row.sku_candidates));
           }
-          const det=el('details',{}, el('summary',{},'raw записи позиции'), el('pre',{}, JSON.stringify(row.raw,null,2))));
+          const det=el('details',{},
+            el('summary',{},'raw записи позиции'),
+            el('pre',{}, JSON.stringify(row.raw,null,2))
+          ); // ← фикс: без лишней скобки
           sub.appendChild(det);
           card.appendChild(sub);
         });
       }
 
-      // DEBUG из ответа бэкенда (entries_api_debug)
       if(itm.entries_api_debug && Object.keys(itm.entries_api_debug).length){
-        const det = el('details',{}, el('summary',{},'entries_api_debug (статусы/превью)'), el('pre',{}, JSON.stringify(itm.entries_api_debug, null, 2)));
+        const det = el('details',{},
+          el('summary',{},'entries_api_debug (статусы/превью)'),
+          el('pre',{}, JSON.stringify(itm.entries_api_debug, null, 2))
+        );
         card.appendChild(det);
       }
 
       out.appendChild(card);
     }
   }catch(e){
-    const msg = String(e && e.message ? e.message : e);
-    const human =
-      msg.includes('[502]') ? 'Kaspi API вернул 502/таймаут. Сузьте окно по датам и повторите.' :
-      msg.includes('AbortError') ? 'Запрос отменён по таймауту на клиенте.' :
-      msg;
-    out.appendChild(el('div',{class:'card'}, el('h3',{},'Ошибка запроса'), el('pre',{}, human)));
+    out.appendChild(el('div',{class:'card'},
+      el('h3',{},'Ошибка запроса'),
+      el('pre',{}, errToHuman(e))
+    ));
   }finally{
     busy.style.display='none';
   }
@@ -194,29 +238,54 @@ async function sample(){
   const start =document.getElementById('start').value;
   const end   =document.getElementById('end').value;
   const df    =document.getElementById('df').value;
+  const st    =document.getElementById('startTime').value;
+  const et    =document.getElementById('endTime').value;
+
   const out = document.getElementById('out'); out.innerHTML='';
   document.getElementById('busy').style.display='inline';
   try{
-    const data = await api.sample({start,end,date_field:df,limit:10});
-    out.appendChild(el('div',{class:'card'}, el('h3',{},'Примеры (по 1й позиции каждого заказа)'),
-      el('pre',{}, JSON.stringify(data.items||[], null, 2))));
+    const data = await api.sample({start,end,date_field:df,start_time:st,end_time:et,limit:10});
+    out.appendChild(el('div',{class:'card'},
+      el('h3',{},'Примеры (по 1й позиции каждого заказа)'),
+      el('pre',{}, JSON.stringify(data.items||[], null, 2))
+    ));
   }catch(e){
-    const msg = String(e && e.message ? e.message : e);
-    out.appendChild(el('div',{class:'card'}, el('h3',{},'Ошибка запроса'), el('pre',{}, msg)));
+    out.appendChild(el('div',{class:'card'}, el('h3',{},'Ошибка запроса'), el('pre',{}, errToHuman(e))));
   } finally {
+    document.getElementById('busy').style.display='none';
+  }
+}
+
+async function perm(){
+  const out = document.getElementById('out'); out.innerHTML='';
+  const orderId = document.getElementById('permOrderId').value.trim();
+  document.getElementById('busy').style.display='inline';
+  try{
+    const data = await api.permCheck(orderId || undefined);
+    out.appendChild(el('div',{class:'card'},
+      el('h3',{},'Проверка прав токена'),
+      el('pre',{}, JSON.stringify(data.checks||data, null, 2))
+    ));
+  }catch(e){
+    out.appendChild(el('div',{class:'card'}, el('h3',{},'Ошибка проверки'), el('pre',{}, errToHuman(e))));
+  }finally{
     document.getElementById('busy').style.display='none';
   }
 }
 
 document.getElementById('go').addEventListener('click', run);
 document.getElementById('demo').addEventListener('click', sample);
+document.getElementById('perm').addEventListener('click', perm);
 
-// авто-даты и восстановление формы
+// авто-заполнение дат и восстановление формы
 const iso = (d)=> d.toISOString().slice(0,10);
 const today = new Date();
 document.getElementById('start').value = document.getElementById('start').value || iso(today);
 document.getElementById('end').value   = document.getElementById('end').value   || iso(today);
 loadForm();
+
+// отправка по Enter в поле номера
+document.getElementById('num').addEventListener('keydown', (e)=>{ if(e.key==='Enter') run(); });
 </script>
 </body>
 </html>
