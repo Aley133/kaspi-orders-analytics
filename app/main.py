@@ -268,20 +268,40 @@ async def _first_item_details(order_id: str, return_candidates: bool = False) ->
                 if ex:
                     attrs_e = entry.get("attributes", {}) or {}
                     titles = title_candidates(attrs_e)
+
+                    # --- выбираем "лучшее" название ---
                     best = None
-                    for key in ("offer.name","title","name","productName","shortName"):
+                    for key in ("offer.name", "title", "name", "productName", "shortName"):
                         v = titles.get(key)
                         if isinstance(v, str) and v.strip():
-                            best = v.strip(); break
-                    out = {"sku": str(ex["sku"]), "title": (best or "")}
+                            best = v.strip()
+                            break
+
+                    # --- кандидаты SKU: базовые + offer.code ---
+                    cand = sku_candidates(attrs_e)
+                    off = attrs_e.get("offer") or {}
+                    if isinstance(off, dict) and off.get("code"):
+                        cand["offer.code"] = str(off["code"])
+
+                    # --- SKU приоритет: offer.code → merchantProduct.code → product.code → code → sku → extracted ---
+                    sku_val = None
+                    for k in ("offer.code", "merchantProduct.code", "product.code", "code", "sku"):
+                        vv = cand.get(k)
+                        if isinstance(vv, str) and vv.strip():
+                            sku_val = vv.strip()
+                            break
+                    if not sku_val:
+                        sku_val = str(ex.get("sku", ""))
+
+                    out = {"sku": sku_val, "title": (best or "")}
                     if return_candidates:
-                        cand = sku_candidates(attrs_e)
-                        cand["extracted"] = str(ex["sku"])
+                        cand["extracted"] = str(ex.get("sku", ""))
                         out["sku_candidates"] = cand
                         out["title_candidates"] = titles
                     return out
         except Exception:
             pass
+
         # S1
         try:
             r = await cli.get(
@@ -298,25 +318,52 @@ async def _first_item_details(order_id: str, return_candidates: bool = False) ->
                 if ex:
                     attrs_e = entry.get("attributes", {}) or {}
                     titles = title_candidates(attrs_e)
+
                     # добавим заголовки из include
-                    for rel_key in ("product","merchantProduct","masterProduct"):
+                    for rel_key in ("product", "merchantProduct", "masterProduct"):
                         t, rel_id = _rel_id(entry, rel_key)
                         if t and rel_id:
                             ref = (included.get((str(t), str(rel_id))) or {})
                             ref_attrs = ref.get("attributes", {}) or {}
-                            for k in ("title","name","productName","shortName"):
+                            for k in ("title", "name", "productName", "shortName"):
                                 v = ref_attrs.get(k)
                                 if isinstance(v, str) and v.strip():
                                     titles[f"{rel_key}.{k}"] = v.strip()
+
+                    # --- название ---
                     best = None
-                    for key in ("offer.name","product.title","product.productName","title","name"):
+                    for key in ("offer.name", "product.title", "product.productName", "title", "name"):
                         v = titles.get(key)
                         if isinstance(v, str) and v.strip():
-                            best = v.strip(); break
-                    out = {"sku": str(ex["sku"]), "title": (best or "")}
+                            best = v.strip()
+                            break
+
+                    # --- кандидаты SKU: базовые + offer.code + codes из include ---
+                    cand = sku_candidates(attrs_e)
+                    off = attrs_e.get("offer") or {}
+                    if isinstance(off, dict) and off.get("code"):
+                        cand["offer.code"] = str(off["code"])
+                    for rel_key in ("product", "merchantProduct", "masterProduct"):
+                        t, rel_id = _rel_id(entry, rel_key)
+                        if t and rel_id:
+                            ref = (included.get((str(t), str(rel_id))) or {})
+                            ref_attrs = ref.get("attributes", {}) or {}
+                            if "code" in ref_attrs and ref_attrs["code"]:
+                                cand[f"{rel_key}.code"] = str(ref_attrs["code"])
+
+                    # --- SKU приоритет ---
+                    sku_val = None
+                    for k in ("offer.code", "merchantProduct.code", "product.code", "code", "sku"):
+                        vv = cand.get(k)
+                        if isinstance(vv, str) and vv.strip():
+                            sku_val = vv.strip()
+                            break
+                    if not sku_val:
+                        sku_val = str(ex.get("sku", ""))
+
+                    out = {"sku": sku_val, "title": (best or "")}
                     if return_candidates:
-                        cand = sku_candidates(attrs_e)
-                        cand["extracted"] = str(ex["sku"])
+                        cand["extracted"] = str(ex.get("sku", ""))
                         out["sku_candidates"] = cand
                         out["title_candidates"] = titles
                     return out
@@ -615,7 +662,6 @@ async def list_ids(start: str = Query(...), end: str = Query(...), tz: str = Que
                     it["sku"] = extra.get("sku")
                     it["title"] = extra.get("title")
                     if return_candidates:
-                        # компактно складываем в под-объект
                         it["first_item"] = {
                             "title_candidates": extra.get("title_candidates") or {},
                             "sku_candidates": extra.get("sku_candidates") or {},
