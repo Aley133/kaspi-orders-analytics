@@ -304,6 +304,7 @@ async function loadIds(){
   if(exc) params.set('exclude_states', exc);
   params.set('use_bd', use_bd); if(bd_start) params.set('business_day_start', bd_start);
   params.set('order', order); params.set('grouped', '1'); params.set('limit', '100000');
+  params.set('with_items','1'); // явно просим SKU/Title
 
   const r = await fetch(`/orders/ids?${params.toString()}`);
   if(!r.ok) throw new Error('ids failed');
@@ -355,7 +356,7 @@ async function loadIds(){
     const pre = document.createElement('pre');
     pre.style.whiteSpace='pre-wrap';
     // >>> SKU выведен вторым столбцом после номера
-    pre.textContent = group.items
+    pre.textContent = '№\tSKU\tНазвание\tСостояние\tДата\tСумма\n' + group.items
       .map(it=>`${it.number}\t${it.sku||''}\t${(it.title||it.name||'')}\t${it.state}\t${it.date.slice(0,16).replace('T',' ')}\t${it.amount}`)
       .join('\n');
     det.appendChild(pre);
