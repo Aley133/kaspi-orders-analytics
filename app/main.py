@@ -19,8 +19,7 @@ from cachetools import TTLCache
 from httpx import HTTPStatusError, RequestError
 from app.api.bridge_v2 import get_profit_router_v2
 # FIFO/Bridge
-from app.api.profit_fifo import get_profit_fifo_router
-from app.api.profit_bridge import get_profit_bridge_router
+
 
 # Роутер и ХЕЛПЕРЫ ИМПОРТИРУЕМ ИЗ debug_sku.PY
 from app.debug_sku import (
@@ -105,10 +104,8 @@ client = KaspiClient(token=KASPI_TOKEN, base_url=KASPI_BASE_URL) if KASPI_TOKEN 
 orders_cache = TTLCache(maxsize=128, ttl=CACHE_TTL)
 
 app.include_router(get_products_router(client), prefix="/products")
-app.include_router(get_profit_fifo_router(),   prefix="/profit")
-app.include_router(get_profit_bridge_router(), prefix="/profit/bridge")
 app.include_router(get_debug_router())
-app.include_router(get_profit_router_v2(), prefix="/profit")
+app.include_router(get_profit_router_v2())
 
 # -------------------- Utils --------------------
 def tzinfo_of(name: str) -> pytz.BaseTzInfo:
