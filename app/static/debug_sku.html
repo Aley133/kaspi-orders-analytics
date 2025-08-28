@@ -82,7 +82,7 @@ const api = {
       number, start, end, date_field, tz:"Asia/Almaty",
       start_time: start_time || "", end_time: end_time || ""
     });
-    const ctrl = new AbortController(); const t = setTimeout(()=>ctrl.abort(), 65000);
+    const ctrl = new AbortController(); const t = setTimeout(()=>ctrl.abort(), 180000);
     try{
       const r = await fetch(`/debug/order-by-number?`+p.toString(), {signal: ctrl.signal});
       if(!r.ok){ throw new Error(`[${r.status}] ` + await r.text()); }
