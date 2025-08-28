@@ -5,6 +5,8 @@ import re
 from datetime import datetime, timedelta, time
 from typing import Optional, Dict, List, Iterable, Tuple
 
+import asyncio
+import httpx
 import pytz
 from dotenv import load_dotenv
 from fastapi import FastAPI, Query, HTTPException
@@ -14,17 +16,17 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from cachetools import TTLCache
 from httpx import HTTPStatusError, RequestError
-import httpx, asyncio  # NEW
 
 # FIFO router (используется фронтом под /profit)
 from app.api.profit_fifo import get_profit_fifo_router
 from app.api.profit_bridge import get_profit_bridge_router   # <= именно так
+# из debug_sku берём роутер и хелперы для извлечения SKU/названий
 from app.debug_sku import (
     get_debug_router,
-    _index_included,     # NEW
-    _extract_entry,      # NEW
-    title_candidates,    # NEW
-    _rel_id,             # NEW
+    _index_included,
+    _extract_entry,
+    title_candidates,
+    _rel_id,
 )
 
 # --- Kaspi client import (robust) ---
@@ -224,6 +226,77 @@ def _guess_number(attrs: dict, fallback_id: str) -> str:
             return v.strip()
     return str(fallback_id)
 
+# -------------------- Kaspi helpers (локально, как в bridge/debug) --------------------
+def _kaspi_headers() -> Dict[str, str]:
+    if not KASPI_TOKEN:
+        raise HTTPException(status_code=500, detail="KASPI_TOKEN is not set")
+    return {"X-Auth-Token": KASPI_TOKEN, "Accept": "application/vnd.api+json"}
+
+async def _first_item_sku_and_title(order_id: str) -> Optional[Dict[str, str]]:
+    """Возвращает {"sku","title"} первой позиции. Пробуем 2 стратегии."""
+    headers = _kaspi_headers()
+    async with httpx.AsyncClient(base_url=KASPI_BASE_URL) as cli:
+        # S1: /orders/{id}/entries?include=product,merchantProduct,masterProduct
+        try:
+            r = await cli.get(
+                f"/orders/{order_id}/entries",
+                params={"page[size]": "200", "include": "product,merchantProduct,masterProduct"},
+                headers=headers,
+            )
+            j = r.json()
+            included = _index_included(j.get("included", []) if isinstance(j, dict) else [])
+            for entry in (j.get("data", []) if isinstance(j, dict) else []) or []:
+                ex = _extract_entry(entry, included)
+                if not ex:
+                    continue
+                attrs_e = entry.get("attributes", {}) or {}
+                titles = title_candidates(attrs_e)
+                # подмешаем названия из include
+                for rel_key in ("product", "merchantProduct", "masterProduct"):
+                    t, rel_id = _rel_id(entry, rel_key)
+                    if t and rel_id:
+                        ref = (included.get((str(t), str(rel_id))) or {})
+                        ref_attrs = ref.get("attributes", {}) or {}
+                        for k in ("title", "name", "productName", "shortName"):
+                            v = ref_attrs.get(k)
+                            if isinstance(v, str) and v.strip():
+                                titles[f"{rel_key}.{k}"] = v.strip()
+                # выбираем «лучшее» название
+                best_title = None
+                for key in ("offer.name", "product.title", "product.productName", "title", "name"):
+                    v = titles.get(key)
+                    if isinstance(v, str) and v.strip():
+                        best_title = v.strip()
+                        break
+                return {"sku": str(ex["sku"]), "title": (best_title or "")}
+        except Exception:
+            pass
+
+        # S2: /orderentries?filter[order.id]=...  (некоторые заказы видны только тут)
+        try:
+            r = await cli.get(
+                "/orderentries",
+                params={"filter[order.id]": order_id, "page[size]": "200"},
+                headers=headers,
+            )
+            j = r.json()
+            for entry in (j.get("data", []) if isinstance(j, dict) else []) or []:
+                ex = _extract_entry(entry, {})
+                if not ex:
+                    continue
+                titles = title_candidates(entry.get("attributes", {}) or {})
+                best_title = None
+                for key in ("offer.name", "title", "name", "productName", "shortName"):
+                    v = titles.get(key)
+                    if isinstance(v, str) and v.strip():
+                        best_title = v.strip()
+                        break
+                return {"sku": str(ex["sku"]), "title": (best_title or "")}
+        except Exception:
+            pass
+
+    return None
+
 # -------------------- Models --------------------
 class DayPoint(BaseModel):
     x: str
@@ -245,57 +318,6 @@ class AnalyticsResponse(BaseModel):
     prev_days: List[DayPoint] = []
     cities: List[CityCount] = []
     state_breakdown: Dict[str, int] = {}
-
-# -------------------- Kaspi helpers (локально, как в bridge/debug) --------------------
-def _kaspi_headers() -> Dict[str, str]:
-    if not KASPI_TOKEN:
-        raise HTTPException(status_code=500, detail="KASPI_TOKEN is not set")
-    return {"X-Auth-Token": KASPI_TOKEN, "Accept": "application/vnd.api+json"}
-
-async def _first_item_sku_and_title(order_id: str) -> Optional[Dict[str, str]]:
-    """
-    Возвращает {"sku": "...", "title": "..."} для первой позиции заказа.
-    Стратегия: /orders/{id}/entries?include=product,merchantProduct,masterProduct
-    """
-    try:
-        async with httpx.AsyncClient(base_url=KASPI_BASE_URL) as cli:
-            r = await cli.get(
-                f"/orders/{order_id}/entries",
-                params={"page[size]": "200", "include": "product,merchantProduct,masterProduct"},
-                headers=_kaspi_headers(),
-            )
-            if r.status_code != 200:
-                return None
-            j = r.json() if r.headers.get("content-type","").startswith("application/vnd.api+json") else {}
-            included = _index_included(j.get("included", []) if isinstance(j, dict) else [])
-            data = (j.get("data", []) if isinstance(j, dict) else []) or []
-            for entry in data:
-                ex = _extract_entry(entry, included)
-                if not ex:
-                    continue
-                attrs_e = entry.get("attributes", {}) or {}
-                titles = title_candidates(attrs_e)
-                # подмешаем названия из include
-                for rel_key in ("product","merchantProduct","masterProduct"):
-                    t, rel_id = _rel_id(entry, rel_key)
-                    if t and rel_id:
-                        ref = included.get((str(t), str(rel_id))) or {}
-                        ref_attrs = ref.get("attributes", {}) or {}
-                        for k in ("title","name","productName","shortName"):
-                            v = ref_attrs.get(k)
-                            if isinstance(v, str) and v.strip():
-                                titles[f"{rel_key}.{k}"] = v.strip()
-                # выбираем «лучшее» название
-                best_title = None
-                for key in ("offer.name","product.title","product.productName","title","name"):
-                    v = titles.get(key)
-                    if isinstance(v, str) and v.strip():
-                        best_title = v.strip()
-                        break
-                return {"sku": str(ex["sku"]), "title": (best_title or "")}
-    except Exception:
-        return None
-    return None
 
 # -------------------- Endpoints --------------------
 @app.get("/meta")
@@ -518,20 +540,6 @@ async def list_ids(start: str = Query(...), end: str = Query(...), tz: str = Que
 
     out.sort(key=lambda it: it["date"], reverse=(order == "desc"))
 
-    # --- обогащаем sku/title первой позиции (необязательно) ---
-    if with_items and out:
-        targets = out[: (limit or len(out))]
-        sem = asyncio.Semaphore(12)
-
-        async def enrich(it):
-            async with sem:
-                extra = await _first_item_sku_and_title(str(it["id"]))
-                if extra:
-                    it["sku"] = extra.get("sku")
-                    it["title"] = extra.get("title")
-
-        await asyncio.gather(*(enrich(it) for it in targets))
-
     period_total_amount = round(sum(float(it.get("amount", 0) or 0) for it in out), 2)
     period_total_count = len(out)
 
@@ -557,6 +565,18 @@ async def list_ids(start: str = Query(...), end: str = Query(...), tz: str = Que
                 "items": bucket,
                 "total_amount": round(sum(float(x.get("amount", 0) or 0) for x in bucket), 2),
             })
+
+    # --- обогащаем sku/title первой позиции (fallback S1/S2) ---
+    if with_items and out:
+        targets = out[: (limit or len(out))]
+        sem = asyncio.Semaphore(12)
+        async def enrich(it):
+            async with sem:
+                extra = await _first_item_sku_and_title(str(it["id"]))
+                if extra:
+                    it["sku"] = extra.get("sku")
+                    it["title"] = extra.get("title")
+        await asyncio.gather(*(enrich(it) for it in targets))
 
     if limit and limit > 0:
         out = out[:limit]
