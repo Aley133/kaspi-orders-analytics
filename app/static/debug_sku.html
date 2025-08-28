@@ -49,8 +49,8 @@
 
 <script>
 const api = {
-  async orderByNumber({number,start,end,date_field,raw=0}) {
-    const p = new URLSearchParams({number, start, end, date_field, raw:String(raw)});
+  async orderByNumber({number,start,end,date_field}) {
+    const p = new URLSearchParams({number, start, end, date_field});
     const r = await fetch(`/debug/order-by-number?`+p.toString());
     if(!r.ok) throw new Error(await r.text());
     return r.json();
@@ -66,7 +66,9 @@ const api = {
 function el(tag, attrs={}, ...kids){
   const n=document.createElement(tag);
   for(const [k,v] of Object.entries(attrs||{})){
-    if(k==='class') n.className=v; else if(k==='html') n.innerHTML=v; else n.setAttribute(k,v);
+    if(k==='class') n.className=v;
+    else if(k==='html') n.innerHTML=v;
+    else n.setAttribute(k,v);
   }
   for(const k of kids){ if(k!=null) n.appendChild(k.nodeType? k : document.createTextNode(String(k))); }
   return n;
@@ -80,7 +82,6 @@ function kvTable(obj){
   }
   t.appendChild(thead); t.appendChild(tb); return t;
 }
-function fmtDate(d){ return d && d.slice ? d.slice(0,16).replace('T',' ') : d; }
 
 async function run(){
   const number=document.getElementById('num').value.trim();
@@ -93,26 +94,25 @@ async function run(){
   const out = document.getElementById('out'); out.innerHTML='';
 
   try{
-    // лёгкий ответ (без entries_api_raw)
-    const data = await api.orderByNumber({number,start,end,date_field:df,raw:0});
+    const data = await api.orderByNumber({number,start,end,date_field:df});
     if(!data.items || !data.items.length){ out.textContent='Ничего не найдено.'; return; }
 
     for(const itm of data.items){
       const card=el('div',{class:'card'});
-      card.appendChild(el('div',{class:'muted'}, `Заказ: `, el('code',{},itm.number), `  (order_id: ${itm.order_id}, state: ${itm.state||'-'})`));
+      card.appendChild(el('div',{class:'muted'},
+        `Заказ: `, el('code',{},itm.number),
+        `  (order_id: ${itm.order_id}, state: ${itm.state||'-'}, source: ${itm.source||'-'})`
+      ));
 
-      // top-level sku-candidates
       if(itm.top_level_sku_candidates && Object.keys(itm.top_level_sku_candidates).length){
         card.appendChild(el('h4',{},'Верхнеуровневые кандидаты SKU'));
         card.appendChild(kvTable(itm.top_level_sku_candidates));
       }
 
-      // позиции
-      const h=el('h4',{},`Позиции (${itm.entries_count})`);
-      card.appendChild(h);
+      card.appendChild(el('h4',{},`Позиции (${itm.entries_count})`));
 
       if((itm.entries||[]).length===0){
-        card.appendChild(el('div',{class:'muted'},'Список позиций не найден в attributes. Можно подтянуть сырые данные.'));
+        card.appendChild(el('div',{class:'muted'},'Позиции не найдены в ответе.'));
       }else{
         (itm.entries||[]).forEach((row)=>{
           const sub=el('div',{class:'card'});
@@ -131,26 +131,27 @@ async function run(){
         });
       }
 
-      // кнопка подгрузить сырые данные (raw=1)
-      const btnRaw = el('button',{class:'secondary'},'Показать сырые данные (entries_api_raw)');
-      const rawBox = el('div');
-      btnRaw.onclick = async ()=>{
-        btnRaw.disabled=true; btnRaw.textContent='Загрузка...';
+      // кнопка показать DEBUG (из бэкенда: entries_api_debug)
+      const btnDbg = el('button',{class:'secondary'},'Показать DEBUG по запросам');
+      const dbgBox = el('div');
+      btnDbg.onclick = async ()=>{
+        btnDbg.disabled=true; btnDbg.textContent='Загрузка...';
         try{
-          const full = await api.orderByNumber({number,start,end,date_field:df,raw:1});
+          const full = await api.orderByNumber({number,start,end,date_field:df});
           const rec = (full.items||[]).find(x=>x.order_id===itm.order_id) || full.items?.[0];
-          const det = el('details',{}, el('summary',{},'entries_api_raw'), el('pre',{}, JSON.stringify(rec?.entries_api_raw || {}, null, 2)));
-          rawBox.innerHTML=''; rawBox.appendChild(det); det.open=false;
-        }catch(e){ rawBox.textContent='Ошибка загрузки raw: '+e.message; }
-        finally{ btnRaw.disabled=false; btnRaw.textContent='Показать сырые данные (entries_api_raw)'; }
+          const debug = rec?.entries_api_debug || {};
+          const det = el('details',{}, el('summary',{},'entries_api_debug (статусы/превью)'), el('pre',{}, JSON.stringify(debug, null, 2)));
+          dbgBox.innerHTML=''; dbgBox.appendChild(det);
+        }catch(e){ dbgBox.textContent='Ошибка загрузки debug: '+e.message; }
+        finally{ btnDbg.disabled=false; btnDbg.textContent='Показать DEBUG по запросам'; }
       };
-      card.appendChild(el('div',{class:'row'}, btnRaw));
-      card.appendChild(rawBox);
+      card.appendChild(el('div',{class:'row'}, btnDbg));
+      card.appendChild(dbgBox);
 
       out.appendChild(card);
     }
   }catch(e){
-    out.textContent='Ошибка: '+e.message;
+    document.getElementById('out').textContent='Ошибка: '+e.message;
   }finally{
     busy.style.display='none';
   }
@@ -173,7 +174,6 @@ async function sample(){
 document.getElementById('go').addEventListener('click', run);
 document.getElementById('demo').addEventListener('click', sample);
 
-// автозаполнение дат на сегодня
 const iso = (d)=> d.toISOString().slice(0,10);
 const today = new Date();
 document.getElementById('start').value = iso(today);
