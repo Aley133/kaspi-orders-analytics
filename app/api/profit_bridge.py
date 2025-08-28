@@ -290,6 +290,11 @@ async def _fetch_entries_httpx(order_id: str, order_number: Optional[str], debug
                     attrs = inc.get("attributes", {}) or {}
                     qty = _get_int(attrs, ["quantity","qty","count"], 1)
                     price = _get_num(attrs, ["unitPrice","basePrice","price"], 0.0)
+                    # страховка unit_price: totalPrice / qty
+                    if (not price) or price <= 0:
+                        total = _get_num(attrs, ["totalPrice","sum","total"], 0.0)
+                        if total and qty:
+                            price = float(total) / max(qty, 1)
                     sku = _get_str(attrs, ["code","productCode","sku"], "")
                     if sku:
                         items.append({"sku": sku, "qty": qty, "unit_price": price})
@@ -321,6 +326,11 @@ async def _fetch_entries_httpx(order_id: str, order_number: Optional[str], debug
                     attrs = e.get("attributes", {}) or {}
                     qty = _get_int(attrs, ["quantity","qty","count"], 1)
                     price = _get_num(attrs, ["unitPrice","basePrice","price"], 0.0)
+                    # страховка unit_price: totalPrice / qty
+                    if (not price) or price <= 0:
+                        total = _get_num(attrs, ["totalPrice","sum","total"], 0.0)
+                        if total and qty:
+                            price = float(total) / max(qty, 1)
                     sku = _get_str(attrs, ["code","productCode","sku"], "")
                     if sku:
                         items.append({"sku": sku, "qty": qty, "unit_price": price})
@@ -398,6 +408,11 @@ async def _fetch_entries_httpx(order_id: str, order_number: Optional[str], debug
                         attrs = inc.get("attributes", {}) or {}
                         qty = _get_int(attrs, ["quantity","qty","count"], 1)
                         price = _get_num(attrs, ["unitPrice","basePrice","price"], 0.0)
+                        # страховка unit_price: totalPrice / qty
+                        if (not price) or price <= 0:
+                            total = _get_num(attrs, ["totalPrice","sum","total"], 0.0)
+                            if total and qty:
+                                price = float(total) / max(qty, 1)
                         sku = _get_str(attrs, ["code","productCode","sku"], "")
                         if sku:
                             items.append({"sku": sku, "qty": qty, "unit_price": price})
