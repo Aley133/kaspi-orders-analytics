@@ -18,20 +18,21 @@ from pydantic import BaseModel
 from cachetools import TTLCache
 from httpx import HTTPStatusError, RequestError
 
-# FIFO / Profit / Bridge роутеры
+# FIFO/Bridge
 from app.api.profit_fifo import get_profit_fifo_router
 from app.api.profit_bridge import get_profit_bridge_router
 
-# ВАЖНО: берём ровно эти хелперы из debug_sku
+# Роутер и ХЕЛПЕРЫ ИМПОРТИРУЕМ ИЗ debug_sku.PY
 from app.debug_sku import (
     get_debug_router,
     _index_included,
     _extract_entry,
     title_candidates,
     _rel_id,
+    sku_candidates,
 )
 
-# --- Kaspi client import (robust) ---
+# KaspiClient
 try:
     from app.kaspi_client import KaspiClient  # type: ignore
 except Exception:
@@ -40,7 +41,7 @@ except Exception:
     except Exception:
         from kaspi_client import KaspiClient  # type: ignore
 
-# --- products router import (robust) ---
+# Products router
 try:
     from app.api.products import get_products_router
 except Exception as _e1:
@@ -84,7 +85,7 @@ def _bd_delta(hhmm: str) -> timedelta:
     except Exception:
         raise HTTPException(status_code=400, detail=f"Неверный BUSINESS_DAY_START: {hhmm}")
 
-# runtime effective flags (устанавливаются в обработчике запроса)
+# runtime flags
 _EFF_USE_BD: bool = USE_BUSINESS_DAY
 _EFF_BDS: str = BUSINESS_DAY_START
 
@@ -228,20 +229,59 @@ def _guess_number(attrs: dict, fallback_id: str) -> str:
             return v.strip()
     return str(fallback_id)
 
-# -------------------- Kaspi helpers (для enrichment) --------------------
+# -------------------- HTTPX как в debug_sku --------------------
+HTTPX_TIMEOUT = httpx.Timeout(connect=10.0, read=70.0, write=15.0, pool=60.0)
+HTTPX_LIMITS = httpx.Limits(max_connections=20, max_keepalive_connections=10)
+
 def _kaspi_headers() -> Dict[str, str]:
     if not KASPI_TOKEN:
         raise HTTPException(status_code=500, detail="KASPI_TOKEN is not set")
-    return {"X-Auth-Token": KASPI_TOKEN, "Accept": "application/vnd.api+json"}
+    return {
+        "X-Auth-Token": KASPI_TOKEN,
+        "Accept": "application/vnd.api+json",
+        "Content-Type": "application/vnd.api+json",
+        "User-Agent": "Mozilla/5.0",
+    }
 
-async def _first_item_sku_and_title(order_id: str) -> Optional[Dict[str, str]]:
+def _async_client():
+    return httpx.AsyncClient(base_url=KASPI_BASE_URL, timeout=HTTPX_TIMEOUT, limits=HTTPX_LIMITS)
+
+# -------------------- Enrichment: SKU + Title --------------------
+async def _first_item_details(order_id: str, return_candidates: bool = False) -> Optional[Dict[str, object]]:
     """
-    Возвращает {"sku","title"} первой позиции заказа.
-    S1: /orders/{id}/entries?include=product,merchantProduct,masterProduct
-    S2: /orderentries?filter[order.id]=...
+    Возвращает:
+      {"sku": "...", "title": "..."}  + опц. {"title_candidates": {...}, "sku_candidates": {...}}
+    Стратегии:
+      S2: /orderentries?filter[order.id]=...   (часто стабильнее/дешевле)
+      S1: /orders/{id}/entries?include=product,merchantProduct,masterProduct
     """
     headers = _kaspi_headers()
-    async with httpx.AsyncClient(base_url=KASPI_BASE_URL) as cli:
+    async with _async_client() as cli:
+        # S2
+        try:
+            r = await cli.get("/orderentries", params={"filter[order.id]": order_id, "page[size]": "200"}, headers=headers)
+            j = r.json()
+            data = (j.get("data", []) if isinstance(j, dict) else []) or []
+            if data:
+                entry = data[0]
+                ex = _extract_entry(entry, {})
+                if ex:
+                    attrs_e = entry.get("attributes", {}) or {}
+                    titles = title_candidates(attrs_e)
+                    best = None
+                    for key in ("offer.name","title","name","productName","shortName"):
+                        v = titles.get(key)
+                        if isinstance(v, str) and v.strip():
+                            best = v.strip(); break
+                    out = {"sku": str(ex["sku"]), "title": (best or "")}
+                    if return_candidates:
+                        cand = sku_candidates(attrs_e)
+                        cand["extracted"] = str(ex["sku"])
+                        out["sku_candidates"] = cand
+                        out["title_candidates"] = titles
+                    return out
+        except Exception:
+            pass
         # S1
         try:
             r = await cli.get(
@@ -251,47 +291,35 @@ async def _first_item_sku_and_title(order_id: str) -> Optional[Dict[str, str]]:
             )
             j = r.json()
             included = _index_included(j.get("included", []) if isinstance(j, dict) else [])
-            for entry in (j.get("data", []) if isinstance(j, dict) else []) or []:
+            data = (j.get("data", []) if isinstance(j, dict) else []) or []
+            if data:
+                entry = data[0]
                 ex = _extract_entry(entry, included)
-                if not ex:
-                    continue
-                attrs_e = entry.get("attributes", {}) or {}
-                titles = title_candidates(attrs_e)
-                for rel_key in ("product", "merchantProduct", "masterProduct"):
-                    t, rel_id = _rel_id(entry, rel_key)
-                    if t and rel_id:
-                        ref = (included.get((str(t), str(rel_id))) or {})
-                        ref_attrs = ref.get("attributes", {}) or {}
-                        for k in ("title","name","productName","shortName"):
-                            v = ref_attrs.get(k)
-                            if isinstance(v,str) and v.strip():
-                                titles[f"{rel_key}.{k}"] = v.strip()
-                # выберем лучшее название
-                best_title = None
-                for key in ("offer.name","product.title","product.productName","title","name"):
-                    v = titles.get(key)
-                    if isinstance(v,str) and v.strip():
-                        best_title = v.strip(); break
-                return {"sku": str(ex["sku"]), "title": (best_title or "")}
-        except Exception:
-            pass
-        # S2
-        try:
-            r = await cli.get("/orderentries",
-                              params={"filter[order.id]": order_id, "page[size]":"200"},
-                              headers=headers)
-            j = r.json()
-            for entry in (j.get("data", []) if isinstance(j, dict) else []) or []:
-                ex = _extract_entry(entry, {})
-                if not ex:
-                    continue
-                titles = title_candidates(entry.get("attributes", {}) or {})
-                best_title = None
-                for key in ("offer.name","title","name","productName","shortName"):
-                    v = titles.get(key)
-                    if isinstance(v,str) and v.strip():
-                        best_title = v.strip(); break
-                return {"sku": str(ex["sku"]), "title": (best_title or "")}
+                if ex:
+                    attrs_e = entry.get("attributes", {}) or {}
+                    titles = title_candidates(attrs_e)
+                    # добавим заголовки из include
+                    for rel_key in ("product","merchantProduct","masterProduct"):
+                        t, rel_id = _rel_id(entry, rel_key)
+                        if t and rel_id:
+                            ref = (included.get((str(t), str(rel_id))) or {})
+                            ref_attrs = ref.get("attributes", {}) or {}
+                            for k in ("title","name","productName","shortName"):
+                                v = ref_attrs.get(k)
+                                if isinstance(v, str) and v.strip():
+                                    titles[f"{rel_key}.{k}"] = v.strip()
+                    best = None
+                    for key in ("offer.name","product.title","product.productName","title","name"):
+                        v = titles.get(key)
+                        if isinstance(v, str) and v.strip():
+                            best = v.strip(); break
+                    out = {"sku": str(ex["sku"]), "title": (best or "")}
+                    if return_candidates:
+                        cand = sku_candidates(attrs_e)
+                        cand["extracted"] = str(ex["sku"])
+                        out["sku_candidates"] = cand
+                        out["title_candidates"] = titles
+                    return out
         except Exception:
             pass
     return None
@@ -482,8 +510,8 @@ async def list_ids(start: str = Query(...), end: str = Query(...), tz: str = Que
                    order: str = Query("asc", pattern="^(asc|desc)$"),
                    grouped: int = Query(0),
                    with_items: int = Query(1, description="1=подтянуть sku+title первой позиции"),
-                   enrich_scope: str = Query("last_day", pattern="^(none|last_day|all)$",
-                                             description="Ограничение обогащения SKU: none|last_day|all")):
+                   enrich_scope: str = Query("last_day", pattern="^(none|last_day|all)$"),
+                   return_candidates: int = Query(0, description="1=вернуть title_candidates/sku_candidates для 1-й позиции")):
     tzinfo = tzinfo_of(tz)
     global _EFF_USE_BD, _EFF_BDS
     eff_use_bd = USE_BUSINESS_DAY if use_bd is None else bool(use_bd)
@@ -497,7 +525,6 @@ async def list_ids(start: str = Query(...), end: str = Query(...), tz: str = Que
         start_dt = tzinfo.localize(datetime.combine((start_dt.date() - timedelta(days=1)), time(0, 0, 0))) + delta
         end_dt = tzinfo.localize(datetime.combine(end_dt.date(), time(0, 0, 0))) + delta - timedelta(milliseconds=1)
 
-    # Какой день считаем «последним» для enrichment
     enrich_day = bucket_date(end_dt.astimezone(tzinfo))
 
     inc = parse_states_csv(states)
@@ -570,21 +597,29 @@ async def list_ids(start: str = Query(...), end: str = Query(...), tz: str = Que
                 "total_amount": round(sum(float(x.get("amount", 0) or 0) for x in bucket), 2),
             })
 
-    # --- ОБОГАЩЕНИЕ SKU/TITLE ---
-    # По умолчанию enrich_scope="last_day": обогащаем только те, чья дата == последнему дню диапазона.
+    # --- ОБОГАЩЕНИЕ SKU/TITLE (щадя API) ---
     if with_items and out and enrich_scope != "none":
         if enrich_scope == "all":
             targets = out[: (limit or len(out))]
         else:  # last_day
             targets = [it for it in out if str(it["date"])[:10] == enrich_day]
-        # небольшая конкарренси, чтобы не душить API
-        sem = asyncio.Semaphore(8)
+
+        sem = asyncio.Semaphore(6)  # умеренная параллельность
         async def enrich(it):
             async with sem:
-                extra = await _first_item_sku_and_title(str(it["id"]))
+                extra = await _first_item_details(
+                    str(it["id"]),
+                    return_candidates=bool(return_candidates),
+                )
                 if extra:
                     it["sku"] = extra.get("sku")
                     it["title"] = extra.get("title")
+                    if return_candidates:
+                        # компактно складываем в под-объект
+                        it["first_item"] = {
+                            "title_candidates": extra.get("title_candidates") or {},
+                            "sku_candidates": extra.get("sku_candidates") or {},
+                        }
         await asyncio.gather(*(enrich(it) for it in targets))
 
     if limit and limit > 0:
@@ -615,5 +650,5 @@ async def list_ids_csv(start: str = Query(...), end: str = Query(...), tz: str =
 async def root():
     return RedirectResponse(url="/ui/")
 
-# Статика UI
+# UI static
 app.mount("/ui", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static"), html=True), name="static")
