@@ -1,3 +1,4 @@
+# app/main.py
 from __future__ import annotations
 
 import os
@@ -17,10 +18,11 @@ from pydantic import BaseModel
 from cachetools import TTLCache
 from httpx import HTTPStatusError, RequestError
 
-# FIFO router (используется фронтом под /profit)
+# FIFO / Profit / Bridge роутеры
 from app.api.profit_fifo import get_profit_fifo_router
-from app.api.profit_bridge import get_profit_bridge_router   # <= именно так
-# из debug_sku берём роутер и хелперы для извлечения SKU/названий
+from app.api.profit_bridge import get_profit_bridge_router
+
+# ВАЖНО: берём ровно эти хелперы из debug_sku
 from app.debug_sku import (
     get_debug_router,
     _index_included,
@@ -55,7 +57,7 @@ load_dotenv()
 # -------------------- ENV --------------------
 KASPI_TOKEN = os.getenv("KASPI_TOKEN", "").strip()
 DEFAULT_TZ = os.getenv("TZ", "Asia/Almaty")
-KASPI_BASE_URL = os.getenv("KASPI_BASE_URL", "https://kaspi.kz/shop/api/v2")
+KASPI_BASE_URL = os.getenv("KASPI_BASE_URL", "https://kaspi.kz/shop/api/v2").rstrip("/")
 CURRENCY = os.getenv("CURRENCY", "KZT")
 
 AMOUNT_FIELDS = [s.strip() for s in os.getenv("AMOUNT_FIELDS", "totalPrice").split(",") if s.strip()]
@@ -226,17 +228,21 @@ def _guess_number(attrs: dict, fallback_id: str) -> str:
             return v.strip()
     return str(fallback_id)
 
-# -------------------- Kaspi helpers (локально, как в bridge/debug) --------------------
+# -------------------- Kaspi helpers (для enrichment) --------------------
 def _kaspi_headers() -> Dict[str, str]:
     if not KASPI_TOKEN:
         raise HTTPException(status_code=500, detail="KASPI_TOKEN is not set")
     return {"X-Auth-Token": KASPI_TOKEN, "Accept": "application/vnd.api+json"}
 
 async def _first_item_sku_and_title(order_id: str) -> Optional[Dict[str, str]]:
-    """Возвращает {"sku","title"} первой позиции. Пробуем 2 стратегии."""
+    """
+    Возвращает {"sku","title"} первой позиции заказа.
+    S1: /orders/{id}/entries?include=product,merchantProduct,masterProduct
+    S2: /orderentries?filter[order.id]=...
+    """
     headers = _kaspi_headers()
     async with httpx.AsyncClient(base_url=KASPI_BASE_URL) as cli:
-        # S1: /orders/{id}/entries?include=product,merchantProduct,masterProduct
+        # S1
         try:
             r = await cli.get(
                 f"/orders/{order_id}/entries",
@@ -251,34 +257,29 @@ async def _first_item_sku_and_title(order_id: str) -> Optional[Dict[str, str]]:
                     continue
                 attrs_e = entry.get("attributes", {}) or {}
                 titles = title_candidates(attrs_e)
-                # подмешаем названия из include
                 for rel_key in ("product", "merchantProduct", "masterProduct"):
                     t, rel_id = _rel_id(entry, rel_key)
                     if t and rel_id:
                         ref = (included.get((str(t), str(rel_id))) or {})
                         ref_attrs = ref.get("attributes", {}) or {}
-                        for k in ("title", "name", "productName", "shortName"):
+                        for k in ("title","name","productName","shortName"):
                             v = ref_attrs.get(k)
-                            if isinstance(v, str) and v.strip():
+                            if isinstance(v,str) and v.strip():
                                 titles[f"{rel_key}.{k}"] = v.strip()
-                # выбираем «лучшее» название
+                # выберем лучшее название
                 best_title = None
-                for key in ("offer.name", "product.title", "product.productName", "title", "name"):
+                for key in ("offer.name","product.title","product.productName","title","name"):
                     v = titles.get(key)
-                    if isinstance(v, str) and v.strip():
-                        best_title = v.strip()
-                        break
+                    if isinstance(v,str) and v.strip():
+                        best_title = v.strip(); break
                 return {"sku": str(ex["sku"]), "title": (best_title or "")}
         except Exception:
             pass
-
-        # S2: /orderentries?filter[order.id]=...  (некоторые заказы видны только тут)
+        # S2
         try:
-            r = await cli.get(
-                "/orderentries",
-                params={"filter[order.id]": order_id, "page[size]": "200"},
-                headers=headers,
-            )
+            r = await cli.get("/orderentries",
+                              params={"filter[order.id]": order_id, "page[size]":"200"},
+                              headers=headers)
             j = r.json()
             for entry in (j.get("data", []) if isinstance(j, dict) else []) or []:
                 ex = _extract_entry(entry, {})
@@ -286,15 +287,13 @@ async def _first_item_sku_and_title(order_id: str) -> Optional[Dict[str, str]]:
                     continue
                 titles = title_candidates(entry.get("attributes", {}) or {})
                 best_title = None
-                for key in ("offer.name", "title", "name", "productName", "shortName"):
+                for key in ("offer.name","title","name","productName","shortName"):
                     v = titles.get(key)
-                    if isinstance(v, str) and v.strip():
-                        best_title = v.strip()
-                        break
+                    if isinstance(v,str) and v.strip():
+                        best_title = v.strip(); break
                 return {"sku": str(ex["sku"]), "title": (best_title or "")}
         except Exception:
             pass
-
     return None
 
 # -------------------- Models --------------------
@@ -482,7 +481,9 @@ async def list_ids(start: str = Query(...), end: str = Query(...), tz: str = Que
                    limit: int = Query(1000),
                    order: str = Query("asc", pattern="^(asc|desc)$"),
                    grouped: int = Query(0),
-                   with_items: int = Query(1, description="1=подтянуть sku+title первой позиции")):
+                   with_items: int = Query(1, description="1=подтянуть sku+title первой позиции"),
+                   enrich_scope: str = Query("last_day", pattern="^(none|last_day|all)$",
+                                             description="Ограничение обогащения SKU: none|last_day|all")):
     tzinfo = tzinfo_of(tz)
     global _EFF_USE_BD, _EFF_BDS
     eff_use_bd = USE_BUSINESS_DAY if use_bd is None else bool(use_bd)
@@ -495,6 +496,9 @@ async def list_ids(start: str = Query(...), end: str = Query(...), tz: str = Que
         delta = _bd_delta(eff_bds)
         start_dt = tzinfo.localize(datetime.combine((start_dt.date() - timedelta(days=1)), time(0, 0, 0))) + delta
         end_dt = tzinfo.localize(datetime.combine(end_dt.date(), time(0, 0, 0))) + delta - timedelta(milliseconds=1)
+
+    # Какой день считаем «последним» для enrichment
+    enrich_day = bucket_date(end_dt.astimezone(tzinfo))
 
     inc = parse_states_csv(states)
     exc = parse_states_csv(exclude_states) or set()
@@ -566,10 +570,15 @@ async def list_ids(start: str = Query(...), end: str = Query(...), tz: str = Que
                 "total_amount": round(sum(float(x.get("amount", 0) or 0) for x in bucket), 2),
             })
 
-    # --- обогащаем sku/title первой позиции (fallback S1/S2) ---
-    if with_items and out:
-        targets = out[: (limit or len(out))]
-        sem = asyncio.Semaphore(12)
+    # --- ОБОГАЩЕНИЕ SKU/TITLE ---
+    # По умолчанию enrich_scope="last_day": обогащаем только те, чья дата == последнему дню диапазона.
+    if with_items and out and enrich_scope != "none":
+        if enrich_scope == "all":
+            targets = out[: (limit or len(out))]
+        else:  # last_day
+            targets = [it for it in out if str(it["date"])[:10] == enrich_day]
+        # небольшая конкарренси, чтобы не душить API
+        sem = asyncio.Semaphore(8)
         async def enrich(it):
             async with sem:
                 extra = await _first_item_sku_and_title(str(it["id"]))
@@ -598,7 +607,7 @@ async def list_ids_csv(start: str = Query(...), end: str = Query(...), tz: str =
     data = await list_ids(start=start, end=end, tz=tz, date_field=date_field,
                           states=states, exclude_states=exclude_states,
                           use_bd=use_bd, business_day_start=business_day_start,
-                          limit=100000, order=order, grouped=0)
+                          limit=100000, order=order, grouped=0, with_items=0, enrich_scope="none")
     csv = "\n".join([str(it["number"]) for it in data["items"]])
     return csv
 
