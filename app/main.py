@@ -94,7 +94,7 @@ orders_cache = TTLCache(maxsize=128, ttl=CACHE_TTL)
 app.include_router(get_products_router(client), prefix="/products")
 app.include_router(get_profit_fifo_router(),   prefix="/profit")
 app.include_router(get_profit_bridge_router(), prefix="/profit/bridge")
-app.include_router(get_debug_router(client=None, default_tz=DEFAULT_TZ, chunk_days=CHUNK_DAYS), prefix="/debug")
+app.include_router(get_debug_router(), prefix="")  # без префикса, чтобы путь был /debug/...
 
 # -------------------- Utils --------------------
 def tzinfo_of(name: str) -> pytz.BaseTzInfo:
