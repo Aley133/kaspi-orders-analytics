@@ -1,24 +1,23 @@
 <!doctype html>
 <html lang="ru">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Kaspi Debug — SKU/Title Probe</title>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Kaspi Debug — поиск SKU/названия</title>
   <style>
-    body{font-family:ui-sans-serif,system-ui,Segoe UI,Roboto,Arial,sans-serif;max-width:1100px;margin:24px auto;padding:0 16px;color:#111}
-    h1{font-size:22px;margin:0 0 12px}
-    .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:8px 0}
-    label{font-size:12px;color:#555}
-    input,select,button{padding:8px;border:1px solid #ddd;border-radius:8px}
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial,sans-serif;margin:20px;color:#111}
+    .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+    input,select,button{padding:8px 10px;border:1px solid #e5e7eb;border-radius:8px}
     button{background:#111;color:#fff;cursor:pointer}
-    button.secondary{background:#fff;color:#111;border:1px solid #111}
-    .muted{color:#666}
-    .card{border:1px solid #eee;border-radius:10px;padding:12px;margin:12px 0}
-    table{width:100%;border-collapse:collapse;margin:6px 0}
-    th,td{border-bottom:1px solid #eee;padding:6px 8px;text-align:left;vertical-align:top}
-    pre{background:#fafafa;border:1px solid #eee;border-radius:8px;padding:8px;white-space:pre-wrap}
-    .k{color:#6b21a8}
-    .v{color:#111}
+    button.secondary{background:#fff;color:#111;border-color:#d1d5db}
+    .card{border:1px solid #e5e7eb;border-radius:12px;padding:12px;margin-top:12px}
+    table{width:100%;border-collapse:collapse}
+    th,td{border-bottom:1px solid #eee;padding:6px 8px;text-align:left}
+    .muted{color:#6b7280}
+    .spinner{display:inline-block;width:14px;height:14px;border:2px solid #e5e7eb;border-top-color:#111;border-radius:50%;animation:s .8s linear infinite;vertical-align:middle;margin-left:6px}
+    @keyframes s{to{transform:rotate(1turn)}}
+    details>pre{white-space:pre-wrap;background:#fafafa;padding:8px;border:1px solid #eee;border-radius:8px;max-height:400px;overflow:auto}
+    code{background:#f5f5f5;padding:2px 4px;border-radius:6px}
   </style>
 </head>
 <body>
@@ -26,151 +25,159 @@
 
   <div class="card">
     <div class="row">
-      <div>
-        <label>Номер заказа</label><br/>
-        <input id="orderNumber" placeholder="например, 623903299" style="min-width:220px">
-      </div>
-      <div>
-        <label>Начало (YYYY-MM-DD)</label><br/>
-        <input id="start" type="date">
-      </div>
-      <div>
-        <label>Конец (YYYY-MM-DD)</label><br/>
-        <input id="end" type="date">
-      </div>
-      <div>
-        <label>Поле даты</label><br/>
-        <select id="date_field">
-          <option>creationDate</option>
-          <option>plannedShipmentDate</option>
-          <option>shipmentDate</option>
-          <option>deliveryDate</option>
-        </select>
-      </div>
-      <div class="row" style="align-self:flex-end">
-        <button id="btnFind">Найти</button>
-        <button class="secondary" id="btnSample">10 примеров</button>
-      </div>
+      <label>Номер заказа</label>
+      <input id="num" placeholder="624374271" style="width:140px">
+      <label>Начало (YYYY-MM-DD)</label>
+      <input id="start" type="date">
+      <label>Конец</label>
+      <input id="end" type="date">
+      <label>Поле даты</label>
+      <select id="df">
+        <option value="creationDate">creationDate</option>
+        <option value="plannedShipmentDate">plannedShipmentDate</option>
+        <option value="shipmentDate">shipmentDate</option>
+        <option value="deliveryDate">deliveryDate</option>
+      </select>
+      <button id="go">Найти</button>
+      <button id="demo" class="secondary">10 примеров</button>
+      <span id="busy" class="muted" style="display:none">загрузка<span class="spinner"></span></span>
     </div>
-    <div class="muted">Сервис берёт твой KASPI_TOKEN из переменных окружения, как и основной бэкенд.</div>
+    <div class="muted" style="margin-top:6px">Сервис берёт KASPI_TOKEN из переменных окружения бэкенда.</div>
   </div>
 
   <div id="out"></div>
 
 <script>
-function el(tag, cls){ const n=document.createElement(tag); if(cls) n.className=cls; return n; }
-function kvTable(obj, title){
-  const card = el('div','card');
-  if(title){ const h=el('div'); h.innerHTML='<b>'+title+'</b>'; card.appendChild(h); }
-  const table = el('table');
-  const thead = el('thead'); thead.innerHTML='<tr><th>Ключ</th><th>Значение</th></tr>'; table.appendChild(thead);
-  const tb = el('tbody');
+const api = {
+  async orderByNumber({number,start,end,date_field,raw=0}) {
+    const p = new URLSearchParams({number, start, end, date_field, raw:String(raw)});
+    const r = await fetch(`/debug/order-by-number?`+p.toString());
+    if(!r.ok) throw new Error(await r.text());
+    return r.json();
+  },
+  async sample({start,end,date_field,limit=10}) {
+    const p=new URLSearchParams({start,end,date_field,limit:String(limit)});
+    const r=await fetch(`/debug/sample?`+p.toString());
+    if(!r.ok) throw new Error(await r.text());
+    return r.json();
+  }
+};
+
+function el(tag, attrs={}, ...kids){
+  const n=document.createElement(tag);
+  for(const [k,v] of Object.entries(attrs||{})){
+    if(k==='class') n.className=v; else if(k==='html') n.innerHTML=v; else n.setAttribute(k,v);
+  }
+  for(const k of kids){ if(k!=null) n.appendChild(k.nodeType? k : document.createTextNode(String(k))); }
+  return n;
+}
+function kvTable(obj){
+  const t=el('table');
+  const thead=el('thead',{}, el('tr',{}, el('th',{},'Ключ'), el('th',{},'Значение')));
+  const tb=el('tbody');
   for(const [k,v] of Object.entries(obj||{})){
-    const tr = el('tr');
-    const td1 = el('td'); td1.innerHTML = '<span class="k">'+k+'</span>'; tr.appendChild(td1);
-    const td2 = el('td'); td2.innerHTML = '<span class="v">'+String(v)+'</span>'; tr.appendChild(td2);
-    tb.appendChild(tr);
+    tb.appendChild(el('tr',{}, el('td',{},k), el('td',{}, typeof v==='object'? JSON.stringify(v): String(v))));
   }
-  table.appendChild(tb);
-  card.appendChild(table);
-  return card;
+  t.appendChild(thead); t.appendChild(tb); return t;
 }
+function fmtDate(d){ return d && d.slice ? d.slice(0,16).replace('T',' ') : d; }
 
-async function call(url){
-  const r = await fetch(url);
-  if(!r.ok) throw new Error(await r.text());
-  return r.json();
-}
+async function run(){
+  const number=document.getElementById('num').value.trim();
+  const start =document.getElementById('start').value;
+  const end   =document.getElementById('end').value;
+  const df    =document.getElementById('df').value;
+  if(!number||!start||!end){ alert('Заполните номер, начало, конец.'); return; }
 
-function renderItems(items){
-  const out = document.getElementById('out');
-  out.innerHTML = '';
-  if(!items || items.length===0){
-    out.innerHTML = '<div class="card">Ничего не найдено в заданном периоде.</div>';
-    return;
-  }
-  for(const it of items){
-    const card = el('div','card');
-    const h = el('div');
-    h.innerHTML = `<b>Заказ:</b> ${it.number} &nbsp; <span class="muted">(order_id: ${it.order_id}, state: ${it.state || '—'})</span>`;
-    card.appendChild(h);
+  const busy=document.getElementById('busy'); busy.style.display='inline';
+  const out = document.getElementById('out'); out.innerHTML='';
 
-    card.appendChild(kvTable(it.top_level_sku_candidates || {}, 'Верхнеуровневые кандидаты SKU (прямо в attributes)'));
+  try{
+    // лёгкий ответ (без entries_api_raw)
+    const data = await api.orderByNumber({number,start,end,date_field:df,raw:0});
+    if(!data.items || !data.items.length){ out.textContent='Ничего не найдено.'; return; }
 
-    const h2 = el('div'); h2.innerHTML = '<b>Позиции ('+(it.entries_count||0)+')</b>'; card.appendChild(h2);
+    for(const itm of data.items){
+      const card=el('div',{class:'card'});
+      card.appendChild(el('div',{class:'muted'}, `Заказ: `, el('code',{},itm.number), `  (order_id: ${itm.order_id}, state: ${itm.state||'-'})`));
 
-    if((it.entries||[]).length === 0){
-      const p = el('div'); p.className='muted'; p.textContent='Список позиций не найден. Смотри attrs_raw ниже.';
-      card.appendChild(p);
+      // top-level sku-candidates
+      if(itm.top_level_sku_candidates && Object.keys(itm.top_level_sku_candidates).length){
+        card.appendChild(el('h4',{},'Верхнеуровневые кандидаты SKU'));
+        card.appendChild(kvTable(itm.top_level_sku_candidates));
+      }
+
+      // позиции
+      const h=el('h4',{},`Позиции (${itm.entries_count})`);
+      card.appendChild(h);
+
+      if((itm.entries||[]).length===0){
+        card.appendChild(el('div',{class:'muted'},'Список позиций не найден в attributes. Можно подтянуть сырые данные.'));
+      }else{
+        (itm.entries||[]).forEach((row)=>{
+          const sub=el('div',{class:'card'});
+          sub.appendChild(el('div',{},`#${row.index}`));
+          if(row.title_candidates && Object.keys(row.title_candidates).length){
+            sub.appendChild(el('div',{class:'muted'},'Название (кандидаты):'));
+            sub.appendChild(kvTable(row.title_candidates));
+          }
+          if(row.sku_candidates && Object.keys(row.sku_candidates).length){
+            sub.appendChild(el('div',{class:'muted'},'SKU (кандидаты):'));
+            sub.appendChild(kvTable(row.sku_candidates));
+          }
+          const det=el('details',{}, el('summary',{},'raw записи позиции'), el('pre',{}, JSON.stringify(row.raw,null,2)));
+          sub.appendChild(det);
+          card.appendChild(sub);
+        });
+      }
+
+      // кнопка подгрузить сырые данные (raw=1)
+      const btnRaw = el('button',{class:'secondary'},'Показать сырые данные (entries_api_raw)');
+      const rawBox = el('div');
+      btnRaw.onclick = async ()=>{
+        btnRaw.disabled=true; btnRaw.textContent='Загрузка...';
+        try{
+          const full = await api.orderByNumber({number,start,end,date_field:df,raw:1});
+          const rec = (full.items||[]).find(x=>x.order_id===itm.order_id) || full.items?.[0];
+          const det = el('details',{}, el('summary',{},'entries_api_raw'), el('pre',{}, JSON.stringify(rec?.entries_api_raw || {}, null, 2)));
+          rawBox.innerHTML=''; rawBox.appendChild(det); det.open=false;
+        }catch(e){ rawBox.textContent='Ошибка загрузки raw: '+e.message; }
+        finally{ btnRaw.disabled=false; btnRaw.textContent='Показать сырые данные (entries_api_raw)'; }
+      };
+      card.appendChild(el('div',{class:'row'}, btnRaw));
+      card.appendChild(rawBox);
+
+      out.appendChild(card);
     }
-
-    (it.entries||[]).forEach((e)=>{
-      const sub = el('div','card');
-      sub.style.background='#fbfbff';
-      sub.style.borderColor='#eef';
-      const t = el('div');
-      t.innerHTML = `<b>Позиция #${e.index}</b>`;
-      sub.appendChild(t);
-
-      sub.appendChild(kvTable(e.title_candidates || {}, 'Кандидаты названия товара'));
-      sub.appendChild(kvTable(e.sku_candidates || {}, 'Кандидаты SKU (артикулов)'));
-
-      const pre = el('pre');
-      pre.textContent = JSON.stringify(e.raw || {}, null, 2);
-      sub.appendChild(pre);
-
-      card.appendChild(sub);
-    });
-
-    const d = el('details');
-    d.open = false;
-    const sum = el('summary'); sum.textContent='Показать attrs_raw заказа';
-    d.appendChild(sum);
-    const pre = el('pre'); pre.textContent = JSON.stringify(it.attrs_raw || {}, null, 2);
-    d.appendChild(pre);
-    card.appendChild(d);
-
-    out.appendChild(card);
+  }catch(e){
+    out.textContent='Ошибка: '+e.message;
+  }finally{
+    busy.style.display='none';
   }
 }
 
-document.getElementById('btnFind').addEventListener('click', async ()=>{
-  const number = document.getElementById('orderNumber').value.trim();
-  const start = document.getElementById('start').value;
-  const end = document.getElementById('end').value;
-  const date_field = document.getElementById('date_field').value;
-  if(!number || !start || !end){ alert('Заполни номер, начало и конец.'); return; }
-  const url = `/debug/order-by-number?` + new URLSearchParams({ number, start, end, date_field }).toString();
+async function sample(){
+  const start =document.getElementById('start').value;
+  const end   =document.getElementById('end').value;
+  const df    =document.getElementById('df').value;
+  const out = document.getElementById('out'); out.innerHTML='';
+  document.getElementById('busy').style.display='inline';
   try{
-    const data = await call(url);
-    renderItems(data.items || []);
-  }catch(e){
-    alert('Ошибка: ' + e.message);
-  }
-});
+    const data = await api.sample({start,end,date_field:df,limit:10});
+    out.appendChild(el('div',{class:'card'}, el('h3',{},'Примеры (по 1й позиции каждого заказа)'),
+      el('pre',{}, JSON.stringify(data.items||[], null, 2))));
+  }catch(e){ out.textContent='Ошибка: '+e.message; }
+  finally{ document.getElementById('busy').style.display='none'; }
+}
 
-document.getElementById('btnSample').addEventListener('click', async ()=>{
-  const start = document.getElementById('start').value;
-  const end = document.getElementById('end').value;
-  const date_field = document.getElementById('date_field').value;
-  if(!start || !end){ alert('Задай период.'); return; }
-  const url = `/debug/sample?` + new URLSearchParams({ start, end, date_field }).toString();
-  try{
-    const data = await call(url);
-    renderItems(data.items || []);
-  }catch(e){
-    alert('Ошибка: ' + e.message);
-  }
-});
+document.getElementById('go').addEventListener('click', run);
+document.getElementById('demo').addEventListener('click', sample);
 
-// дефолтные даты — сегодня
-(function(){
-  const today = new Date();
-  const iso = d => d.toISOString().slice(0,10);
-  document.getElementById('start').value = iso(today);
-  document.getElementById('end').value = iso(today);
-})();
+// автозаполнение дат на сегодня
+const iso = (d)=> d.toISOString().slice(0,10);
+const today = new Date();
+document.getElementById('start').value = iso(today);
+document.getElementById('end').value   = iso(today);
 </script>
 </body>
 </html>
-
