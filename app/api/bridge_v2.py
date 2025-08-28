@@ -566,5 +566,13 @@ def get_profit_router_v2() -> APIRouter:
         )[:limit]
         return {"currency": os.getenv("CURRENCY","KZT"), "rows": rows}
 
-    return router
+    # ===== Совместимый пинг для фронта: /profit/db/ping =====
+    @router.get("/db/ping")
+    async def db_ping(_: bool = Depends(require_api_key)):
+        return {
+            "ok": True,
+            "engine": "postgres" if _USE_PG else "sqlite",
+            "path": DB_PATH if not _USE_PG else None,
+        }
 
+    return router
