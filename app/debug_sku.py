@@ -6,22 +6,17 @@ from httpx import HTTPStatusError
 from datetime import datetime, timedelta
 from typing import Iterable, Tuple, List, Dict
 import pytz
+import os
+import httpx
 
 def get_debug_router(client, default_tz: str = "Asia/Almaty", chunk_days: int = 7) -> APIRouter:
-    """
-    Возвращает APIRouter с эндпоинтами:
-      - GET /debug/order-by-number
-      - GET /debug/sample
-    Работает на том же домене, что и main.py.
-    """
-    if client is None:
-        # пусть ошибка будет в рантайме при первом вызове эндпоинта,
-        # но лучше явно оставить проверку.
-        pass
-
     router = APIRouter()
 
-    # --- локальные утилиты (копии, чтобы не тянуть main.py и избежать циклического импорта) ---
+    # ---- env для прямого запроса к API, если entries не пришли в order.attributes ----
+    KASPI_TOKEN = os.getenv("KASPI_TOKEN", "").strip()
+    KASPI_BASE_URL = os.getenv("KASPI_BASE_URL", "https://kaspi.kz/shop/api/v2").rstrip("/")
+
+    # ---------------- утилиты ----------------
     def tzinfo_of(name: str) -> pytz.BaseTzInfo:
         try:
             return pytz.timezone(name)
@@ -63,12 +58,10 @@ def get_debug_router(client, default_tz: str = "Asia/Almaty", chunk_days: int = 
         return d.get(key) if isinstance(d, dict) else None
 
     def _find_entries(attrs: dict) -> list[dict]:
-        # возможные имена массива позиций
         for k in ("entries", "items", "positions", "orderItems", "products", "lines", "orderLines"):
             v = _safe_get(attrs, k)
             if isinstance(v, list) and v and isinstance(v[0], dict):
                 return v
-        # fallback: первый list[dict] на 1 уровне
         for v in attrs.values():
             if isinstance(v, list) and v and isinstance(v[0], dict):
                 return v
@@ -104,7 +97,43 @@ def get_debug_router(client, default_tz: str = "Asia/Almaty", chunk_days: int = 
                     out[f"product.{k}"] = v.strip()
         return out
 
-    # --- эндпоинты ---
+    # ---------- НОВОЕ: прямой вызов /orders/{id}/entries ----------
+    async def api_fetch_entries(order_id: str) -> dict:
+        """
+        Возвращает JSON /orders/{order_id}/entries?include=product,merchantProduct&page[size]=100
+        """
+        if not KASPI_TOKEN:
+            raise HTTPException(status_code=500, detail="KASPI_TOKEN is not set")
+        url = f"{KASPI_BASE_URL}/orders/{order_id}/entries"
+        params = {"page[size]": 100, "include": "product,merchantProduct"}
+        headers = {
+            "X-Auth-Token": KASPI_TOKEN,
+            "Accept": "application/vnd.api+json",
+            "Content-Type": "application/vnd.api+json",
+        }
+        async with httpx.AsyncClient(timeout=30.0) as s:
+            r = await s.get(url, params=params, headers=headers)
+            r.raise_for_status()
+            return r.json()
+
+    # Для сопоставления included
+    def build_included_index(included: list[dict]) -> dict[tuple[str, str], dict]:
+        idx: dict[tuple[str, str], dict] = {}
+        for it in included or []:
+            t = it.get("type"); i = it.get("id")
+            if t and i:
+                idx[(t, i)] = it
+        return idx
+
+    def get_rel_id(entry: dict, rel_name: str) -> tuple[str | None, str | None]:
+        rel = entry.get("relationships", {}).get(rel_name, {})
+        data = rel.get("data")
+        if isinstance(data, dict):
+            return data.get("type"), data.get("id")
+        return None, None
+
+    # --------------------------------------------------------------
+
     @router.get("/debug/order-by-number")
     async def order_by_number(
         number: str = Query(..., description="Номер заказа из кабинета"),
@@ -132,13 +161,46 @@ def get_debug_router(client, default_tz: str = "Asia/Almaty", chunk_days: int = 
                         if str(num) != str(number):
                             continue
 
+                        # 1) сначала пытаемся найти entries прямо в attributes
                         entries = _find_entries(attrs)
                         rows = []
+
+                        # 2) если не нашли — тянем через API /orders/{id}/entries
+                        api_payload = None
+                        if not entries:
+                            api_payload = await api_fetch_entries(order.get("id"))
+                            entries = [it.get("attributes", {}) | {"relationships": it.get("relationships", {})}
+                                       for it in (api_payload.get("data") or [])]
+                            included_idx = build_included_index(api_payload.get("included") or [])
+                        else:
+                            included_idx = {}
+
                         for i, ent in enumerate(entries):
+                            # кандидаты из самих полей
+                            titles = title_candidates(ent)
+                            skus   = sku_candidates(ent)
+
+                            # попытка достать product.name / merchantProduct.id из included
+                            prod_t, prod_id = get_rel_id(ent, "product")
+                            mp_t,   mp_id   = get_rel_id(ent, "merchantProduct")
+
+                            prod_attrs = (included_idx.get((prod_t, prod_id)) or {}).get("attributes", {}) if prod_id else {}
+                            if prod_attrs:
+                                nm = prod_attrs.get("name") or prod_attrs.get("title")
+                                if isinstance(nm, str) and nm.strip():
+                                    titles.setdefault("included.product.name", nm.strip())
+
+                            # составной артикул a la 115247815_269796431
+                            composed = None
+                            offer_like = ent.get("offerId") or ent.get("merchantProductId") or mp_id
+                            if prod_id and offer_like:
+                                composed = f"{prod_id}_{offer_like}"
+                                skus.setdefault("composed(productId_offerId)", composed)
+
                             rows.append({
                                 "index": i,
-                                "title_candidates": title_candidates(ent),
-                                "sku_candidates": sku_candidates(ent),
+                                "title_candidates": titles,
+                                "sku_candidates": skus,
                                 "all_keys": sorted(list(ent.keys())),
                                 "raw": ent,
                             })
@@ -151,14 +213,15 @@ def get_debug_router(client, default_tz: str = "Asia/Almaty", chunk_days: int = 
                             "date_ms": ms,
                             "date_iso": datetime.fromtimestamp(ms/1000.0, tz=pytz.UTC).astimezone(tzinfo).isoformat() if ms else None,
                             "top_level_sku_candidates": sku_candidates(attrs),
-                            "entries_count": len(entries),
+                            "entries_count": len(rows),
                             "entries": rows,
                             "attrs_keys": sorted(list(attrs.keys())),
                             "attrs_raw": attrs,
+                            # чтобы можно было посмотреть «сырой» ответ entries:
+                            "entries_api_raw": api_payload or None,
                         })
                     break
                 except HTTPStatusError as ee:
-                    # fallback на creationDate если фильтр не поддерживается
                     if ee.response.status_code in (400, 422) and try_field != "creationDate":
                         try_field = "creationDate"
                         continue
@@ -185,8 +248,15 @@ def get_debug_router(client, default_tz: str = "Asia/Almaty", chunk_days: int = 
                 try:
                     for order in client.iter_orders(start=s, end=e, filter_field=try_field):
                         attrs = order.get("attributes", {}) or {}
+                        # попробуем хотя бы заголовки из первой позиции
                         entries = _find_entries(attrs)
                         first = entries[0] if entries else {}
+
+                        # если пусто — тянем одну страницу /entries
+                        if not first:
+                            api_payload = await api_fetch_entries(order.get("id"))
+                            first = (api_payload.get("data") or [{}])[0].get("attributes", {})
+
                         out.append({
                             "order_id": order.get("id"),
                             "number": _guess_number(attrs, order.get("id")),
