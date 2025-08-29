@@ -1250,53 +1250,15 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
         res = _fifo_writeoff(payload.sku.strip(), int(payload.qty), payload.note)
         return {"ok": True, **res}
 
-    # -- Вспомогалка: окно бизнес-дня (локально по серверу) --
-    def _bd_window_today(bd_start: str) -> tuple[str, str]:
-        now = datetime.now()
-        m = re.match(r"^(\d{2}):(\d{2})$", bd_start or "")
-        hh, mm = (int(m.group(1)), int(m.group(2))) if m else (20, 0)
-        start = datetime.combine(now.date(), dt_time(hh, mm))
-        if now < start:
-            start -= timedelta(days=1)
-        end = start + timedelta(days=1)
-        return start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
-
-    # -- Умный выбор выражения даты для леджера (строка/ts/ts_ms) --
-    def _choose_date_expr(c, table: str, col: str) -> Optional[str]:
-        # кандидаты выражений в порядке приоритета
-        if _USE_PG:
-            variants = [
-                f"{col}::date",
-                f"to_timestamp({col}/1000)::date",
-                f"to_timestamp({col})::date",
-            ]
-        else:
-            variants = [
-                f"substr({col},1,10)",
-                f"date(datetime({col}/1000,'unixepoch','localtime'))",
-                f"date(datetime({col},'unixepoch','localtime'))",
-            ]
-        for expr in variants:
-            try:
-                if _USE_PG:
-                    c.execute(_q(f"SELECT {expr} AS d FROM {table} LIMIT 1"))
-                else:
-                    c.execute(f"SELECT {expr} AS d FROM {table} LIMIT 1")
-                return expr
-            except Exception:
-                continue
-        return None
-
+    # УПРОЩЁННЫЙ «бейдж списаний» (календарные сутки сегодня или за всё время)
     @router.get("/db/writeoffs/header")
     async def writeoffs_header(
-        use_bd: int = Query(1, description="1 — бизнес-день, 0 — календарный"),
-        bd_start: str = Query("20:00"),
-        tz: str = Query("Asia/Almaty")  # для совместимости; здесь не используется
+        all_time: int = Query(0, description="1 — без фильтра по дате (сумма за всё время)"),
     ):
         """
-        «Бейдж» в шапке: количество строк и суммарное qty списаний за день.
-        Источник — таблица леджера (если есть).
-        Корректно понимает текстовые даты и числовые ts/ts_ms.
+        Метрика для шапки: количество строк и суммарный qty списаний.
+        Источник — таблица леджера, из которой считается FIFO.
+        По умолчанию считаем за календарный день «сегодня» (локальное время сервера).
         """
         _ensure_schema()
         with _db() as c:
@@ -1304,41 +1266,70 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
             if not table:
                 return {"count": 0, "total_qty": 0}
 
-            if use_bd:
-                d1, d2 = _bd_window_today(bd_start)
-            else:
-                d1 = d2 = datetime.now().strftime("%Y-%m-%d")
+            # Без фильтра по дате — сумма по всему леджеру
+            if all_time:
+                if _USE_PG:
+                    row = c.execute(_q(f"""
+                        SELECT COUNT(*) AS c, COALESCE(SUM({qty_col}),0) AS t
+                        FROM {table}
+                    """)).first()
+                    return {"count": int(row._mapping["c"] or 0),
+                            "total_qty": int(row._mapping["t"] or 0)}
+                else:
+                    r = c.execute(f"""
+                        SELECT COUNT(*) AS c, IFNULL(SUM({qty_col}),0) AS t
+                        FROM {table}
+                    """).fetchone()
+                    return {"count": int(r["c"] or 0), "total_qty": int(r["t"] or 0)}
 
+            # Календарные сутки «сегодня»
+            today = datetime.now().strftime("%Y-%m-%d")
+
+            # Ищем колонку даты/времени (включая *_ms)
             cols = _lower_cols(c, table)
-            # расширенный список кандидатов
             candidate_dates = ["date","order_date","created_at","ts","timestamp","ts_ms","date_ms"]
             date_col = next((x for x in candidate_dates if x in cols), None)
 
+            # Если явной датовой колонки нет — считаем по всему леджеру
             if not date_col:
-                # нет колонки даты — считаем всё
                 if _USE_PG:
-                    row = c.execute(_q(f"SELECT COUNT(*) AS c, COALESCE(SUM({qty_col}),0) AS t FROM {table}")).first()
-                    return {"count": int(row._mapping['c'] or 0), "total_qty": int(row._mapping['t'] or 0)}
+                    row = c.execute(_q(f"""
+                        SELECT COUNT(*) AS c, COALESCE(SUM({qty_col}),0) AS t
+                        FROM {table}
+                    """)).first()
+                    return {"count": int(row._mapping["c"] or 0),
+                            "total_qty": int(row._mapping["t"] or 0)}
                 else:
-                    r = c.execute(f"SELECT COUNT(*) AS c, IFNULL(SUM({qty_col}),0) AS t FROM {table}").fetchone()
-                    return {"count": int(r['c'] or 0), "total_qty": int(r['t'] or 0)}
+                    r = c.execute(f"""
+                        SELECT COUNT(*) AS c, IFNULL(SUM({qty_col}),0) AS t
+                        FROM {table}
+                    """).fetchone()
+                    return {"count": int(r["c"] or 0), "total_qty": int(r["t"] or 0)}
 
-            date_expr = _choose_date_expr(c, table, date_col)
-            if not date_expr:  # совсем плохо — вернём нули
-                return {"count": 0, "total_qty": 0}
-
+            # Подбираем выражение даты
             if _USE_PG:
-                row = c.execute(_q(
-                    f"SELECT COUNT(*) AS c, COALESCE(SUM({qty_col}),0) AS t "
-                    f"FROM {table} WHERE {date_expr} BETWEEN :d1 AND :d2"
-                ), {"d1": d1, "d2": d2}).first()
-                return {"count": int(row._mapping['c'] or 0), "total_qty": int(row._mapping['t'] or 0)}
+                # Postgres: ts_ms -> to_timestamp(col/1000)::date, иначе ::date
+                date_expr = f"to_timestamp({date_col}/1000)::date" if date_col.endswith("_ms") else f"{date_col}::date"
+                row = c.execute(_q(f"""
+                    SELECT COUNT(*) AS c, COALESCE(SUM({qty_col}),0) AS t
+                    FROM {table}
+                    WHERE {date_expr} = :d
+                """), {"d": today}).first()
+                return {"count": int(row._mapping["c"] or 0),
+                        "total_qty": int(row._mapping["t"] or 0)}
             else:
-                r = c.execute(
-                    f"SELECT COUNT(*) AS c, IFNULL(SUM({qty_col}),0) AS t "
-                    f"FROM {table} WHERE {date_expr} BETWEEN ? AND ?", (d1, d2)
-                ).fetchone()
-                return {"count": int(r['c'] or 0), "total_qty": int(r['t'] or 0)}
+                # SQLite: ts_ms -> date(datetime(col/1000,'unixepoch','localtime')), текст -> substr(...,1,10)
+                date_expr = (
+                    f"date(datetime({date_col}/1000,'unixepoch','localtime'))"
+                    if date_col.endswith("_ms")
+                    else f"substr({date_col},1,10)"
+                )
+                r = c.execute(f"""
+                    SELECT COUNT(*) AS c, IFNULL(SUM({qty_col}),0) AS t
+                    FROM {table}
+                    WHERE {date_expr} = ?
+                """, (today,)).fetchone()
+                return {"count": int(r["c"] or 0), "total_qty": int(r["t"] or 0)}
 
     # Сводка по таблице writeoffs (ручные списания)
     @router.get("/db/writeoffs/summary")
