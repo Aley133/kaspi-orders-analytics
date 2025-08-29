@@ -29,15 +29,4 @@ def get_store_hours(db: Session = Depends(get_db)):
         return StoreHoursOut(id=1, business_day_start="20:00", timezone="Asia/Almaty")
     return StoreHoursOut(id=settings.id, business_day_start=settings.business_day_start, timezone=settings.timezone)
 
-@router.post("/store-hours", response_model=StoreHoursOut)
-def set_store_hours(payload: StoreHoursIn, db: Session = Depends(get_db)):
-    settings = db.query(StoreSettings).order_by(StoreSettings.id.asc()).first()
-    if not settings:
-        settings = StoreSettings(business_day_start=payload.business_day_start, timezone=payload.timezone)
-        db.add(settings)
-    else:
-        settings.business_day_start = payload.business_day_start
-        settings.timezone = payload.timezone
-    db.commit()
-    db.refresh(settings)
-    return StoreHoursOut(id=settings.id, business_day_start=settings.business_day_start, timezone=settings.timezone)
+
