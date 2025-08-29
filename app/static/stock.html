@@ -36,6 +36,7 @@
     .content{padding:20px 16px}
     .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
     .btn{background:var(--pri);color:#fff;border:0;border-radius:10px;padding:8px 12px;cursor:pointer}
+    .btn[disabled]{opacity:.6;cursor:not-allowed}
     .btn.secondary{background:var(--pri-weak);color:var(--fg)}
     .btn-link{background:transparent;border:0;color:var(--pri);cursor:pointer;padding:0}
     input[type="text"],input[type="number"],input[type="date"],select{
@@ -78,7 +79,6 @@
       <div class="row" style="align-items:baseline; margin-bottom:6px">
         <h1 style="margin:0">Мой склад</h1>
         <div class="spacer"></div>
-        <!-- Бейдж списаний за текущий бизнес-день -->
         <span id="woBadge" class="chip" title="Списаний за сегодня (бизнес-день)">
           <span class="dot on"></span>
           <span>Списаний сегодня: <b id="woCount">0</b> (шт: <b id="woQty">0</b>)</span>
@@ -88,7 +88,6 @@
       <div class="row" style="margin-bottom:10px">
         <label><input id="onlyActive" type="checkbox" checked> Только активные</label>
         <input id="search" type="text" placeholder="Название, код, бренд..." style="min-width:260px">
-        <!-- быстрый переход к SKU -->
         <input id="findSku" type="text" placeholder="SKU" style="width:160px">
         <button class="btn secondary" id="btnFindSku">Открыть SKU</button>
 
@@ -101,7 +100,7 @@
         <button class="btn secondary" id="btnApiKey">API-Key</button>
         <span id="apiKeyBadge" class="chip"><span class="dot"></span><span>ключ не задан</span></span>
 
-        <!-- элементы только для локальной SQLite -->
+        <!-- только для SQLite -->
         <button class="btn secondary" id="btnBackup" data-sqlite-only>Бэкап БД</button>
         <label class="btn secondary" for="restoreFile" data-sqlite-only>Восстановить БД</label>
         <input type="file" id="restoreFile" accept=".sqlite3" style="display:none" data-sqlite-only>
@@ -139,6 +138,7 @@ const qs=(s,el=document)=>el.querySelector(s);
 const qsa=(s,el=document)=>[...el.querySelectorAll(s)];
 const nf = new Intl.NumberFormat('ru-RU');
 const fmt = n => nf.format(Number(n||0));
+const debounce = (fn,ms=250)=>{let t;return(...a)=>{clearTimeout(t);t=setTimeout(()=>fn(...a),ms)}};
 
 function setNote(msg, ok=false){
   const el = qs('#note');
@@ -157,7 +157,7 @@ function setNote(msg, ok=false){
   });
 })();
 
-// --- Fetch helper с автоповтором при 401/403 (запрос ключа) ---
+// --- fetch helper с автоповтором при 401/403 ---
 async function fetchJSON(url, opts, _retry){
   const r = await fetch(url, opts||{});
   if(r.status===401 || r.status===403){
@@ -250,7 +250,6 @@ async function openDetail(row){
   row.insertAdjacentElement('afterend', tr);
   const mount = tr.firstChild;
 
-  // ⚠️ Убраны ручные кнопки пересчёта/списаний — остаётся только работа с партиями
   mount.innerHTML = `
     <div class="block">
       <div style="display:flex;align-items:center;gap:10px;margin:8px 0 6px">
@@ -320,7 +319,7 @@ async function openDetail(row){
       await fetchJSON('/products/db/price-batches/'+encodeURIComponent(sku)+'/'+btn.dataset.id, {method:'DELETE'});
       btn.closest('tr').remove();
       setNote('Партия удалена.', true);
-      await updateWriteoffsChip(); // косметически обновим бейдж
+      await updateWriteoffsChip();
       await loadDB();
     }catch(err){ setNote('Удаление не удалось: ' + err.message); }
   });
@@ -348,7 +347,7 @@ async function openDetail(row){
       });
       setNote('Партии сохранены.', true);
       await updateWriteoffsChip();
-      openDetail(row); // перезагрузим
+      openDetail(row);
     }catch(e){ setNote('Сохранение партий не удалось: ' + e.message); }
   };
 }
@@ -367,7 +366,9 @@ function tableToRows(){
   });
 }
 
-// === Авто-синк продаж → леджер → списания (без кнопок) ===
+// === Авто-синк продаж → леджер → списания ===
+let _syncBusy = false;
+
 async function getStoreHours(){
   try{
     const j = await fetchJSON('/api/settings/store-hours');
@@ -380,29 +381,19 @@ async function getStoreHours(){
     return { use_bd: 1, bd_start:'20:00', tz:'Asia/Almaty' };
   }
 }
-function businessDayWindow(bd_start='20:00', tz='Asia/Almaty'){
-  // простая реализация: Asia/Almaty => +5 часов
-  const tzOffsetMin = Number(localStorage.getItem('TZ_OFFSET_MIN')) || (tz==='Asia/Almaty' ? 300 : 0);
-  const nowUTC = new Date();
-  const nowLocal = new Date(nowUTC.getTime() + tzOffsetMin*60000);
-  const [hh,mm] = bd_start.split(':').map(Number);
-  const startLocal = new Date(nowLocal); startLocal.setHours(hh||0, mm||0, 0, 0);
-  if(nowLocal < startLocal) startLocal.setDate(startLocal.getDate()-1);
-  const endLocal = new Date(startLocal); endLocal.setDate(endLocal.getDate()+1);
-  const startUTC = new Date(startLocal.getTime() - tzOffsetMin*60000);
-  const endUTC   = new Date(endLocal.getTime() - tzOffsetMin*60000);
-  return { startUTC, endUTC, tzOffsetMin };
-}
 
 async function autoSyncWriteoffs(){
+  if(_syncBusy) return;
+  _syncBusy = true;
+  qs('#btnLoadDb')?.setAttribute('disabled','');
   try{
     setNote('Автосинхронизация списаний…');
     const { bd_start, tz } = await getStoreHours();
 
-    // ✅ для бизнес-дня используем только дату (YYYY-MM-DD)
+    // Используем только дату — сервер сам применяет бизнес-день
     const day = new Date().toISOString().slice(0,10);
 
-    // 1) тянем заказы за текущий бизнес-день (без времени, use_bd=1)
+    // 1) Заказы за бизнес-день
     const p = new URLSearchParams({
       start: day,
       end: day,
@@ -420,7 +411,7 @@ async function autoSyncWriteoffs(){
     const data = await fetchJSON('/orders/ids?' + p.toString());
     const rows = data.items || [];
 
-    // 2) собираем заказы → upsert
+    // 2) Собираем → upsert bulk
     const byId = new Map();
     for (const r of rows) {
       const oid = String(r.id || r.number || r.orderId || ''); if (!oid) continue;
@@ -445,23 +436,25 @@ async function autoSyncWriteoffs(){
       body: JSON.stringify({ orders })
     });
 
-    // 3) пересобираем леджер за этот же день
+    // 3) Пересобрать леджер
     const q2 = new URLSearchParams({ date_from: day, date_to: day });
     await fetchJSON('/profit/rebuild-ledger?' + q2.toString(), { method:'POST' });
 
-    // 4) протягиваем qty_sold
+    // 4) Пересчитать qty_sold по партиям
     await fetchJSON('/products/batches/recount-sold', { method:'POST' });
 
     await updateWriteoffsChip();
     await loadDB();
     setNote('Автосинхронизация списаний выполнена.', true);
   }catch(e){
-    // на случай 400/сетевых — мягко показываем сообщение, не валим страницу
     setNote('Автосинхронизация не удалась: ' + (e?.message || e), false);
+  } finally {
+    _syncBusy = false;
+    qs('#btnLoadDb')?.removeAttribute('disabled');
   }
 }
 
-// === Бейдж списаний в шапке ===
+// === Бейдж списаний ===
 async function updateWriteoffsChip(){
   try{
     const { bd_start, tz } = await getStoreHours();
@@ -473,7 +466,7 @@ async function updateWriteoffsChip(){
 }
 
 document.addEventListener('DOMContentLoaded', async ()=>{
-  // ping: показываем безопасный драйвер, без подробностей урла
+  // ping
   try{
     const ping = await fetchJSON('/products/db/ping');
     const backend = ping?.driver ? ('db=' + ping.driver) : (ping?.db_path || '');
@@ -482,18 +475,25 @@ document.addEventListener('DOMContentLoaded', async ()=>{
     setNote('Не найден /products/db/ping. Проверь main.py -> include_router(..., prefix="/products").');
   }
 
+  // хэндлеры
   qs('#btnLoadApi').onclick = loadAPI;
   qs('#btnLoadDb').onclick = loadDB;
 
-  // быстрый поиск/открытие SKU
+  // поиск Enter в SKU
+  qs('#findSku').addEventListener('keydown', e=>{
+    if(e.key==='Enter') qs('#btnFindSku').click();
+  });
+
   qs('#btnFindSku').onclick = ()=>{
     const sku = qs('#findSku').value.trim();
     if(!sku) return;
     const row = qsa('#tbl tbody tr').find(tr => (tr.dataset.sku||tr.cells[0].textContent.trim()) === sku);
-    if(!row){ setNote('SKU не найден в таблице. Попробуй «Загрузить из БД» или общий поиск.'); return; }
+    if(!row){ setNote('SKU не найден в таблице. Нажми «Загрузить из БД» или сделай общий поиск.'); return; }
     row.scrollIntoView({behavior:'smooth', block:'center'});
     openDetail(row);
   };
+
+  qs('#search').addEventListener('input', debounce(() => loadDB(), 350));
 
   qs('#fileInput').addEventListener('change', async (e)=>{
     const f = e.target.files?.[0]; if(!f) return;
@@ -541,16 +541,14 @@ document.addEventListener('DOMContentLoaded', async ()=>{
     window.location = '/products/db/export.csv?' + p.toString();
   };
 
-  // 1) Авто-синк списаний (за текущий бизнес-день)
+  // запуск
   await autoSyncWriteoffs();
-
-  // 2) Загрузим БД и бейдж (на случай пустой синхронизации)
   await loadDB();
   await updateWriteoffsChip();
 });
 </script>
 
-<!-- Автоподстановка X-API-Key ко всем запросам /products/* и /profit/* + статус ключа -->
+<!-- Автоподстановка X-API-Key и значок статуса -->
 <script>
 (() => {
   const KEY = "KASPI_API_KEY";
@@ -560,13 +558,8 @@ document.addEventListener('DOMContentLoaded', async ()=>{
     const v = localStorage.getItem(KEY) || "";
     const el = badge(); if(!el) return;
     const dot = el.querySelector('.dot'); const text = el.querySelector('span:last-child');
-    if(v){
-      dot.classList.add('on');
-      text.textContent = 'ключ установлен';
-    }else{
-      dot.classList.remove('on');
-      text.textContent = 'ключ не задан';
-    }
+    if(v){ dot.classList.add('on'); text.textContent = 'ключ установлен'; }
+    else { dot.classList.remove('on'); text.textContent = 'ключ не задан'; }
   }
 
   window.KASPI_API_KEY = localStorage.getItem(KEY) || "";
@@ -580,12 +573,10 @@ document.addEventListener('DOMContentLoaded', async ()=>{
         init = init || {};
         const k = window.KASPI_API_KEY || "";
 
-        // Заголовок
         let headers = init.headers instanceof Headers ? init.headers : new Headers(init.headers || {});
         if (k) headers.set("X-API-Key", k);
         init.headers = headers;
 
-        // Fallback: подпишем ?api_key=... (на тот же ключ)
         if (k) {
           const u = new URL(urlStr, location.origin);
           if (!u.searchParams.has("api_key")) u.searchParams.set("api_key", k);
@@ -596,11 +587,10 @@ document.addEventListener('DOMContentLoaded', async ()=>{
           }
         }
       }
-    } catch (e) { /* no-op */ }
+    } catch (e) {}
     return _origFetch(input, init);
   };
 
-  // Удобный setter (сохранит ключ и тут же начнёт подставлять)
   window.setApiKey = function(k) {
     localStorage.setItem(KEY, k || "");
     window.KASPI_API_KEY = k || "";
@@ -608,7 +598,6 @@ document.addEventListener('DOMContentLoaded', async ()=>{
     console.log("API key set");
   };
 
-  // Кнопка "API-Key": спросить и сохранить
   document.addEventListener("DOMContentLoaded", () => {
     const btn = document.getElementById("btnApiKey");
     if (btn) {
@@ -622,7 +611,7 @@ document.addEventListener('DOMContentLoaded', async ()=>{
 })();
 </script>
 
-<!-- Скрыть элементы с data-sqlite-only в режиме Postgres -->
+<!-- Скрыть sqlite-only элементы в режиме Postgres -->
 <script>
 document.addEventListener("DOMContentLoaded", async () => {
   let isPG = false;
@@ -645,7 +634,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.querySelectorAll('form[action$="/products/db/restore"]').forEach(hide);
   document.querySelectorAll('button[data-action="restore"]').forEach(hide);
   document.querySelectorAll("[data-sqlite-only]").forEach(hide);
-  // Fallback по тексту
   document.querySelectorAll("button, a, form, div, section").forEach((el) => {
     const t = (el.innerText || "").toLowerCase();
     if (/(backup|бэкап|restore|восстанов)/.test(t)) hide(el);
