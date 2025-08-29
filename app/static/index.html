@@ -18,6 +18,33 @@
     .note{margin:8px 0 12px;padding:8px 10px;border-radius:8px;display:none}
     .note.ok{display:block;background:#ecfdf5;color:#065f46;border:1px solid #a7f3d0}
     .note.err{display:block;background:#fef2f2;color:#991b1b;border:1px solid #fecaca}
+    .muted{color:#6b7280}
+    .btn[disabled]{opacity:.6;pointer-events:none}
+    .ids-summary{margin:8px 0}
+    .ids-actions{display:flex;gap:8px;margin:8px 0}
+    .ids-groups details{margin:8px 0}
+    .pill{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:4px 8px;margin:2px 4px 0 0;background:var(--card)}
+    .kpi{display:flex;gap:12px;flex-wrap:wrap}
+    .kpi-item{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 12px;min-width:160px}
+    .kpi-label{font-size:12px;color:#6b7280}
+    .kpi-value{font-size:20px;font-weight:600}
+    .kpi-sub{font-size:12px;color:#6b7280}
+    .layout{display:flex;min-height:100vh}
+    .sidebar{width:240px;border-right:1px solid var(--line);padding:16px}
+    .content{flex:1;padding:16px;min-width:0}
+    .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+    .shell{border:1px solid var(--line);border-radius:12px;padding:12px;margin:16px 0}
+    .brand{font-weight:700;margin-bottom:12px}
+    .nav{display:flex;flex-direction:column;gap:6px;margin-bottom:16px}
+    .nav-item{padding:6px 8px;border-radius:6px}
+    .nav-item:hover{background:var(--card)}
+    .theme-switch{display:flex;align-items:center;gap:8px;margin-top:auto}
+    .switch{position:relative;display:inline-block;width:40px;height:20px}
+    .switch input{opacity:0;width:0;height:0}
+    .slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:#d1d5db;border-radius:999px;transition:.2s}
+    .slider:before{position:absolute;content:"";height:16px;width:16px;left:2px;top:2px;background:white;border-radius:50%;transition:.2s}
+    .switch input:checked + .slider{background:#10b981}
+    .switch input:checked + .slider:before{transform:translateX(20px)}
   </style>
 </head>
 <body data-theme="light">
@@ -171,12 +198,14 @@
   </div>
 
 <script>
+/* ───────────────────────── УНИВЕРСАЛЬНЫЕ ХЕЛПЕРЫ ───────────────────────── */
 const nf = new Intl.NumberFormat('ru-RU');
 function fmt(n){ return nf.format(Math.round((Number(n) + Number.EPSILON) * 100) / 100); }
 function tableFill(id, rows){
   const tb = document.querySelector(`#${id} tbody`);
+  if(!tb){ return; }
   tb.innerHTML = '';
-  for(const r of rows){
+  for(const r of (rows||[])){
     const tr = document.createElement('tr');
     for(const c of r){
       const td = document.createElement('td'); td.textContent = c; tr.appendChild(td);
@@ -186,107 +215,173 @@ function tableFill(id, rows){
 }
 function setNote(msg, ok=false){
   const el = document.getElementById('note');
+  if(!el) return;
   el.textContent = msg;
   el.className = 'note ' + (ok ? 'ok' : 'err');
+}
+
+/** таймаут + ретраи для fetch */
+const DEFAULT_TIMEOUT = 30000;
+function withTimeout(promise, ms=DEFAULT_TIMEOUT){
+  const ctrl = new AbortController();
+  const t = setTimeout(()=>ctrl.abort(new Error('timeout')), ms);
+  return Promise.race([
+    promise(ctrl.signal),
+    new Promise((_,rej)=>{ ctrl.signal.addEventListener('abort',()=>rej(new Error('timeout'))); })
+  ]).finally(()=>clearTimeout(t));
+}
+async function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
+
+async function fetchJSON(url, opts={}, {retries=2, timeout=DEFAULT_TIMEOUT}={}){
+  const fn = async (signal)=>{
+    const r = await fetch(url, { ...opts, signal });
+    if(!r.ok){
+      const body = await r.text().catch(()=>r.statusText);
+      throw new Error(body || `HTTP ${r.status}`);
+    }
+    const ct = r.headers.get('content-type')||'';
+    return ct.includes('application/json') ? r.json() : r.text();
+  };
+  for(let i=0;i<=retries;i++){
+    try{ return await withTimeout(fn, timeout); }
+    catch(e){
+      if(i===retries) throw e;
+      await sleep(400*(i+1));
+    }
+  }
+}
+
+/* простая блокировка экшенов, чтобы не запускать дубликаты */
+let BUSY = false;
+function setBusy(on){
+  BUSY = !!on;
+  for(const id of ['btnProfitSync','btnProfitRebuild','btnProfitSyncRebuild','btn-run']){
+    const b = document.getElementById(id);
+    if(b){ b.disabled = on; b.textContent = b.dataset.label || (b.dataset.label = b.textContent); b.textContent = on ? (b.dataset.work || (b.dataset.work = '⏳ '+b.textContent)) : b.dataset.label; }
+  }
+}
+
+/* глобальная ловля непойманных ошибок, чтобы не молчало */
+window.addEventListener('error', (e)=>{ try{ setNote(e?.error?.message || e.message || 'Ошибка', false); }catch(_){} });
+window.addEventListener('unhandledrejection', (e)=>{ try{ setNote(e?.reason?.message || String(e.reason) || 'Ошибка', false); }catch(_){} });
+</script>
+
+<script>
+/* ───────────────────────── UI/STATE ───────────────────────── */
+let citiesChart = null;
+let profitChart = null;
+window.APP_CURRENCY = 'KZT';
+
+async function loadMeta(){
+  try {
+    const meta = await fetchJSON('/meta', {}, {retries:1});
+    const sel = document.getElementById('date_field');
+    if(sel){
+      sel.innerHTML = '';
+      (meta.date_field_options || ['creationDate']).forEach(v=>{
+        const o = document.createElement('option'); o.value=v; o.textContent=v; sel.appendChild(o);
+      });
+      sel.value = meta.date_field_default || 'creationDate';
+    }
+    const tz = document.getElementById('tz'); if(tz) tz.value = meta.timezone || 'Asia/Almaty';
+    const bd = document.getElementById('bd_start'); if(bd) bd.value = meta.business_day_start || '20:00';
+  } catch(e){
+    // тихо игнорируем — будут дефолты ниже
+  }
+  const today = new Date(); const iso = d=>d.toISOString().slice(0,10);
+  const s = document.getElementById('start'); if(s) s.value = iso(today);
+  const e = document.getElementById('end'); if(e) e.value = iso(today);
+}
+
+async function run(e){
+  if(e) e.preventDefault();
+  try{
+    setBusy(true);
+
+    const start = document.getElementById('start').value;
+    const end = document.getElementById('end').value;
+    const tz = document.getElementById('tz').value || 'Asia/Almaty';
+    const date_field = document.getElementById('date_field').value;
+    const states = document.getElementById('states').value;
+    const exc = document.getElementById('exclude_states').checked ? 'CANCELED' : '';
+    const use_bd = document.getElementById('use_bd')?.checked ? '1' : '0';
+    const bd_start = document.getElementById('bd_start')?.value || '';
+
+    const p = new URLSearchParams();
+    p.set('start', start); p.set('end', end); p.set('tz', tz);
+    p.set('date_field', date_field); if(states) p.set('states', states);
+    if(exc) p.set('exclude_states', exc);
+    p.set('use_bd', use_bd); if(bd_start) p.set('business_day_start', bd_start);
+
+    const data = await fetchJSON(`/orders/analytics?${p.toString()}`, {}, {retries:1});
+
+    // KPI
+    window.APP_CURRENCY = data.currency || 'KZT';
+    document.getElementById('kpiOrders').textContent = fmt(data.total_orders||0);
+    document.getElementById('kpiAmount').textContent = `${fmt(data.total_amount||0)} ${window.APP_CURRENCY}`;
+    document.getElementById('periodLabel').textContent = `${data.range?.start||start} → ${data.range?.end||end}`;
+
+    const cutoffEl = document.getElementById('periodCutoff');
+    if(cutoffEl){ cutoffEl.textContent = (use_bd==='1' ? (bd_start || '20:00') : '24:00'); }
+    const bdInfo = document.getElementById('bdInfo');
+    if(bdInfo){
+      bdInfo.textContent = (use_bd==='1' ? `День магазина: ${bd_start||'20:00'} → ${bd_start||'20:00'}` : 'День магазина: выключен');
+    }
+
+    // Состояния
+    const sb = document.getElementById('statesBox');
+    if(sb){
+      sb.innerHTML = '';
+      const entries = Object.entries(data.state_breakdown||{}).sort((a,b)=>b[1]-a[1]);
+      for(const [k,v] of entries){
+        const span = document.createElement('span');
+        span.className='pill';
+        span.textContent=`${k}: ${v}`;
+        sb.appendChild(span);
+      }
+      if((entries||[]).length===0){ sb.innerHTML = '<div class="muted">Нет данных</div>'; }
+    }
+
+    // Таблица дней
+    tableFill('tbl-days', (data.days||[]).map(d=>[d.x, d.count, `${fmt(d.amount)} ${window.APP_CURRENCY}`]));
+
+    // Топ города (без ошибок, даже если Chart.js не прогрузился)
+    const labels = (data.cities||[]).map(c=>c.city);
+    const counts = (data.cities||[]).map(c=>c.count);
+    const holder = document.getElementById('chart-cities');
+    if(holder){
+      holder.innerHTML = '<canvas id="cities"></canvas>';
+      if(labels.length===0 || typeof Chart === 'undefined'){
+        holder.innerHTML = '<div class="muted" style="padding:12px">Нет данных по городам</div>';
+      } else {
+        const ctx = document.getElementById('cities').getContext('2d');
+        try{
+          if(citiesChart) citiesChart.destroy();
+          citiesChart = new Chart(ctx, {
+            type: 'bar',
+            data: { labels, datasets: [{ label: 'Заказы', data: counts }] },
+            options: { responsive:true, plugins: { legend: { display:false } } }
+          });
+        }catch(_){
+          holder.innerHTML = '<div class="muted" style="padding:12px">Нет данных по городам</div>';
+        }
+      }
+    }
+
+    await loadIds();
+    await loadProfitFIFO();             // KPI + график + таблицы
+    await checkProfitStatus(data);      // индикатор синхронизации
+    setNote('Данные обновлены', true);
+  }catch(err){
+    setNote('Ошибка загрузки: ' + (err?.message || err), false);
+  }finally{
+    setBusy(false);
+  }
 }
 </script>
 
 <script>
-async function loadMeta(){
-  try {
-    const r = await fetch('/meta');
-    if(!r.ok) throw new Error();
-    const meta = await r.json();
-    const sel = document.getElementById('date_field');
-    sel.innerHTML = '';
-    (meta.date_field_options || ['creationDate']).forEach(v=>{
-      const o = document.createElement('option'); o.value=v; o.textContent=v; sel.appendChild(o);
-    });
-    sel.value = meta.date_field_default || 'creationDate';
-    document.getElementById('tz').value = meta.timezone || 'Asia/Almaty';
-    document.getElementById('bd_start').value = meta.business_day_start || '20:00';
-  } catch(e){ /* ignore */ }
-  const today = new Date(); const iso = d=>d.toISOString().slice(0,10);
-  document.getElementById('start').value = iso(today);
-  document.getElementById('end').value = iso(today);
-}
-
-let citiesChart = null;
-let profitChart = null;
-
-async function run(e){
-  if(e) e.preventDefault();
-
-  const start = document.getElementById('start').value;
-  const end = document.getElementById('end').value;
-  const tz = document.getElementById('tz').value || 'Asia/Almaty';
-  const date_field = document.getElementById('date_field').value;
-  const states = document.getElementById('states').value;
-  const exc = document.getElementById('exclude_states').checked ? 'CANCELED' : '';
-  const use_bd = document.getElementById('use_bd')?.checked ? '1' : '0';
-  const bd_start = document.getElementById('bd_start')?.value || '';
-
-  const p = new URLSearchParams();
-  p.set('start', start); p.set('end', end); p.set('tz', tz);
-  p.set('date_field', date_field); if(states) p.set('states', states);
-  if(exc) p.set('exclude_states', exc);
-  p.set('use_bd', use_bd); if(bd_start) p.set('business_day_start', bd_start);
-
-  const r = await fetch(`/orders/analytics?${p.toString()}`);
-  if(!r.ok) throw new Error('analytics failed');
-  const data = await r.json();
-
-  // KPI
-  window.APP_CURRENCY = data.currency || 'KZT';
-  document.getElementById('kpiOrders').textContent = fmt(data.total_orders);
-  document.getElementById('kpiAmount').textContent = `${fmt(data.total_amount)} ${window.APP_CURRENCY}`;
-  document.getElementById('periodLabel').textContent = `${data.range.start} → ${data.range.end}`;
-
-  const cutoffEl = document.getElementById('periodCutoff');
-  if(cutoffEl){ cutoffEl.textContent = (use_bd==='1' ? (bd_start || '20:00') : '24:00'); }
-  const bdInfo = document.getElementById('bdInfo');
-  if(bdInfo){
-    bdInfo.textContent = (use_bd==='1' ? `День магазина: ${bd_start||'20:00'} → ${bd_start||'20:00'}` : 'День магазина: выключен');
-  }
-
-  // Состояния
-  const sb = document.getElementById('statesBox');
-  sb.innerHTML = '';
-  const entries = Object.entries(data.state_breakdown||{}).sort((a,b)=>b[1]-a[1]);
-  for(const [k,v] of entries){
-    const span = document.createElement('span');
-    span.className='pill';
-    span.textContent=`${k}: ${v}`;
-    sb.appendChild(span);
-  }
-  if(entries.length===0){ sb.innerHTML = '<div class="muted">Нет данных</div>'; }
-
-  // Таблица дней
-  tableFill('tbl-days', (data.days||[]).map(d=>[d.x, d.count, `${fmt(d.amount)} ${window.APP_CURRENCY}`]));
-
-  // Топ города
-  const labels = (data.cities||[]).map(c=>c.city);
-  const counts = (data.cities||[]).map(c=>c.count);
-  const holder = document.getElementById('chart-cities');
-  holder.innerHTML = '<canvas id="cities"></canvas>';
-  if(labels.length===0){
-    holder.innerHTML = '<div class="muted" style="padding:12px">Нет данных по городам</div>';
-  } else {
-    const ctx = document.getElementById('cities').getContext('2d');
-    if(citiesChart) citiesChart.destroy();
-    citiesChart = new Chart(ctx, {
-      type: 'bar',
-      data: { labels, datasets: [{ label: 'Заказы', data: counts }] },
-      options: { responsive:true, plugins: { legend: { display:false } } }
-    });
-  }
-
-  await loadIds();
-  await loadProfitFIFO();             // KPI + график + таблицы
-  await checkProfitStatus(data);      // индикатор синхронизации
-}
-
-/* ====== Номера заказов ====== */
+/* ───────────────────────── БЛОК ID/СПИСКИ ───────────────────────── */
 async function loadIds(){
   const start = document.getElementById('start').value;
   const end = document.getElementById('end').value;
@@ -307,18 +402,26 @@ async function loadIds(){
   params.set('with_items','1'); // явно просим SKU/Title
 
   // сгруппированный список для отображения
-  const r = await fetch(`/orders/ids?${params.toString()}`);
-  if(!r.ok) throw new Error('ids failed');
-  const data = await r.json();
+  let data = {groups:[], items:[], currency:'KZT'};
+  try{
+    data = await fetchJSON(`/orders/ids?${params.toString()}`, {}, {retries:1});
+  }catch(e){
+    setNote('Не удалось получить номера заказов: ' + e.message);
+  }
   const currency = data.currency || window.APP_CURRENCY || 'KZT';
 
-  // ПЛОСКИЙ список (id+date) — для синхронизации по id
+  // ПЛОСКИЙ список (id+date) — для внутренней логики
   const flat = new URLSearchParams(params);
   flat.set('grouped','0'); flat.set('with_items','0');
-  const flatData = await (await fetch(`/orders/ids?${flat.toString()}`)).json().catch(()=>({items:[]}));
-  window.__lastOrderIds = (flatData.items||[]).map(x => ({ id: x.id, date: x.date }));
+  try{
+    const flatData = await fetchJSON(`/orders/ids?${flat.toString()}`, {}, {retries:1});
+    window.__lastOrderIds = (flatData.items||[]).map(x => ({ id: x.id, date: x.date }));
+  }catch(_){
+    window.__lastOrderIds = [];
+  }
 
   const container = document.getElementById('ids');
+  if(!container) return;
   container.innerHTML = '';
 
   const totalCount = (typeof data.period_total_count === 'number') ? data.period_total_count : (data.items||[]).length;
@@ -332,8 +435,11 @@ async function loadIds(){
   bar.className='ids-actions';
   const btnCopy = document.createElement('button'); btnCopy.className='btn'; btnCopy.textContent='Скопировать номера';
   btnCopy.onclick = () => {
-    const all = (data.items||[]).map(it=>it.number).join('\n');
-    navigator.clipboard.writeText(all);
+    try{
+      const all = (data.items||[]).map(it=>it.number).join('\n');
+      if(navigator.clipboard?.writeText){ navigator.clipboard.writeText(all); setNote('Скопировано', true); }
+      else { throw new Error('clipboard недоступен'); }
+    }catch(_){ setNote('Не удалось скопировать', false); }
   };
   const btnCsv = document.createElement('a'); btnCsv.className='btn'; btnCsv.textContent='Скачать CSV';
   const csvParams = new URLSearchParams(params); csvParams.delete('grouped'); csvParams.set('limit','100000');
@@ -362,9 +468,8 @@ async function loadIds(){
 
     const pre = document.createElement('pre');
     pre.style.whiteSpace='pre-wrap';
-    // >>> SKU выведен вторым столбцом после номера
-    pre.textContent = '№\tSKU\tНазвание\tСостояние\tДата\tСумма\n' + group.items
-      .map(it=>`${it.number}\t${it.sku||''}\t${(it.title||it.name||'')}\t${it.state}\t${it.date.slice(0,16).replace('T',' ')}\t${it.amount}`)
+    pre.textContent = '№\tSKU\tНазвание\tСостояние\tДата\tСумма\n' + (group.items||[])
+      .map(it=>`${it.number}\t${it.sku||''}\t${(it.title||it.name||'')}\t${it.state}\t${(it.date||'').slice(0,16).replace('T',' ')}\t${it.amount}`)
       .join('\n');
     det.appendChild(pre);
 
@@ -375,9 +480,11 @@ async function loadIds(){
   btnExpand.onclick = ()=> detailsList.forEach(d=>d.open=true);
   btnCollapse.onclick = ()=> detailsList.forEach(d=>d.open=false);
 }
+</script>
 
-/* ====== Блок FIFO ====== */
-/* Ключ и автоподстановка X-API-Key/ ?api_key= только для /profit/* */
+<script>
+/* ───────────────────────── Блок FIFO: ключ/инъекции ───────────────────────── */
+/* Ключ и автоподстановка X-API-Key/?api_key только для /profit/* */
 (() => {
   const KEY = "KASPI_API_KEY";
   const badge = ()=>document.getElementById('profitKeyBadge');
@@ -392,7 +499,7 @@ async function loadIds(){
   const origFetch = window.fetch.bind(window);
   window.fetch = function(input, init){
     try{
-      const urlStr = typeof input === 'string' ? input : (input && input.url) || '';
+      let urlStr = typeof input === 'string' ? input : (input && input.url) || '';
       if (urlStr.startsWith('/profit/')) {
         init = init || {};
         const k = window.KASPI_API_KEY || '';
@@ -402,7 +509,7 @@ async function loadIds(){
         if (k) {
           const u = new URL(urlStr, location.origin);
           if (!u.searchParams.has('api_key')) u.searchParams.set('api_key', k);
-          if (typeof input === 'string') input = u.pathname + u.search; else input = new Request(u.toString(), init);
+          input = (typeof input === 'string') ? (u.pathname + u.search) : new Request(u.toString(), init);
         }
       }
     }catch(e){}
@@ -425,25 +532,10 @@ async function loadIds(){
     }
   });
 })();
+</script>
 
-
-async function postProfitWithFallback(path1, path2, params){
-  const qs = params ? ('?' + params.toString()) : '';
-  // 1) пробуем первый путь
-  let r = await fetch(path1 + qs, { method:'POST' });
-  if(r.status === 404){
-    // 2) пробуем второй путь
-    r = await fetch(path2 + qs, { method:'POST' });
-  }
-  if(r.status===401 || r.status===403){
-    const v = prompt('Укажите X-API-Key для блока FIFO:', window.KASPI_API_KEY||'');
-    if(v!==null){ window.setApiKey(v.trim()); return postProfitWithFallback(path1, path2, params); }
-    throw new Error(await r.text() || 'Unauthorized');
-  }
-  if(!r.ok) throw new Error((await r.text()) || r.statusText || ('HTTP ' + r.status));
-  return r.json();
-}
-  
+<script>
+/* ───────────────────────── Блок FIFO: API-хелперы ───────────────────────── */
 async function fetchProfitJSON(url, opts, _retry){
   const r = await fetch(url, opts||{});
   if(r.status===401 || r.status===403){
@@ -472,34 +564,38 @@ function setFifoKPIs(total, cur){
 function drawProfitChart(rows, cur){
   const empty = document.getElementById('profitEmpty');
   const holder = document.getElementById('profitChartHolder');
-  const ctx = document.getElementById('profitChart').getContext('2d');
-  if(profitChart){ profitChart.destroy(); profitChart=null; }
-  if(!rows.length){ empty.style.display='block'; holder.style.display='none'; return; }
-  empty.style.display='none'; holder.style.display='block';
-  const labels = rows.map(r=>r.period);
-  const values = rows.map(r=>Number(r.profit||0));
-  profitChart = new Chart(ctx, {
-    type:'bar',
-    data:{ labels, datasets:[{ label:'Прибыль', data: values }] },
-    options:{
-      responsive:true,
-      plugins:{ legend:{ display:false }, tooltip:{ callbacks:{ label:(ctx)=>`Прибыль: ${fmt(ctx.parsed.y)} ${cur}` } } },
-      scales:{ x:{ ticks:{ maxRotation:0 } }, y:{ beginAtZero:true } }
-    }
-  });
+  const canvas = document.getElementById('profitChart');
+  if(!canvas || typeof Chart==='undefined'){ if(empty) empty.style.display='block'; if(holder) holder.style.display='none'; return; }
+  const ctx = canvas.getContext('2d');
+  if(profitChart){ try{ profitChart.destroy(); }catch(_){ } profitChart=null; }
+  if(!(rows||[]).length){ if(empty) empty.style.display='block'; if(holder) holder.style.display='none'; return; }
+  if(empty) empty.style.display='none'; if(holder) holder.style.display='block';
+  try{
+    profitChart = new Chart(ctx, {
+      type:'bar',
+      data:{ labels:(rows||[]).map(r=>r.period), datasets:[{ label:'Прибыль', data:(rows||[]).map(r=>Number(r.profit||0)) }] },
+      options:{
+        responsive:true,
+        plugins:{ legend:{ display:false }, tooltip:{ callbacks:{ label:(ctx)=>`Прибыль: ${fmt(ctx.parsed.y)} ${cur}` } } },
+        scales:{ x:{ ticks:{ maxRotation:0 } }, y:{ beginAtZero:true } }
+      }
+    });
+  }catch(_){
+    if(empty) empty.style.display='block';
+    if(holder) holder.style.display='none';
+  }
 }
 
 async function pingProfitDb(){
   try{
     const info = await fetchProfitJSON('/profit/db/ping');
     const driver = info?.driver || (info?.db_path?.startsWith('postgres') ? 'pg' : 'sqlite');
-    document.getElementById('profitDbInfo').textContent = `FIFO DB: ${driver}`;
+    document.getElementById('profitDbInfo').textContent = `FIFO DB: ${driver}${info?.fallback_enabled ? ' · fallback:on' : ''}`;
   }catch(e){
     document.getElementById('profitDbInfo').textContent = '';
   }
 }
 
-/* ---- операции: sync / rebuild ---- */
 function buildSyncParams(){
   const start = document.getElementById('start').value;
   const end   = document.getElementById('end').value;
@@ -516,99 +612,88 @@ function buildSyncParams(){
   return p;
 }
 
-// попытка синхронизации по списку id+date
-async function trySyncByIds(list){
-  const r = await fetch('/profit/bridge/sync-by-ids', {
-    method:'POST',
-    headers:{ 'Content-Type':'application/json' },
-    body: JSON.stringify(list||[])
-  });
-  if(r.status===404){ return { unsupported:true }; }
-  if(r.status===401 || r.status===403){
-    const v = prompt('Укажите X-API-Key для блока FIFO:', window.KASPI_API_KEY||'');
-    if(v!==null){ window.setApiKey(v.trim()); return trySyncByIds(list); }
-    throw new Error(await r.text() || 'Unauthorized');
-  }
-  if(!r.ok) throw new Error((await r.text()) || r.statusText || ('HTTP '+r.status));
-  return r.json();
-}
+/* Чанкователь */
+function chunk(arr, n=400){ const out=[]; for(let i=0;i<arr.length;i+=n) out.push(arr.slice(i,i+n)); return out; }
+</script>
+
+<script>
+/* ───────────────────────── Блок FIFO: операции sync/rebuild ───────────────────────── */
 
 async function syncProfit(){
-  const start = document.getElementById('start').value;
-  const end   = document.getElementById('end').value;
-  if(!start || !end){ setNote('Сначала задайте период (начало/конец).'); return; }
-
-  const tz = document.getElementById('tz').value || 'Asia/Almaty';
-  const date_field = document.getElementById('date_field').value;
-  const use_bd = document.getElementById('use_bd')?.checked ? '1' : '0';
-  const bd_start = document.getElementById('bd_start')?.value || '20:00';
-
-  // Шаг 1: берём только KASPI_DELIVERY и сразу with_items=1, чтобы в ответе был SKU
-  const p = new URLSearchParams({
-    start, end, tz, date_field,
-    states: 'KASPI_DELIVERY',
-    exclude_states: 'CANCELED',
-    use_bd, business_day_start: bd_start,
-    order: 'asc', grouped: '0', limit: '100000', with_items: '1'
-  });
-  const idsResp = await fetch('/orders/ids?' + p.toString());
-  if(!idsResp.ok){ setNote('Не удалось получить список заказов'); return; }
-  const idsJson = await idsResp.json();
-
-  // Готовим полезную нагрузку для моста: id, номер, дата, SKU, сумма
-  const payload = (idsJson.items || [])
-    .filter(x => x.sku && x.state === 'KASPI_DELIVERY')
-    .map(x => ({
-      id: x.id,
-      code: x.number,
-      date: x.date,
-      sku: x.sku,
-      amount: x.amount || 0
-    }));
-
-  if(payload.length === 0){
-    setNote('Заказы KASPI_DELIVERY со SKU не найдены в выбранном периоде');
-    return;
-  }
-
-  // Шаг 2: шлём в мост
-  const r = await fetch('/profit/bridge/sync-by-ids', {
-    method: 'POST',
-    headers: { 'Content-Type':'application/json' },
-    body: JSON.stringify(payload)
-  });
-  if(r.status===401 || r.status===403){
-    const v = prompt('Укажите X-API-Key для блока FIFO:', window.KASPI_API_KEY||'');
-    if(v!==null){ window.setApiKey(v.trim()); return syncProfit(); }
-  }
-  if(!r.ok){
-    setNote('Синхронизация не удалась: ' + (await r.text()));
-    return;
-  }
-  const res = await r.json();
-  setNote(`Синхронизация FIFO: заказов=${res?.synced_orders||0}, вставлено позиций=${res?.items_inserted||0}`, true);
-
-  // Обновим KPI/статусы
-  await loadProfitFIFO();
-  await checkProfitStatus();
-}
-
-async function syncAndRebuild(){
-  await syncProfit();
+  if(BUSY){ return; }
+  setBusy(true);
   try{
-    const df = document.getElementById('start').value;
-    const dt = document.getElementById('end').value;
-    const res = await fetch(`/profit/rebuild-ledger?date_from=${df}&date_to=${dt}`, { method:'POST' }).then(r=>r.json());
-    setNote(`Синхр.+пересчёт выполнены. Списаний: ${res?.recomputed||0}`, true);
+    const start = document.getElementById('start').value;
+    const end   = document.getElementById('end').value;
+    if(!start || !end){ setNote('Сначала задайте период (начало/конец).'); return; }
+
+    const tz = document.getElementById('tz').value || 'Asia/Almaty';
+    const date_field = document.getElementById('date_field').value;
+    const use_bd = document.getElementById('use_bd')?.checked ? '1' : '0';
+    const bd_start = document.getElementById('bd_start')?.value || '20:00';
+
+    // 1) берём только KASPI_DELIVERY и сразу with_items=1, чтобы был SKU
+    const p = new URLSearchParams({
+      start, end, tz, date_field,
+      states: 'KASPI_DELIVERY',
+      exclude_states: 'CANCELED',
+      use_bd, business_day_start: bd_start,
+      order: 'asc', grouped: '0', limit: '100000', with_items: '1'
+    });
+    const idsJson = await fetchJSON('/orders/ids?' + p.toString(), {}, {retries:1});
+
+    // 2) готовим payload для моста
+    const payload = (idsJson.items || [])
+      .filter(x => x.sku && x.state === 'KASPI_DELIVERY')
+      .map(x => ({
+        id: x.id, code: x.number, date: x.date, state: x.state,
+        sku: x.sku, amount: x.amount || 0
+      }));
+
+    if(payload.length === 0){
+      setNote('Заказы KASPI_DELIVERY со SKU не найдены в выбранном периоде');
+      return;
+    }
+
+    // 3) шлём чанками, чтобы не упереться в лимиты
+    let totalInserted = 0, totalSyncedOrders = 0;
+    for(const part of chunk(payload, 400)){
+      const r = await fetch('/profit/bridge/sync-by-ids', {
+        method: 'POST',
+        headers: { 'Content-Type':'application/json' },
+        body: JSON.stringify(part)
+      });
+      if(r.status===401 || r.status===403){
+        const v = prompt('Укажите X-API-Key для блока FIFO:', window.KASPI_API_KEY||'');
+        if(v!==null){ window.setApiKey(v.trim()); return syncProfit(); }
+        throw new Error('Unauthorized');
+      }
+      if(!r.ok){
+        const body = await r.text().catch(()=>r.statusText);
+        throw new Error(body || `HTTP ${r.status}`);
+      }
+      const js = await r.json().catch(()=>({}));
+      totalInserted += (js.items_inserted||0);
+      totalSyncedOrders += (js.synced_orders||0);
+    }
+    setNote(`Синхронизация FIFO: заказов=${totalSyncedOrders}, вставлено позиций=${totalInserted}`, true);
+
+    // Обновим KPI/статусы
     await loadProfitFIFO();
     await checkProfitStatus();
-  }catch(e){ /* сообщение уже показано в syncProfit */ }
+  }catch(e){
+    setNote('Синхронизация не удалась: ' + (e?.message||e), false);
+  }finally{
+    setBusy(false);
+  }
 }
 
 async function rebuildFifo(){
+  if(BUSY){ return; }
   const df = document.getElementById('start').value;
   const dt = document.getElementById('end').value;
   if(!df || !dt){ setNote('Сначала задайте период (начало/конец).'); return; }
+  setBusy(true);
   try{
     const p = new URLSearchParams({ date_from: df, date_to: dt });
     const res = await fetchProfitJSON('/profit/rebuild-ledger?' + p.toString(), { method:'POST' });
@@ -616,12 +701,16 @@ async function rebuildFifo(){
     await loadProfitFIFO();
     await checkProfitStatus();
   }catch(e){
-    setNote('Перестроение FIFO не удалось: ' + e.message);
+    setNote('Перестроение FIFO не удалось: ' + e.message, false);
+  }finally{
+    setBusy(false);
   }
 }
 
 async function syncAndRebuild(){
   await syncProfit();
+  if(BUSY){ return; }
+  setBusy(true);
   try{
     const df = document.getElementById('start').value;
     const dt = document.getElementById('end').value;
@@ -630,15 +719,22 @@ async function syncAndRebuild(){
     setNote(`Синхр.+пересчёт выполнены. Списаний: ${res?.recomputed||0}`, true);
     await loadProfitFIFO();
     await checkProfitStatus();
-  }catch(e){}
+  }catch(e){
+    setNote('Пересчёт не удался: ' + e.message, false);
+  }finally{
+    setBusy(false);
+  }
 }
+</script>
 
-/* ---- статус синхронизации: чип как в "Мой склад" ---- */
+<script>
+/* ───────────────────────── Блок FIFO: статус + KPI ───────────────────────── */
 function setSyncChip(state, text){
   const el = document.getElementById('profitSyncChip');
+  if(!el) return;
   const dot = el.querySelector('.dot');
-  dot.className = 'dot ' + (state==='ok' ? 'on' : state==='warn' ? 'warn' : state==='err' ? 'err' : '');
-  el.querySelector('span:last-child').textContent = text;
+  if(dot) dot.className = 'dot ' + (state==='ok' ? 'on' : state==='warn' ? 'warn' : state==='err' ? 'err' : '');
+  const span = el.querySelector('span:last-child'); if(span) span.textContent = text;
   el.title = text;
 }
 
@@ -650,7 +746,7 @@ async function checkProfitStatus(analyticsData){
 
     const ordersCount = (analyticsData && typeof analyticsData.total_orders==='number')
       ? analyticsData.total_orders
-      : (await (await fetch(`/orders/analytics?start=${df}&end=${dt}`)).json()).total_orders;
+      : (await fetchJSON(`/orders/analytics?start=${df}&end=${dt}`, {}, {retries:0})).total_orders;
 
     const p = new URLSearchParams({ date_from: df, date_to: dt, group_by: 'total', use_bd: (document.getElementById('use_bd')?.checked ? '1':'0'), bd_start: (document.getElementById('bd_start')?.value||'20:00') });
     const sum = await fetchProfitJSON('/profit/summary?' + p.toString());
@@ -668,7 +764,6 @@ async function checkProfitStatus(analyticsData){
   }
 }
 
-/* ====== Загрузка KPI/график/таблицы FIFO ====== */
 async function loadProfitFIFO(){
   const df = document.getElementById('start').value;
   const dt = document.getElementById('end').value;
@@ -705,20 +800,26 @@ async function loadProfitFIFO(){
     tableFill('tbl-profit-sku', []);
   }
 }
-/* ====== /FIFO ====== */
+</script>
 
+<script>
+/* ───────────────────────── BOOT ───────────────────────── */
 document.addEventListener('DOMContentLoaded', async () => {
-  await loadMeta();
-  document.getElementById('f').addEventListener('submit', run);
-  document.getElementById('themeToggle').addEventListener('change', (e)=>{
-    document.body.setAttribute('data-theme', e.target.checked ? 'dark' : 'light');
-  });
-  document.getElementById('profitGroup').addEventListener('change', loadProfitFIFO);
-  document.getElementById('btnProfitRebuild').addEventListener('click', rebuildFifo);
-  document.getElementById('btnProfitSync').addEventListener('click', syncProfit);
-  document.getElementById('btnProfitSyncRebuild').addEventListener('click', syncAndRebuild);
-  await pingProfitDb();
-  run(); // initial
+  try{
+    await loadMeta();
+    document.getElementById('f')?.addEventListener('submit', run);
+    document.getElementById('themeToggle')?.addEventListener('change', (e)=>{
+      document.body.setAttribute('data-theme', e.target.checked ? 'dark' : 'light');
+    });
+    document.getElementById('profitGroup')?.addEventListener('change', loadProfitFIFO);
+    document.getElementById('btnProfitRebuild')?.addEventListener('click', rebuildFifo);
+    document.getElementById('btnProfitSync')?.addEventListener('click', syncProfit);
+    document.getElementById('btnProfitSyncRebuild')?.addEventListener('click', syncAndRebuild);
+    await pingProfitDb();
+    await run(); // initial
+  }catch(e){
+    setNote('Ошибка инициализации: ' + (e?.message||e), false);
+  }
 });
 </script>
 </body>
