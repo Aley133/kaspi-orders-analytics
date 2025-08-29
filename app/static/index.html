@@ -306,10 +306,17 @@ async function loadIds(){
   params.set('order', order); params.set('grouped', '1'); params.set('limit', '100000');
   params.set('with_items','1'); // явно просим SKU/Title
 
+  // сгруппированный список для отображения
   const r = await fetch(`/orders/ids?${params.toString()}`);
   if(!r.ok) throw new Error('ids failed');
   const data = await r.json();
   const currency = data.currency || window.APP_CURRENCY || 'KZT';
+
+  // ПЛОСКИЙ список (id+date) — для синхронизации по id
+  const flat = new URLSearchParams(params);
+  flat.set('grouped','0'); flat.set('with_items','0');
+  const flatData = await (await fetch(`/orders/ids?${flat.toString()}`)).json().catch(()=>({items:[]}));
+  window.__lastOrderIds = (flatData.items||[]).map(x => ({ id: x.id, date: x.date }));
 
   const container = document.getElementById('ids');
   container.innerHTML = '';
@@ -509,16 +516,44 @@ function buildSyncParams(){
   return p;
 }
 
+// попытка синхронизации по списку id+date
+async function trySyncByIds(list){
+  const r = await fetch('/profit/bridge/sync-by-ids', {
+    method:'POST',
+    headers:{ 'Content-Type':'application/json' },
+    body: JSON.stringify(list||[])
+  });
+  if(r.status===404){ return { unsupported:true }; }
+  if(r.status===401 || r.status===403){
+    const v = prompt('Укажите X-API-Key для блока FIFO:', window.KASPI_API_KEY||'');
+    if(v!==null){ window.setApiKey(v.trim()); return trySyncByIds(list); }
+    throw new Error(await r.text() || 'Unauthorized');
+  }
+  if(!r.ok) throw new Error((await r.text()) || r.statusText || ('HTTP '+r.status));
+  return r.json();
+}
+
 async function syncProfit(){
   const df = document.getElementById('start').value;
   const dt = document.getElementById('end').value;
   if(!df || !dt){ setNote('Сначала задайте период (начало/конец).'); return; }
   try{
-    const p = buildSyncParams();
-    const res = await fetchProfitJSON('/profit/bridge/sync?' + p.toString(), { method:'POST' });
+    let res;
+    const list = window.__lastOrderIds || [];
+    if(list.length){
+      // 1) пробуем новый быстрый путь
+      const r = await trySyncByIds(list);
+      if(!r.unsupported){ res = r; }
+    }
+    if(!res){
+      // 2) фолбэк на старый эндпоинт по диапазону
+      const p = buildSyncParams();
+      res = await fetchProfitJSON('/profit/bridge/sync?' + p.toString(), { method:'POST' });
+    }
+
     setNote(`Синхронизация FIFO: заказов=${res?.synced_orders||0}, вставлено позиций=${res?.items_inserted||0}`, true);
     await loadProfitFIFO();
-    await checkProfitStatus(); // обновим индикатор
+    await checkProfitStatus();
   }catch(e){
     setNote('Синхронизация не удалась: ' + e.message);
   }
@@ -541,7 +576,6 @@ async function rebuildFifo(){
 
 async function syncAndRebuild(){
   await syncProfit();
-  // если sync прошёл — rebuild:
   try{
     const df = document.getElementById('start').value;
     const dt = document.getElementById('end').value;
@@ -550,9 +584,7 @@ async function syncAndRebuild(){
     setNote(`Синхр.+пересчёт выполнены. Списаний: ${res?.recomputed||0}`, true);
     await loadProfitFIFO();
     await checkProfitStatus();
-  }catch(e){
-    // setNote уже показан в syncProfit при ошибке sync
-  }
+  }catch(e){}
 }
 
 /* ---- статус синхронизации: чип как в "Мой склад" ---- */
