@@ -79,6 +79,10 @@
       <div class="row" style="margin-bottom:10px">
         <label><input id="onlyActive" type="checkbox" checked> Только активные</label>
         <input id="search" type="text" placeholder="Название, код, бренд..." style="min-width:260px">
+        <!-- быстрый переход к SKU -->
+        <input id="findSku" type="text" placeholder="SKU" style="width:160px">
+        <button class="btn secondary" id="btnFindSku">Открыть SKU</button>
+
         <button class="btn" id="btnLoadApi">Загрузить</button>
         <label class="btn secondary" for="fileInput">Импорт из файла (XML/XLSX)</label>
         <input type="file" id="fileInput" accept=".xml,.xlsx,.xls" style="display:none">
@@ -108,6 +112,7 @@
                 <th>ШТ</th>
                 <th>Цена, KZT</th>
                 <th>Активен</th>
+                <th>Остаток (партии)</th>
                 <th>Кол-во партий</th>
                 <th>Маржа (посл.), KZT</th>
                 <th class="col-right">Партии</th>
@@ -180,6 +185,7 @@ function renderProducts(items){
       <td>${fmt(it.qty||0)}</td>
       <td>${fmt(it.price||0)}</td>
       <td><span class="dot ${((it.qty||0)>0 || it.active===true) ? 'on':''}"></span></td>
+      <td>${fmt(it.left_total ?? 0)}</td>
       <td>${fmt(it.batch_count||0)}</td>
       <td>${it.last_margin!=null ? fmt(it.last_margin) : '—'}</td>
       <td class="col-right"><button class="btn-link btn-parties">Партии</button></td>
@@ -237,16 +243,44 @@ async function openDetail(row){
 
   mount.innerHTML = `
     <div class="block">
-      <div style="margin:8px 0 6px; font-weight:600">Партии — <span id="dTitle">${row.cells[1].textContent}</span></div>
+      <div style="display:flex;align-items:center;gap:10px;margin:8px 0 6px">
+        <div style="font-weight:600">Партии — <span id="dTitle">${row.cells[1].textContent}</span></div>
+        <button class="btn secondary" id="btnRecount">Пересчитать списания (FIFO)</button>
+      </div>
+
       <table style="width:100%" id="btTable">
         <thead>
-          <tr><th>Дата</th><th>Кол-во</th><th>Закуп., KZT</th><th>Комиссия, %</th><th>Маржа / шт</th><th>Код</th><th>Прим.</th><th></th></tr>
+          <tr>
+            <th>Дата</th><th>Кол-во</th><th>Закуп., KZT</th><th>Комиссия, %</th>
+            <th>Маржа / шт</th><th>Продано</th><th>Остаток</th><th>Код</th><th>Прим.</th><th></th>
+          </tr>
         </thead>
         <tbody id="btBody"></tbody>
       </table>
+
       <div class="row" style="margin-top:8px; gap:8px">
         <button class="btn secondary" id="btnAddRow">+ Добавить</button>
-        <button class="btn" id="btnSaveRows">Сохранить</button>
+        <button class="btn" id="btnSaveRows">Сохранить новые</button>
+      </div>
+
+      <hr style="border:0;border-top:1px solid var(--line);margin:14px 0">
+
+      <div class="row" style="align-items:center;gap:8px">
+        <b>Продажи SKU</b>
+        <span class="muted">KASPI_DELIVERY</span>
+        <label>за</label>
+        <input type="number" id="salesDays" min="1" step="1" value="7" style="width:80px">
+        <span>дн.</span>
+        <button class="btn secondary" id="btnLoadSales">Показать</button>
+        <button class="btn" id="btnSyncSales">Списать по продажам</button>
+        <span id="salesSummary" class="muted"></span>
+      </div>
+
+      <div style="overflow:auto;max-height:260px;margin-top:6px">
+        <table class="table" id="salesTable">
+          <thead><tr><th>№</th><th>Дата</th><th>Сумма</th></tr></thead>
+          <tbody></tbody>
+        </table>
       </div>
     </div>
   `;
@@ -266,12 +300,16 @@ async function openDetail(row){
     const tr = document.createElement('tr');
     const codeCell = (data && data.batch_code) ? data.batch_code : '<span class="muted">— генерируется</span>';
     const delBtn = (data && data.id) ? `<button class="btn-link btnDel" data-id="${data.id}">Удалить</button>` : '';
+    const sold = data.qty_sold ?? data.sold ?? null;
+    const left = data.left ?? (typeof sold === 'number' && typeof data.qty === 'number' ? (data.qty - sold) : null);
     tr.innerHTML = `
       <td><input type="date" value="${data.date || new Date().toISOString().slice(0,10)}"></td>
       <td><input type="number" min="0" step="1" value="${data.qty ?? ''}" style="width:90px"></td>
       <td><input type="number" min="0" step="0.01" value="${data.unit_cost ?? ''}" style="width:110px"></td>
       <td><input type="number" min="0" step="0.01" value="${data.commission_pct ?? ''}" style="width:100px"></td>
       <td class="net">—</td>
+      <td>${sold != null ? fmt(sold) : '—'}</td>
+      <td>${left != null ? fmt(left) : '—'}</td>
       <td class="code">${codeCell}</td>
       <td><input type="text" value="${data.note ?? ''}"></td>
       <td>${delBtn}</td>
@@ -321,6 +359,87 @@ async function openDetail(row){
       openDetail(row); // перезагрузим
     }catch(e){ setNote('Сохранение партий не удалось: ' + e.message); }
   };
+
+  // Пересчёт списаний из продаж
+  qs('#btnRecount', mount).onclick = async ()=>{
+    try{
+      const res = await fetchJSON('/products/batches/recount-sold', {method:'POST'});
+      setNote(`Пересчёт списаний выполнен (затронуто партий: ${res.updated_batches||0}).`, true);
+      openDetail(row);
+    }catch(e){ setNote('Пересчёт не удался: ' + e.message); }
+  };
+
+  // ---- Продажи по SKU + списание FIFO ----
+  function isoToday(){ return new Date().toISOString().slice(0,10); }
+  function isoDaysAgo(d){
+    const dt = new Date(); dt.setDate(dt.getDate() - d);
+    return dt.toISOString().slice(0,10);
+  }
+
+  async function loadSalesForSku(sku, days){
+    const start = isoDaysAgo(days);
+    const end   = isoToday();
+    const params = new URLSearchParams({
+      start, end, tz:'Asia/Almaty', date_field:'creationDate',
+      states:'KASPI_DELIVERY', exclude_states:'CANCELED',
+      use_bd:'1', business_day_start:'20:00',
+      order:'desc', grouped:'0', limit:'100000', with_items:'1'
+    });
+    const data = await fetchJSON('/orders/ids?' + params.toString());
+    const rows = (data.items||[]).filter(x => String(x.sku) === String(sku));
+    // таблица
+    const tb = qs('#salesTable tbody', mount); tb.innerHTML = '';
+    rows.slice(0,200).forEach(it=>{
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${it.number}</td><td>${it.date.slice(0,16).replace('T',' ')}</td><td>${fmt(it.amount)} KZT</td>`;
+      tb.appendChild(tr);
+    });
+    qs('#salesSummary', mount).textContent = rows.length
+      ? `найдено: ${rows.length} шт., сумма: ${fmt(rows.reduce((a,r)=>a+(r.amount||0),0))} KZT`
+      : 'нет продаж за выбранный период';
+    return { rows, start, end };
+  }
+
+  qs('#btnLoadSales', mount).onclick = async ()=>{
+    try{
+      await loadSalesForSku(sku, Number(qs('#salesDays', mount).value||7));
+    }catch(e){ setNote('Загрузка продаж не удалась: ' + e.message); }
+  };
+
+  qs('#btnSyncSales', mount).onclick = async ()=>{
+    try{
+      const days = Number(qs('#salesDays', mount).value||7);
+      const { rows, start, end } = await loadSalesForSku(sku, days);
+      if(!rows.length){ setNote('Нет продаж для списания.'); return; }
+
+      // 1) апсертом в FIFO-продажи
+      const orders = rows.map(x => ({
+        id: x.id,
+        date: x.date,
+        customer: null,
+        items: [{ sku: String(x.sku), qty: 1, unit_price: Number(x.amount||0) }]
+      }));
+      await fetchJSON('/profit/orders/upsert-bulk', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ orders })
+      });
+
+      // 2) пересчитать леджер за период
+      await fetchJSON(`/profit/rebuild-ledger?date_from=${start}&date_to=${end}`, { method:'POST' });
+
+      // 3) протянуть qty_sold/left в партии
+      await fetchJSON('/products/batches/recount-sold', { method:'POST' });
+
+      setNote('Продажи синхронизированы и списания применены.', true);
+
+      // обновим детали и список
+      await loadDB();
+      openDetail(row);
+    }catch(e){
+      setNote('Списание по продажам не удалось: ' + e.message);
+    }
+  };
 }
 
 function tableToRows(){
@@ -349,6 +468,16 @@ document.addEventListener('DOMContentLoaded', async ()=>{
 
   qs('#btnLoadApi').onclick = loadAPI;
   qs('#btnLoadDb').onclick = loadDB;
+
+  // быстрый поиск/открытие SKU
+  qs('#btnFindSku').onclick = ()=>{
+    const sku = qs('#findSku').value.trim();
+    if(!sku) return;
+    const row = qsa('#tbl tbody tr').find(tr => (tr.dataset.sku||tr.cells[0].textContent.trim()) === sku);
+    if(!row){ setNote('SKU не найден в таблице. Попробуй «Загрузить из БД» или общий поиск.'); return; }
+    row.scrollIntoView({behavior:'smooth', block:'center'});
+    openDetail(row);
+  };
 
   qs('#fileInput').addEventListener('change', async (e)=>{
     const f = e.target.files?.[0]; if(!f) return;
@@ -399,7 +528,7 @@ document.addEventListener('DOMContentLoaded', async ()=>{
 });
 </script>
 
-<!-- Автоподстановка X-API-Key ко всем запросам /products/* + статус ключа -->
+<!-- Автоподстановка X-API-Key ко всем запросам /products/* и /profit/* + статус ключа -->
 <script>
 (() => {
   const KEY = "KASPI_API_KEY";
@@ -425,7 +554,7 @@ document.addEventListener('DOMContentLoaded', async ()=>{
   window.fetch = function(input, init) {
     try {
       let urlStr = typeof input === "string" ? input : (input && input.url) || "";
-      if (urlStr.startsWith("/products/")) {
+      if (urlStr.startsWith("/products/") || urlStr.startsWith("/profit/")) {
         init = init || {};
         const k = window.KASPI_API_KEY || "";
 
