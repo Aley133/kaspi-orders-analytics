@@ -534,29 +534,75 @@ async function trySyncByIds(list){
 }
 
 async function syncProfit(){
-  const df = document.getElementById('start').value;
-  const dt = document.getElementById('end').value;
-  if(!df || !dt){ setNote('Сначала задайте период (начало/конец).'); return; }
-  try{
-    let res;
-    const list = window.__lastOrderIds || [];
-    if(list.length){
-      // 1) пробуем новый быстрый путь
-      const r = await trySyncByIds(list);
-      if(!r.unsupported){ res = r; }
-    }
-    if(!res){
-      // 2) фолбэк на старый эндпоинт по диапазону
-      const p = buildSyncParams();
-      res = await fetchProfitJSON('/profit/bridge/sync?' + p.toString(), { method:'POST' });
-    }
+  const start = document.getElementById('start').value;
+  const end   = document.getElementById('end').value;
+  if(!start || !end){ setNote('Сначала задайте период (начало/конец).'); return; }
 
-    setNote(`Синхронизация FIFO: заказов=${res?.synced_orders||0}, вставлено позиций=${res?.items_inserted||0}`, true);
+  const tz = document.getElementById('tz').value || 'Asia/Almaty';
+  const date_field = document.getElementById('date_field').value;
+  const use_bd = document.getElementById('use_bd')?.checked ? '1' : '0';
+  const bd_start = document.getElementById('bd_start')?.value || '20:00';
+
+  // Шаг 1: берём только KASPI_DELIVERY и сразу with_items=1, чтобы в ответе был SKU
+  const p = new URLSearchParams({
+    start, end, tz, date_field,
+    states: 'KASPI_DELIVERY',
+    exclude_states: 'CANCELED',
+    use_bd, business_day_start: bd_start,
+    order: 'asc', grouped: '0', limit: '100000', with_items: '1'
+  });
+  const idsResp = await fetch('/orders/ids?' + p.toString());
+  if(!idsResp.ok){ setNote('Не удалось получить список заказов'); return; }
+  const idsJson = await idsResp.json();
+
+  // Готовим полезную нагрузку для моста: id, номер, дата, SKU, сумма
+  const payload = (idsJson.items || [])
+    .filter(x => x.sku && x.state === 'KASPI_DELIVERY')
+    .map(x => ({
+      id: x.id,
+      code: x.number,
+      date: x.date,
+      sku: x.sku,
+      amount: x.amount || 0
+    }));
+
+  if(payload.length === 0){
+    setNote('Заказы KASPI_DELIVERY со SKU не найдены в выбранном периоде');
+    return;
+  }
+
+  // Шаг 2: шлём в мост
+  const r = await fetch('/profit/bridge/sync-by-ids', {
+    method: 'POST',
+    headers: { 'Content-Type':'application/json' },
+    body: JSON.stringify(payload)
+  });
+  if(r.status===401 || r.status===403){
+    const v = prompt('Укажите X-API-Key для блока FIFO:', window.KASPI_API_KEY||'');
+    if(v!==null){ window.setApiKey(v.trim()); return syncProfit(); }
+  }
+  if(!r.ok){
+    setNote('Синхронизация не удалась: ' + (await r.text()));
+    return;
+  }
+  const res = await r.json();
+  setNote(`Синхронизация FIFO: заказов=${res?.synced_orders||0}, вставлено позиций=${res?.items_inserted||0}`, true);
+
+  // Обновим KPI/статусы
+  await loadProfitFIFO();
+  await checkProfitStatus();
+}
+
+async function syncAndRebuild(){
+  await syncProfit();
+  try{
+    const df = document.getElementById('start').value;
+    const dt = document.getElementById('end').value;
+    const res = await fetch(`/profit/rebuild-ledger?date_from=${df}&date_to=${dt}`, { method:'POST' }).then(r=>r.json());
+    setNote(`Синхр.+пересчёт выполнены. Списаний: ${res?.recomputed||0}`, true);
     await loadProfitFIFO();
     await checkProfitStatus();
-  }catch(e){
-    setNote('Синхронизация не удалась: ' + e.message);
-  }
+  }catch(e){ /* сообщение уже показано в syncProfit */ }
 }
 
 async function rebuildFifo(){
