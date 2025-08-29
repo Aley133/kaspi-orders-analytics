@@ -18,6 +18,7 @@ from pydantic import BaseModel
 from cachetools import TTLCache
 from httpx import HTTPStatusError, RequestError
 from app.api.bridge_v2 import router as bridge_v2_router
+from app.api.profit_fifo import get_profit_fifo_router
 # FIFO/Bridge
 
 
@@ -104,8 +105,10 @@ client = KaspiClient(token=KASPI_TOKEN, base_url=KASPI_BASE_URL) if KASPI_TOKEN 
 orders_cache = TTLCache(maxsize=128, ttl=CACHE_TTL)
 
 app.include_router(get_products_router(client), prefix="/products")
+app.include_router(get_profit_fifo_router(),   prefix="/profit")
+app.include_router(bridge_v2_router,           prefix="/profit") 
 app.include_router(get_debug_router())
-app.include_router(bridge_v2_router, prefix="/profit")
+
 
 # -------------------- Utils --------------------
 def tzinfo_of(name: str) -> pytz.BaseTzInfo:
