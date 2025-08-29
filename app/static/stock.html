@@ -398,69 +398,66 @@ async function autoSyncWriteoffs(){
   try{
     setNote('Автосинхронизация списаний…');
     const { bd_start, tz } = await getStoreHours();
-    const { startUTC, endUTC } = businessDayWindow(bd_start, tz);
 
-    // 1) тянем заказы за текущий бизнес-день
+    // ✅ для бизнес-дня используем только дату (YYYY-MM-DD)
+    const day = new Date().toISOString().slice(0,10);
+
+    // 1) тянем заказы за текущий бизнес-день (без времени, use_bd=1)
     const p = new URLSearchParams({
-      start: startUTC.toISOString().slice(0,19),
-      end:   endUTC.toISOString().slice(0,19),
-      tz, date_field:'creationDate',
-      states:'KASPI_DELIVERY', exclude_states:'CANCELED',
-      use_bd:'0', order:'desc', grouped:'0', limit:'100000', with_items:'1'
+      start: day,
+      end: day,
+      tz,
+      date_field: 'creationDate',
+      states: 'KASPI_DELIVERY',
+      exclude_states: 'CANCELED',
+      use_bd: '1',
+      business_day_start: bd_start,
+      order: 'desc',
+      grouped: '0',
+      limit: '100000',
+      with_items: '1'
     });
-    const data = await fetchJSON('/orders/ids?'+p.toString());
+    const data = await fetchJSON('/orders/ids?' + p.toString());
     const rows = data.items || [];
 
-    // 2) собираем массив orders для upsert (группируем по orderId)
+    // 2) собираем заказы → upsert
     const byId = new Map();
-    for(const r of rows){
-      const oid = String(r.id || r.number || r.orderId || '');
-      if(!oid) continue;
-      const key = oid;
-      if(!byId.has(key)){
-        byId.set(key, {
-          id: oid,
-          date: r.date || r.creationDate || new Date().toISOString(),
-          customer: null,
-          items: []
-        });
-      }
-      const pkg = byId.get(key);
-      const sku = String(r.sku || r.code || r.vendorCode || r.barcode || '');
-      if(!sku) continue;
+    for (const r of rows) {
+      const oid = String(r.id || r.number || r.orderId || ''); if (!oid) continue;
+      if (!byId.has(oid)) byId.set(oid, { id: oid, date: r.date || r.creationDate || (day + 'T00:00:00'), customer: null, items: [] });
+      const sku = String(r.sku || r.code || r.vendorCode || r.barcode || ''); if (!sku) continue;
       const unit_price = Number(r.amount || r.price || 0);
-      // агрегируем по SKU внутри заказа
-      const ex = pkg.items.find(it=>it.sku===sku);
-      if(ex){ ex.qty += 1; ex.unit_price = unit_price || ex.unit_price; }
+      const pkg = byId.get(oid);
+      const ex = pkg.items.find(it => it.sku === sku);
+      if (ex) { ex.qty += 1; ex.unit_price = unit_price || ex.unit_price; }
       else { pkg.items.push({ sku, qty: 1, unit_price }); }
     }
     const orders = [...byId.values()];
-    // если нечего, просто обновим бейдж и выходим
-    if(!orders.length){
+
+    if (!orders.length) {
       await updateWriteoffsChip();
-      setNote('Автосинхронизация: нет новых продаж за бизнес-день.', true);
+      setNote('Автосинхронизация: нет продаж за бизнес-день.', true);
       return;
     }
 
-    // 3) апсертим заказы
     await fetchJSON('/profit/orders/upsert-bulk', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ orders })
     });
 
-    // 4) пересобираем леджер за период
-    const q2 = new URLSearchParams({ date_from: startUTC.toISOString().slice(0,10), date_to: endUTC.toISOString().slice(0,10) });
-    await fetchJSON('/profit/rebuild-ledger?'+q2.toString(), { method:'POST' });
+    // 3) пересобираем леджер за этот же день
+    const q2 = new URLSearchParams({ date_from: day, date_to: day });
+    await fetchJSON('/profit/rebuild-ledger?' + q2.toString(), { method:'POST' });
 
-    // 5) протягиваем qty_sold в партии
+    // 4) протягиваем qty_sold
     await fetchJSON('/products/batches/recount-sold', { method:'POST' });
 
-    // 6) обновляем UI
     await updateWriteoffsChip();
     await loadDB();
     setNote('Автосинхронизация списаний выполнена.', true);
   }catch(e){
-    setNote('Автосинхронизация не удалась: ' + e.message);
+    // на случай 400/сетевых — мягко показываем сообщение, не валим страницу
+    setNote('Автосинхронизация не удалась: ' + (e?.message || e), false);
   }
 }
 
