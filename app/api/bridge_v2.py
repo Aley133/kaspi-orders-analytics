@@ -34,6 +34,11 @@ def _kaspi_headers() -> Dict[str, str]:
 HTTPX_TIMEOUT = httpx.Timeout(connect=10.0, read=40.0, write=15.0, pool=40.0)
 HTTPX_LIMITS  = httpx.Limits(max_connections=30, max_keepalive_connections=10)
 
+# Куда шлём FIFO-списания (router из products.py)
+PRODUCTS_BASE_URL = (os.getenv("PRODUCTS_BASE_URL") or "http://localhost:8000/products").rstrip("/")
+# API-ключ для products.require_api_key
+PRODUCTS_API_KEY = os.getenv("PRODUCTS_API_KEY") or os.getenv("API_KEY")
+
 # ─────────────────────────────────────────────────────────────────────────────
 # База данных
 # ─────────────────────────────────────────────────────────────────────────────
@@ -326,7 +331,27 @@ def db_ping():
     return info
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Главная ручка: офлайновая синхронизация с опциональным fallback
+# Хелпер: отправка батчевого FIFO-списания на products
+# ─────────────────────────────────────────────────────────────────────────────
+async def _send_fifo_writeoffs_bulk(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Отправляет массив {order_id, sku, qty, note?, ts_ms?} в /products/db/writeoff/by-order/bulk.
+    Возвращает JSON-ответ ручки products.
+    """
+    if not rows:
+        return {"results": []}
+    url = f"{PRODUCTS_BASE_URL}/db/writeoff/by-order/bulk"
+    headers = {"Content-Type": "application/json"}
+    if PRODUCTS_API_KEY:
+        headers["X-API-Key"] = PRODUCTS_API_KEY
+
+    async with httpx.AsyncClient(timeout=HTTPX_TIMEOUT, limits=HTTPX_LIMITS) as cli:
+        r = await cli.post(url, json={"rows": rows}, headers=headers)
+        r.raise_for_status()
+        return r.json()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Главная ручка: офлайновая синхронизация с опциональным fallback + FIFO
 # ─────────────────────────────────────────────────────────────────────────────
 @router.post("/bridge/sync-by-ids")
 async def bridge_sync_by_ids(items: List[SyncItem] = Body(...)):
@@ -337,12 +362,16 @@ async def bridge_sync_by_ids(items: List[SyncItem] = Body(...)):
       2) Если sku нет — пробуем fallback в Kaspi (если включён и есть токен).
     Всегда пишем в таблицу bridge_sales (UPSERT).
     Фильтрация по состоянию: BRIDGE_ONLY_STATE (по умолчанию KASPI_DELIVERY).
+    Дополнительно: агрегируем (order_id, sku) → qty и отправляем единый батч FIFO-списания
+    на сервис products: POST {PRODUCTS_BASE_URL}/db/writeoff/by-order/bulk.
     """
     if not items:
         return {
             "synced_orders": 0, "items_inserted": 0,
             "skipped_no_sku": 0, "skipped_by_state": 0,
-            "fallback_used": 0, "errors": []
+            "fallback_used": 0,
+            "writeoff_sent": 0, "writeoff_ok": 0, "writeoff_skipped": 0, "writeoff_failed": 0,
+            "errors": []
         }
 
     inserted = 0
@@ -354,6 +383,9 @@ async def bridge_sync_by_ids(items: List[SyncItem] = Body(...)):
 
     # локальный счётчик line_index по каждому заказу (если не передан)
     counters: DefaultDict[str, int] = defaultdict(int)
+
+    # агрегатор для FIFO (order_id, sku) → {order_id, sku, qty, ts_ms?, note?}
+    to_fifo_map: DefaultDict[Tuple[str, str], Dict[str, Any]] = defaultdict(dict)
 
     # 1) офлайновые записи (со SKU)
     offline_rows: List[Dict[str, Any]] = []
@@ -396,6 +428,30 @@ async def bridge_sync_by_ids(items: List[SyncItem] = Body(...)):
                     "unit_price": _safe_float(unit, 0.0),
                     "total_price": _safe_float(total, 0.0),
                 })
+
+                # ——— агрегируем списание по (order_id, sku)
+                _oid = oid
+                _sku = str(it.sku).strip()
+                _qty = qty
+                _ts = _to_ms(it.date)
+
+                note_bits = []
+                if it.code: note_bits.append(f"#{it.code}")
+                if it.unit_price is not None: note_bits.append(f"unit={_safe_float(it.unit_price):g}")
+                if it.total_price is not None: note_bits.append(f"total={_safe_float(it.total_price):g}")
+                _note = " ".join(note_bits) or None
+
+                key = (_oid, _sku)
+                acc = to_fifo_map.get(key)
+                if not acc:
+                    acc = {"order_id": _oid, "sku": _sku, "qty": 0}
+                    if _ts: acc["ts_ms"] = _ts
+                    if _note: acc["note"] = _note
+                acc["qty"] = int(acc.get("qty", 0)) + _qty
+                if _ts and not acc.get("ts_ms"):
+                    acc["ts_ms"] = _ts
+                to_fifo_map[key] = acc
+
             else:
                 # без SKU — пробуем fallback (если включён)
                 if KASPI_FALLBACK_ENABLED and KASPI_TOKEN:
@@ -451,6 +507,27 @@ async def bridge_sync_by_ids(items: List[SyncItem] = Body(...)):
                     "total_price": _safe_float(e["total_price"], 0.0),
                 })
 
+                # ——— для каждой fallback-строки также добавляем в to_fifo_map
+                _sku = str(e["sku"]).strip()
+                _qty = int(e["qty"])
+                key = (ref.id, _sku)
+
+                note_bits = []
+                if order_code: note_bits.append(f"#{order_code}")
+                if e.get("unit_price") is not None: note_bits.append(f"unit={_safe_float(e.get('unit_price')):g}")
+                if e.get("total_price") is not None: note_bits.append(f"total={_safe_float(e.get('total_price')):g}")
+                _note = " ".join(note_bits) or None
+
+                acc = to_fifo_map.get(key)
+                if not acc:
+                    acc = {"order_id": ref.id, "sku": _sku, "qty": 0}
+                    if order_ms: acc["ts_ms"] = order_ms
+                    if _note:    acc["note"]  = _note
+                acc["qty"] = int(acc.get("qty", 0)) + _qty
+                if order_ms and not acc.get("ts_ms"):
+                    acc["ts_ms"] = order_ms
+                to_fifo_map[key] = acc
+
             if rows:
                 inserted += _upsert_bridge_rows(rows)
                 touched_orders.add(ref.id)
@@ -464,11 +541,33 @@ async def bridge_sync_by_ids(items: List[SyncItem] = Body(...)):
         except Exception as e:
             errors.append(f"fallback_error:{type(e).__name__}")
 
+    # ——— отправляем списание FIFO по заказам (bulk)
+    fifo_payload = list(to_fifo_map.values())
+    writeoff_result = {"results": []}
+    writeoff_ok = writeoff_skipped = writeoff_failed = 0
+    try:
+        writeoff_result = await _send_fifo_writeoffs_bulk(fifo_payload)
+        for r in (writeoff_result.get("results") or []):
+            if r.get("ok") and r.get("skipped"):
+                writeoff_skipped += 1
+            elif r.get("ok"):
+                writeoff_ok += 1
+            else:
+                writeoff_failed += 1
+    except httpx.HTTPError as e:
+        errors.append(f"fifo_http_{type(e).__name__}")
+    except Exception as e:
+        errors.append(f"fifo_error:{type(e).__name__}")
+
     return {
         "synced_orders": len(touched_orders),
         "items_inserted": inserted,
         "skipped_no_sku": skipped_no_sku,
         "skipped_by_state": skipped_by_state,
         "fallback_used": fallback_used,
+        "writeoff_sent": len(fifo_payload),
+        "writeoff_ok": writeoff_ok,
+        "writeoff_skipped": writeoff_skipped,  # уже были списаны (идемпотентность)
+        "writeoff_failed": writeoff_failed,
         "errors": errors,
     }
