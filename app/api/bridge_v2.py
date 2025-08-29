@@ -335,8 +335,11 @@ def db_ping():
 # ─────────────────────────────────────────────────────────────────────────────
 async def _send_fifo_writeoffs_bulk(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    Отправляет массив {order_id, sku, qty, note?, ts_ms?} в /products/db/writeoff/by-order/bulk.
-    Возвращает JSON-ответ ручки products.
+    Отправляет массив объектов:
+    {
+      order_id, order_code?, line_index, sku, qty, unit_price?, total_price?, note?, ts_ms?
+    }
+    в /products/db/writeoff/by-order/bulk
     """
     if not rows:
         return {"results": []}
@@ -441,15 +444,23 @@ async def bridge_sync_by_ids(items: List[SyncItem] = Body(...)):
                 if it.total_price is not None: note_bits.append(f"total={_safe_float(it.total_price):g}")
                 _note = " ".join(note_bits) or None
 
-                key = (_oid, _sku)
+                lidx = int(idx) if "idx" in locals() else int(it.line_index if it.line_index is not None else counters[oid] - 1)
+                key = (oid, lidx)
+
                 acc = to_fifo_map.get(key)
                 if not acc:
-                    acc = {"order_id": _oid, "sku": _sku, "qty": 0}
-                    if _ts: acc["ts_ms"] = _ts
-                    if _note: acc["note"] = _note
+                    acc = {
+                        "order_id": oid,
+                        "line_index": lidx,
+                        "sku": _sku,
+                        "qty": 0,
+                        "order_code": _norm_str(it.code if 'it' in locals() else ref.code, 64),
+                        "unit_price": _safe_float((it.unit_price if 'it' in locals() else e.get("unit_price")), 0.0),
+                        "total_price": _safe_float((it.total_price if 'it' in locals() else e.get("total_price")), 0.0),
+                    }
+                    if _ts:   acc["ts_ms"] = _ts
+                    if _note: acc["note"]  = _note
                 acc["qty"] = int(acc.get("qty", 0)) + _qty
-                if _ts and not acc.get("ts_ms"):
-                    acc["ts_ms"] = _ts
                 to_fifo_map[key] = acc
 
             else:
