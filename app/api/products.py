@@ -86,9 +86,7 @@ if _USE_PG:
 
 @contextmanager
 def _db():
-    """
-    ВАЖНО: добавлен явный commit/rollback для SQLite, чтобы изменения реально сохранялись.
-    """
+    # Явный commit/rollback для SQLite; в PG используем transactional begin()
     if _USE_PG:
         with _engine.begin() as conn:
             yield conn
@@ -144,6 +142,16 @@ def _has_column(c, table: str, col: str) -> bool:
         cols = {row["name"] for row in rows}
         return col in cols
 
+def _lower_cols(c, table: str) -> set[str]:
+    if _USE_PG:
+        rows = c.execute(_q(
+            "SELECT column_name FROM information_schema.columns WHERE table_name=:t"
+        ), {"t": table}).all()
+        return {str(r._mapping["column_name"]).lower() for r in rows}
+    else:
+        rows = c.execute(f"PRAGMA table_info({table})").fetchall()
+        return {str(r["name"]).lower() for r in rows}
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Schema & migrations
 # ──────────────────────────────────────────────────────────────────────────────
@@ -185,7 +193,7 @@ def _ensure_schema():
                 tax_percent DOUBLE PRECISION DEFAULT 0.0
             );
             """))
-            # Новая таблица списаний
+            # лог списаний
             c.execute(_q("""
             CREATE TABLE IF NOT EXISTS writeoffs(
                 id SERIAL PRIMARY KEY,
@@ -198,7 +206,7 @@ def _ensure_schema():
             """))
             c.execute(_q("CREATE INDEX IF NOT EXISTS idx_writeoffs_ts ON writeoffs(ts)"))
             c.execute(_q("CREATE INDEX IF NOT EXISTS idx_writeoffs_sku ON writeoffs(sku)"))
-            # Миграции «на лету»
+            # миграции «на лету»
             c.execute(_q("""
             DO $$
             BEGIN
@@ -210,7 +218,7 @@ def _ensure_schema():
               END IF;
             END$$;
             """))
-            c.execute(_q("CREATE INDEX IF NOT EXISTS idx_batches_sku ON batches(sku)"))
+            c.execute(_q("CREATE INDEX IF NOT EXISTS idx_batches_sku  ON batches(sku)"))
             c.execute(_q("CREATE INDEX IF NOT EXISTS idx_batches_date ON batches(date)"))
             # batch_code для старых строк
             c.execute(_q("""
@@ -272,7 +280,6 @@ def _ensure_schema():
                 batch_id INTEGER
             );
             """)
-            # миграции для старых файлов
             cols = {r["name"] for r in c.execute("PRAGMA table_info(batches)")}
             if "commission_pct" not in cols:
                 c.execute("ALTER TABLE batches ADD COLUMN commission_pct REAL")
@@ -280,9 +287,9 @@ def _ensure_schema():
                 c.execute("ALTER TABLE batches ADD COLUMN batch_code TEXT")
             if "qty_sold" not in cols:
                 c.execute("ALTER TABLE batches ADD COLUMN qty_sold INTEGER DEFAULT 0")
-            c.execute("CREATE INDEX IF NOT EXISTS idx_batches_sku ON batches(sku)")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_batches_sku  ON batches(sku)")
             c.execute("CREATE INDEX IF NOT EXISTS idx_batches_date ON batches(date)")
-            c.execute("CREATE INDEX IF NOT EXISTS idx_writeoffs_ts ON writeoffs(ts)")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_writeoffs_ts  ON writeoffs(ts)")
             c.execute("CREATE INDEX IF NOT EXISTS idx_writeoffs_sku ON writeoffs(sku)")
             # проставить batch_code где пусто
             for r in c.execute("SELECT id FROM batches WHERE batch_code IS NULL OR batch_code=''").fetchall():
@@ -356,10 +363,6 @@ def _avg_cost(sku: str) -> float | None:
             return float(r["tc"]) / float(r["tq"])
 
 def _leftovers_by_sku(c, sku: str) -> List[Dict[str, Any]]:
-    """
-    Список партий с положительными остатками (left = qty - COALESCE(qty_sold,0) > 0),
-    в порядке FIFO (date, id).
-    """
     if _USE_PG:
         rows = c.execute(_q("""
             SELECT id, date, qty, COALESCE(qty_sold,0) AS qty_sold,
@@ -394,10 +397,6 @@ def _sum_leftovers(c, sku: str) -> int:
         return int(row["left"] or 0)
 
 def _recompute_product_qty(c, sku: str):
-    """
-    Проставляет products.quantity как сумму остатков по партиям (не зависит от того,
-    как изначально загружали количество).
-    """
     left_total = _sum_leftovers(c, sku)
     if _USE_PG:
         c.execute(_q("UPDATE products SET quantity=:q, updated_at=NOW() WHERE sku=:sku"),
@@ -406,6 +405,36 @@ def _recompute_product_qty(c, sku: str):
         c.execute("UPDATE products SET quantity=?, updated_at=datetime('now') WHERE sku=?",
                   (left_total, sku))
     return left_total
+
+def _recompute_all_products_qty():
+    _ensure_schema()
+    with _db() as c:
+        if _USE_PG:
+            c.execute(_q("""
+                UPDATE products p
+                   SET quantity = COALESCE(b.left,0), updated_at = NOW()
+                  FROM (
+                        SELECT sku, SUM(qty-COALESCE(qty_sold,0)) AS left
+                          FROM batches GROUP BY sku
+                       ) b
+                 WHERE p.sku = b.sku
+            """))
+            # нули для тех, у кого нет партий
+            c.execute(_q("""
+                UPDATE products p
+                   SET quantity = 0, updated_at = NOW()
+                 WHERE NOT EXISTS (SELECT 1 FROM batches b WHERE b.sku = p.sku)
+            """))
+        else:
+            # проще: обнулим и накатим суммой
+            c.execute("UPDATE products SET quantity=0, updated_at=datetime('now')")
+            rows = c.execute("""
+                SELECT sku, SUM(qty-COALESCE(qty_sold,0)) AS left
+                  FROM batches GROUP BY sku
+            """).fetchall()
+            for r in rows:
+                c.execute("UPDATE products SET quantity=?, updated_at=datetime('now') WHERE sku=?",
+                          (int(r["left"] or 0), r["sku"]))
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Upsert products
@@ -603,32 +632,16 @@ class WriteoffIn(BaseModel):
     note: str | None = None
 
 # ──────────────────────────────────────────────────────────────────────────────
-# FIFO recount helper (exported) — обновляет batches.qty_sold из леджера
+# FIFO recount helper — обновляет batches.qty_sold из леджера
 # ──────────────────────────────────────────────────────────────────────────────
-def _lower_cols(c, table: str) -> set[str]:
-    if _USE_PG:
-        rows = c.execute(_q("""
-          SELECT column_name FROM information_schema.columns
-           WHERE table_name=:t
-        """), {"t": table}).all()
-        return {str(r._mapping["column_name"]).lower() for r in rows}
-    else:
-        rows = c.execute(f"PRAGMA table_info({table})").fetchall()
-        return {str(r["name"]).lower() for r in rows}
-
 def _find_ledger_table(c) -> tuple[Optional[str], Optional[str], Optional[str]]:
-    """
-    Возвращает (table, batch_key_col, qty_col). batch_key_col может быть id-колонкой
-    ('batch_id'/'bid'/'batch') или кодом партии ('batch_code').
-    """
     preferred = ["fifo_ledger", "profit_fifo_ledger", "ledger_fifo"]
-    # 1) предпочтительные
     candidates = list(preferred)
-    # 2) любые таблицы, где в названии встречается 'ledger'
+    # дополнительно — любые таблицы, где в названии есть ledger
     if _USE_PG:
         rows = c.execute(_q("""
           SELECT table_name FROM information_schema.tables
-           WHERE table_schema = 'public' AND table_name ILIKE '%ledger%'
+           WHERE table_schema='public' AND table_name ILIKE '%ledger%'
         """)).all()
         extra = [r._mapping["table_name"] for r in rows]
     else:
@@ -649,7 +662,6 @@ def _find_ledger_table(c) -> tuple[Optional[str], Optional[str], Optional[str]]:
     return None, None, None
 
 def _recount_qty_sold_from_ledger() -> int:
-    """Возвращает количество партий, у которых изменился qty_sold."""
     _ensure_schema()
     updated = 0
     with _db() as c:
@@ -657,15 +669,12 @@ def _recount_qty_sold_from_ledger() -> int:
         if not table:
             return 0
 
-        # Суммы из леджера по ключу партии
         if _USE_PG:
             rows = c.execute(_q(
                 f"SELECT {batch_key} AS bkey, SUM({qty_col}) AS used FROM {table} GROUP BY {batch_key}"
             )).all()
             used_map = {str(r._mapping["bkey"]): int(r._mapping["used"] or 0) for r in rows}
-            # нормализуем null→0
             c.execute(_q("UPDATE batches SET qty_sold = COALESCE(qty_sold,0)"))
-            # обновляем по типу ключа
             if batch_key == "batch_code":
                 for bcode, val in used_map.items():
                     r = c.execute(_q("""
@@ -673,14 +682,13 @@ def _recount_qty_sold_from_ledger() -> int:
                        WHERE batch_code=:bc AND COALESCE(qty_sold,0) <> :v
                     """), {"v": int(val), "bc": bcode})
                     updated += (r.rowcount or 0)
-            else:  # id/batch/bid
+            else:
                 for bid, val in used_map.items():
                     r = c.execute(_q("""
                       UPDATE batches SET qty_sold=:v
                        WHERE id=CAST(:bid AS INT) AND COALESCE(qty_sold,0) <> :v
                     """), {"v": int(val), "bid": bid})
                     updated += (r.rowcount or 0)
-            # поджать отрицательные
             c.execute(_q("UPDATE batches SET qty_sold = qty WHERE qty_sold > qty"))
         else:
             rows = c.execute(
@@ -706,13 +714,9 @@ def _recount_qty_sold_from_ledger() -> int:
     return updated
 
 # ──────────────────────────────────────────────────────────────────────────────
-# FIFO списание
+# FIFO списание (ручное)
 # ──────────────────────────────────────────────────────────────────────────────
 def _fifo_writeoff(sku: str, qty: int, note: Optional[str]) -> Dict[str, Any]:
-    """
-    Списывает qty со склада по FIFO (по партиям), пишет записи в writeoffs,
-    обновляет qty_sold и products.quantity. Возвращает итоги.
-    """
     if qty <= 0:
         raise HTTPException(status_code=400, detail="qty должен быть > 0")
 
@@ -734,7 +738,6 @@ def _fifo_writeoff(sku: str, qty: int, note: Optional[str]) -> Dict[str, Any]:
             take = min(int(r["left"]), need)
             if take <= 0:
                 continue
-            # обновить qty_sold у партии
             if _USE_PG:
                 c.execute(_q("UPDATE batches SET qty_sold = COALESCE(qty_sold,0) + :t WHERE id=:bid"),
                           {"t": int(take), "bid": int(r["id"])})
@@ -748,7 +751,6 @@ def _fifo_writeoff(sku: str, qty: int, note: Optional[str]) -> Dict[str, Any]:
             batches_touched += 1
             need -= int(take)
 
-        # Перестраховка: подрезать перепроданные
         if _USE_PG:
             c.execute(_q("UPDATE batches SET qty_sold = qty WHERE qty_sold > qty"))
         else:
@@ -832,9 +834,7 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
             headers={"Content-Disposition": 'attachment; filename="products.csv"'},
         )
 
-    # ──────────────────────────────────────────────────────────────────────────
     # Ручная загрузка (XML/Excel) → в БД
-    # ──────────────────────────────────────────────────────────────────────────
     def _parse_xml(content: bytes) -> List[Dict[str, Any]]:
         try:
             root = ET.fromstring(content)
@@ -934,6 +934,12 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
         inserted, updated = _upsert_products(normalized)
         normalized.sort(key=lambda x: (x.get("name") or x.get("Name") or x.get("model") or x.get("title") or '').lower())
         return {"count": len(normalized), "items": normalized, "inserted": inserted, "updated": updated}
+
+    # Сохранить таблицу (как на кнопке «Сохранить таблицу в БД»)
+    @router.post("/db/bulk-upsert")
+    async def bulk_upsert(rows: List[Dict[str, Any]] = Body(...), _: bool = Depends(require_api_key)):
+        inserted, updated = _upsert_products(rows or [])
+        return {"inserted": inserted, "updated": updated}
 
     # ──────────────────────────────────────────────────────────────────────────
     # DB: список товаров (+ мета по партиям)
@@ -1079,9 +1085,6 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
 
     @router.put("/db/price-batches/{sku}/{bid}")
     async def update_batch(sku: str, bid: int, payload: Dict[str, Any] = Body(...), _: bool = Depends(require_api_key)):
-        """
-        Редактирование полей партии. Если qty уменьшили ниже qty_sold — qty_sold поджимается.
-        """
         _ensure_schema()
         fields = {
             "date": payload.get("date"),
@@ -1235,6 +1238,8 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
     @router.post("/batches/recount-sold")
     async def batches_recount_sold(_: bool = Depends(require_api_key)):
         changed = _recount_qty_sold_from_ledger()
+        # после протяжки из леджера пересчитаем products.quantity по всем SKU
+        _recompute_all_products_qty()
         return {"ok": True, "updated_batches": int(changed)}
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -1242,16 +1247,11 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
     # ──────────────────────────────────────────────────────────────────────────
     @router.post("/db/writeoff")
     async def writeoff(payload: WriteoffIn = Body(...), _: bool = Depends(require_api_key)):
-        """
-        Списать payload.qty единиц по SKU payload.sku.
-        FIFO по партиям, лог в writeoffs, обновление products.quantity.
-        """
         res = _fifo_writeoff(payload.sku.strip(), int(payload.qty), payload.note)
         return {"ok": True, **res}
 
-    # ── «Бейдж» списаний за текущий (бизнес-)день — по леджеру ────────────────
+    # -- Вспомогалка: окно бизнес-дня (локально по серверу) --
     def _bd_window_today(bd_start: str) -> tuple[str, str]:
-        # простой расчёт на локальном серверном времени
         now = datetime.now()
         m = re.match(r"^(\d{2}):(\d{2})$", bd_start or "")
         hh, mm = (int(m.group(1)), int(m.group(2))) if m else (20, 0)
@@ -1259,8 +1259,33 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
         if now < start:
             start -= timedelta(days=1)
         end = start + timedelta(days=1)
-        # YYYY-MM-DD (совместимо с BETWEEN date/date)
         return start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
+
+    # -- Умный выбор выражения даты для леджера (строка/ts/ts_ms) --
+    def _choose_date_expr(c, table: str, col: str) -> Optional[str]:
+        # кандидаты выражений в порядке приоритета
+        if _USE_PG:
+            variants = [
+                f"{col}::date",
+                f"to_timestamp({col}/1000)::date",
+                f"to_timestamp({col})::date",
+            ]
+        else:
+            variants = [
+                f"substr({col},1,10)",
+                f"date(datetime({col}/1000,'unixepoch','localtime'))",
+                f"date(datetime({col},'unixepoch','localtime'))",
+            ]
+        for expr in variants:
+            try:
+                if _USE_PG:
+                    c.execute(_q(f"SELECT {expr} AS d FROM {table} LIMIT 1"))
+                else:
+                    c.execute(f"SELECT {expr} AS d FROM {table} LIMIT 1")
+                return expr
+            except Exception:
+                continue
+        return None
 
     @router.get("/db/writeoffs/header")
     async def writeoffs_header(
@@ -1269,8 +1294,9 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
         tz: str = Query("Asia/Almaty")  # для совместимости; здесь не используется
     ):
         """
-        Быстрая метрика для «шапки профиля»: сколько было списаний сегодня.
-        Суммирует строки из *таблицы леджера* (если она есть).
+        «Бейдж» в шапке: количество строк и суммарное qty списаний за день.
+        Источник — таблица леджера (если есть).
+        Корректно понимает текстовые даты и числовые ts/ts_ms.
         """
         _ensure_schema()
         with _db() as c:
@@ -1278,52 +1304,49 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
             if not table:
                 return {"count": 0, "total_qty": 0}
 
-            # выбрать дату «бизнес-дня»
             if use_bd:
-                day_from, day_to = _bd_window_today(bd_start)
+                d1, d2 = _bd_window_today(bd_start)
             else:
-                d = datetime.now().strftime("%Y-%m-%d")
-                day_from, day_to = d, d
+                d1 = d2 = datetime.now().strftime("%Y-%m-%d")
 
-            # подобрать колонку даты/времени в леджере
             cols = _lower_cols(c, table)
-            date_col = next((x for x in ("date", "order_date", "created_at", "ts", "timestamp") if x in cols), None)
+            # расширенный список кандидатов
+            candidate_dates = ["date","order_date","created_at","ts","timestamp","ts_ms","date_ms"]
+            date_col = next((x for x in candidate_dates if x in cols), None)
 
             if not date_col:
-                # если нет даты — считаем по всем строкам леджера
+                # нет колонки даты — считаем всё
                 if _USE_PG:
                     row = c.execute(_q(f"SELECT COUNT(*) AS c, COALESCE(SUM({qty_col}),0) AS t FROM {table}")).first()
-                    return {"count": int(row._mapping["c"] or 0), "total_qty": int(row._mapping["t"] or 0)}
+                    return {"count": int(row._mapping['c'] or 0), "total_qty": int(row._mapping['t'] or 0)}
                 else:
-                    r = c.execute(f"SELECT IFNULL(SUM({qty_col}),0) AS t, COUNT(*) AS c FROM {table}").fetchone()
-                    return {"count": int(r["c"] or 0), "total_qty": int(r["t"] or 0)}
+                    r = c.execute(f"SELECT COUNT(*) AS c, IFNULL(SUM({qty_col}),0) AS t FROM {table}").fetchone()
+                    return {"count": int(r['c'] or 0), "total_qty": int(r['t'] or 0)}
 
-            # фильтр по бизнес-дню
+            date_expr = _choose_date_expr(c, table, date_col)
+            if not date_expr:  # совсем плохо — вернём нули
+                return {"count": 0, "total_qty": 0}
+
             if _USE_PG:
                 row = c.execute(_q(
                     f"SELECT COUNT(*) AS c, COALESCE(SUM({qty_col}),0) AS t "
-                    f"FROM {table} WHERE {date_col}::date BETWEEN :d1 AND :d2"
-                ), {"d1": day_from, "d2": day_to}).first()
-                return {"count": int(row._mapping["c"] or 0), "total_qty": int(row._mapping["t"] or 0)}
+                    f"FROM {table} WHERE {date_expr} BETWEEN :d1 AND :d2"
+                ), {"d1": d1, "d2": d2}).first()
+                return {"count": int(row._mapping['c'] or 0), "total_qty": int(row._mapping['t'] or 0)}
             else:
-                row = c.execute(
+                r = c.execute(
                     f"SELECT COUNT(*) AS c, IFNULL(SUM({qty_col}),0) AS t "
-                    f"FROM {table} WHERE substr({date_col},1,10) BETWEEN ? AND ?",
-                    (day_from, day_to)
+                    f"FROM {table} WHERE {date_expr} BETWEEN ? AND ?", (d1, d2)
                 ).fetchone()
-                return {"count": int(row["c"] or 0), "total_qty": int(row["t"] or 0)}
+                return {"count": int(r['c'] or 0), "total_qty": int(r['t'] or 0)}
 
-    # Сводка списаний по writeoffs (UTC ISO-строки)
+    # Сводка по таблице writeoffs (ручные списания)
     @router.get("/db/writeoffs/summary")
     async def writeoffs_summary(
         start: Optional[str] = Query(None, description="UTC ISO: 2025-08-29T00:00:00"),
         end: Optional[str] = Query(None, description="UTC ISO: 2025-08-30T00:00:00"),
         sku: Optional[str] = Query(None)
     ):
-        """
-        Сводка списаний по периоду (UTC ISO-строки). Если период не задан — за последние 30 дней.
-        Источник — таблица writeoffs.
-        """
         _ensure_schema()
         if not start or not end:
             end_dt = datetime.utcnow()
@@ -1349,9 +1372,9 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
                 params: List[Any] = [start_dt.strftime("%Y-%m-%d %H:%M:%S"), end_dt.strftime("%Y-%m-%d %H:%M:%S")]
                 if sku:
                     base += " AND sku = ?"; params.append(sku)
-                row = c.execute(base, params).fetchone()
-                cnt = int(row["cnt"] or 0)
-                total = int(row["total"] or 0)
+                r = c.execute(base, params).fetchone()
+                cnt = int(r["cnt"] or 0)
+                total = int(r["total"] or 0)
         return {"count": cnt, "total_qty": total, "start": start_dt.isoformat(), "end": end_dt.isoformat(), "sku": sku}
 
     return router
