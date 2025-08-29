@@ -105,7 +105,7 @@ orders_cache = TTLCache(maxsize=128, ttl=CACHE_TTL)
 
 app.include_router(get_products_router(client), prefix="/products")
 app.include_router(get_debug_router())
-app.include_router(get_profit_router_v2())
+app.include_router(bridge_v2_router, prefix="/profit")
 
 # -------------------- Utils --------------------
 def tzinfo_of(name: str) -> pytz.BaseTzInfo:
