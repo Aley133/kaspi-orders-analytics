@@ -8,6 +8,7 @@ import secrets
 import io
 import os, shutil
 import sqlite3
+import re
 from xml.etree import ElementTree as ET
 from contextlib import contextmanager
 from datetime import datetime, timedelta, time as dt_time
@@ -604,48 +605,103 @@ class WriteoffIn(BaseModel):
 # ──────────────────────────────────────────────────────────────────────────────
 # FIFO recount helper (exported) — обновляет batches.qty_sold из леджера
 # ──────────────────────────────────────────────────────────────────────────────
+def _lower_cols(c, table: str) -> set[str]:
+    if _USE_PG:
+        rows = c.execute(_q("""
+          SELECT column_name FROM information_schema.columns
+           WHERE table_name=:t
+        """), {"t": table}).all()
+        return {str(r._mapping["column_name"]).lower() for r in rows}
+    else:
+        rows = c.execute(f"PRAGMA table_info({table})").fetchall()
+        return {str(r["name"]).lower() for r in rows}
+
+def _find_ledger_table(c) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """
+    Возвращает (table, batch_key_col, qty_col). batch_key_col может быть id-колонкой
+    ('batch_id'/'bid'/'batch') или кодом партии ('batch_code').
+    """
+    preferred = ["fifo_ledger", "profit_fifo_ledger", "ledger_fifo"]
+    # 1) предпочтительные
+    candidates = list(preferred)
+    # 2) любые таблицы, где в названии встречается 'ledger'
+    if _USE_PG:
+        rows = c.execute(_q("""
+          SELECT table_name FROM information_schema.tables
+           WHERE table_schema = 'public' AND table_name ILIKE '%ledger%'
+        """)).all()
+        extra = [r._mapping["table_name"] for r in rows]
+    else:
+        rows = c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%ledger%'").fetchall()
+        extra = [r["name"] for r in rows]
+    for t in extra:
+        if t not in candidates:
+            candidates.append(t)
+
+    for t in candidates:
+        cols = _lower_cols(c, t)
+        if not cols:
+            continue
+        batch_key = next((x for x in ("batch_id", "bid", "batch", "batch_code") if x in cols), None)
+        qty_col   = next((x for x in ("qty", "quantity", "qty_used", "used_qty") if x in cols), None)
+        if batch_key and qty_col:
+            return t, batch_key, qty_col
+    return None, None, None
+
 def _recount_qty_sold_from_ledger() -> int:
     """Возвращает количество партий, у которых изменился qty_sold."""
     _ensure_schema()
     updated = 0
     with _db() as c:
-        # найти подходящую таблицу леджера
-        ledgers = ["fifo_ledger", "profit_fifo_ledger", "ledger_fifo"]
-        ledger = next((t for t in ledgers if _table_exists(c, t)), None)
-        if not ledger:
+        table, batch_key, qty_col = _find_ledger_table(c)
+        if not table:
             return 0
 
-        # определить имена столбцов
-        batch_col = next((col for col in ("batch_id", "bid", "batch") if _has_column(c, ledger, col)), None)
-        qty_col   = next((col for col in ("qty", "quantity", "qty_used") if _has_column(c, ledger, col)), None)
-        if not batch_col or not qty_col:
-            return 0
-
-        # собрать суммы по партиям
+        # Суммы из леджера по ключу партии
         if _USE_PG:
             rows = c.execute(_q(
-                f"SELECT {batch_col} AS bid, SUM({qty_col}) AS used FROM {ledger} GROUP BY {batch_col}"
+                f"SELECT {batch_key} AS bkey, SUM({qty_col}) AS used FROM {table} GROUP BY {batch_key}"
             )).all()
-            used = {int(r._mapping["bid"]): int(r._mapping["used"] or 0) for r in rows}
-            c.execute(_q("UPDATE batches SET qty_sold = 0 WHERE qty_sold IS NULL"))
-            for bid, val in used.items():
-                r = c.execute(_q("UPDATE batches SET qty_sold=:v WHERE id=:bid AND COALESCE(qty_sold,0) <> :v"),
-                              {"v": int(val), "bid": int(bid)})
-                updated += (r.rowcount or 0)
-        else:
-            rows = c.execute(
-                f"SELECT {batch_col} AS bid, SUM({qty_col}) AS used FROM {ledger} GROUP BY {batch_col}"
-            ).fetchall()
-            used = {int(r["bid"]): int(r["used"] or 0) for r in rows}
-            c.execute("UPDATE batches SET qty_sold = COALESCE(qty_sold,0)")
-            for bid, val in used.items():
-                cur = c.execute("UPDATE batches SET qty_sold=? WHERE id=? AND COALESCE(qty_sold,0) <> ?",
-                                (int(val), int(bid), int(val)))
-                updated += cur.rowcount or 0
-        # защита от отрицательных остатков
-        if _USE_PG:
+            used_map = {str(r._mapping["bkey"]): int(r._mapping["used"] or 0) for r in rows}
+            # нормализуем null→0
+            c.execute(_q("UPDATE batches SET qty_sold = COALESCE(qty_sold,0)"))
+            # обновляем по типу ключа
+            if batch_key == "batch_code":
+                for bcode, val in used_map.items():
+                    r = c.execute(_q("""
+                      UPDATE batches SET qty_sold=:v
+                       WHERE batch_code=:bc AND COALESCE(qty_sold,0) <> :v
+                    """), {"v": int(val), "bc": bcode})
+                    updated += (r.rowcount or 0)
+            else:  # id/batch/bid
+                for bid, val in used_map.items():
+                    r = c.execute(_q("""
+                      UPDATE batches SET qty_sold=:v
+                       WHERE id=CAST(:bid AS INT) AND COALESCE(qty_sold,0) <> :v
+                    """), {"v": int(val), "bid": bid})
+                    updated += (r.rowcount or 0)
+            # поджать отрицательные
             c.execute(_q("UPDATE batches SET qty_sold = qty WHERE qty_sold > qty"))
         else:
+            rows = c.execute(
+                f"SELECT {batch_key} AS bkey, SUM({qty_col}) AS used FROM {table} GROUP BY {batch_key}"
+            ).fetchall()
+            used_map = {str(r["bkey"]): int(r["used"] or 0) for r in rows}
+            c.execute("UPDATE batches SET qty_sold = COALESCE(qty_sold,0)")
+            if batch_key == "batch_code":
+                for bcode, val in used_map.items():
+                    cur = c.execute(
+                        "UPDATE batches SET qty_sold=? WHERE batch_code=? AND COALESCE(qty_sold,0) <> ?",
+                        (int(val), bcode, int(val))
+                    )
+                    updated += cur.rowcount or 0
+            else:
+                for bid, val in used_map.items():
+                    cur = c.execute(
+                        "UPDATE batches SET qty_sold=? WHERE id=? AND COALESCE(qty_sold,0) <> ?",
+                        (int(val), int(bid) if str(bid).isdigit() else -1, int(val))
+                    )
+                    updated += cur.rowcount or 0
             c.execute("UPDATE batches SET qty_sold = qty WHERE qty_sold > qty")
     return updated
 
@@ -1193,84 +1249,71 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
         res = _fifo_writeoff(payload.sku.strip(), int(payload.qty), payload.note)
         return {"ok": True, **res}
 
-    def _period_from_params(use_bd: int, bd_start: str, tz: str) -> Tuple[datetime, datetime]:
-        """
-        Упрощённый расчёт 'сегодня' с поддержкой бизнес-дня.
-        Если use_bd=1, день считается от bd_start (по локальному tz).
-        """
-        try:
-            hh, mm = map(int, (bd_start or "00:00").split(":"))
-        except Exception:
-            hh, mm = 0, 0
-        # локальное «сейчас» — берём системное UTC и сдвигаем вручную на нужный пояс (без внешних lib)
-        # (для простоты: Asia/Almaty = UTC+5 по умолчанию; если другой tz — можно передать смещение через ENV TZ_OFFSET_MIN)
-        tz_offset_min = int(os.getenv("TZ_OFFSET_MIN", "300" if tz == "Asia/Almaty" else "0"))
-        now_utc = datetime.utcnow()
-        now_local = now_utc + timedelta(minutes=tz_offset_min)
-
-        # границы "сегодняшнего бизнес-дня"
-        start_local = now_local.replace(hour=hh, minute=mm, second=0, microsecond=0)
-        if now_local < start_local:
-            start_local = start_local - timedelta(days=1)
-        end_local = start_local + timedelta(days=1)
-
-        start_utc = start_local - timedelta(minutes=tz_offset_min)
-        end_utc = end_local - timedelta(minutes=tz_offset_min)
-        return start_utc, end_utc
+    # ── «Бейдж» списаний за текущий (бизнес-)день — по леджеру ────────────────
+    def _bd_window_today(bd_start: str) -> tuple[str, str]:
+        # простой расчёт на локальном серверном времени
+        now = datetime.now()
+        m = re.match(r"^(\d{2}):(\d{2})$", bd_start or "")
+        hh, mm = (int(m.group(1)), int(m.group(2))) if m else (20, 0)
+        start = datetime.combine(now.date(), dt_time(hh, mm))
+        if now < start:
+            start -= timedelta(days=1)
+        end = start + timedelta(days=1)
+        # YYYY-MM-DD (совместимо с BETWEEN date/date)
+        return start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
 
     @router.get("/db/writeoffs/header")
     async def writeoffs_header(
         use_bd: int = Query(1, description="1 — бизнес-день, 0 — календарный"),
         bd_start: str = Query("20:00"),
-        tz: str = Query("Asia/Almaty")
+        tz: str = Query("Asia/Almaty")  # для совместимости; здесь не используется
     ):
         """
         Быстрая метрика для «шапки профиля»: сколько было списаний сегодня.
-        Возвращает количество событий и суммарное число списанных единиц.
-        По умолчанию — бизнес-день (старт 20:00, Asia/Almaty).
+        Суммирует строки из *таблицы леджера* (если она есть).
         """
         _ensure_schema()
-        if use_bd:
-            start_utc, end_utc = _period_from_params(use_bd, bd_start, tz)
-        else:
-            # календарные сутки по локальному смещению (упрощённо)
-            tz_offset_min = int(os.getenv("TZ_OFFSET_MIN", "300" if tz == "Asia/Almaty" else "0"))
-            now_utc = datetime.utcnow()
-            now_local = now_utc + timedelta(minutes=tz_offset_min)
-            start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
-            end_local = start_local + timedelta(days=1)
-            start_utc = start_local - timedelta(minutes=tz_offset_min)
-            end_utc = end_local - timedelta(minutes=tz_offset_min)
-
         with _db() as c:
-            if _USE_PG:
-                row = c.execute(_q("""
-                    SELECT COUNT(*) AS cnt, COALESCE(SUM(qty),0) AS total
-                      FROM writeoffs
-                     WHERE ts >= :s AND ts < :e
-                """), {"s": start_utc, "e": end_utc}).first()
-                cnt = int(row.cnt or 0)
-                total = int(row.total or 0)
+            table, _bk, qty_col = _find_ledger_table(c)
+            if not table:
+                return {"count": 0, "total_qty": 0}
+
+            # выбрать дату «бизнес-дня»
+            if use_bd:
+                day_from, day_to = _bd_window_today(bd_start)
             else:
-                # SQLite хранит ts в TEXT (UTC). Сравниваем строками ISO, это корректно при формировании ISO формата.
-                s = start_utc.strftime("%Y-%m-%d %H:%M:%S")
-                e = end_utc.strftime("%Y-%m-%d %H:%M:%S")
-                row = c.execute("""
-                    SELECT COUNT(*) AS cnt, COALESCE(SUM(qty),0) AS total
-                      FROM writeoffs
-                     WHERE ts >= ? AND ts < ?
-                """, (s, e)).fetchone()
-                cnt = int(row["cnt"] or 0)
-                total = int(row["total"] or 0)
+                d = datetime.now().strftime("%Y-%m-%d")
+                day_from, day_to = d, d
 
-        return {
-            "count": cnt,
-            "total_qty": total,
-            "use_bd": int(use_bd),
-            "bd_start": bd_start,
-            "tz": tz
-        }
+            # подобрать колонку даты/времени в леджере
+            cols = _lower_cols(c, table)
+            date_col = next((x for x in ("date", "order_date", "created_at", "ts", "timestamp") if x in cols), None)
 
+            if not date_col:
+                # если нет даты — считаем по всем строкам леджера
+                if _USE_PG:
+                    row = c.execute(_q(f"SELECT COUNT(*) AS c, COALESCE(SUM({qty_col}),0) AS t FROM {table}")).first()
+                    return {"count": int(row._mapping["c"] or 0), "total_qty": int(row._mapping["t"] or 0)}
+                else:
+                    r = c.execute(f"SELECT IFNULL(SUM({qty_col}),0) AS t, COUNT(*) AS c FROM {table}").fetchone()
+                    return {"count": int(r["c"] or 0), "total_qty": int(r["t"] or 0)}
+
+            # фильтр по бизнес-дню
+            if _USE_PG:
+                row = c.execute(_q(
+                    f"SELECT COUNT(*) AS c, COALESCE(SUM({qty_col}),0) AS t "
+                    f"FROM {table} WHERE {date_col}::date BETWEEN :d1 AND :d2"
+                ), {"d1": day_from, "d2": day_to}).first()
+                return {"count": int(row._mapping["c"] or 0), "total_qty": int(row._mapping["t"] or 0)}
+            else:
+                row = c.execute(
+                    f"SELECT COUNT(*) AS c, IFNULL(SUM({qty_col}),0) AS t "
+                    f"FROM {table} WHERE substr({date_col},1,10) BETWEEN ? AND ?",
+                    (day_from, day_to)
+                ).fetchone()
+                return {"count": int(row["c"] or 0), "total_qty": int(row["t"] or 0)}
+
+    # Сводка списаний по writeoffs (UTC ISO-строки)
     @router.get("/db/writeoffs/summary")
     async def writeoffs_summary(
         start: Optional[str] = Query(None, description="UTC ISO: 2025-08-29T00:00:00"),
@@ -1279,6 +1322,7 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
     ):
         """
         Сводка списаний по периоду (UTC ISO-строки). Если период не задан — за последние 30 дней.
+        Источник — таблица writeoffs.
         """
         _ensure_schema()
         if not start or not end:
