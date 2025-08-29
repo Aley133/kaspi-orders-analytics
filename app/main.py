@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from cachetools import TTLCache
 from httpx import HTTPStatusError, RequestError
-from app.api.bridge_v2 import get_profit_router_v2
+from app.api.bridge_v2 import router as bridge_v2_router
 # FIFO/Bridge
 
 
