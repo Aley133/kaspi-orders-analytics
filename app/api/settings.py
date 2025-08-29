@@ -6,7 +6,18 @@ from sqlalchemy.orm import Session
 
 from app.schemas.settings import StoreHoursIn, StoreHoursOut
 from app.models.store_settings import StoreSettings
+import os
+from fastapi import APIRouter
 
+router = APIRouter(prefix="/api/settings", tags=["settings"])
+
+@router.get("/store-hours")
+def store_hours():
+    return {
+        "business_day_start": os.getenv("BUSINESS_DAY_START", "20:00"),
+        "timezone": os.getenv("TZ", "Asia/Almaty"),
+    }
+    
 # TODO: Wire up your real DB session dependency
 def get_db():
     raise RuntimeError("Replace get_db() with your project's DB session dependency")
