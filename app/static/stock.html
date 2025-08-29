@@ -54,6 +54,7 @@
     .block{padding:12px}
     .chip{display:inline-flex;align-items:center;gap:6px;background:var(--chip);color:var(--fg);padding:4px 8px;border-radius:999px;font-size:12px}
     .chip .dot{width:8px;height:8px}
+    .spacer{flex:1}
   </style>
 </head>
 <body data-theme="light">
@@ -74,7 +75,15 @@
     </aside>
 
     <main class="content">
-      <h1>Мой склад</h1>
+      <div class="row" style="align-items:baseline; margin-bottom:6px">
+        <h1 style="margin:0">Мой склад</h1>
+        <div class="spacer"></div>
+        <!-- Бейдж списаний за текущий бизнес-день -->
+        <span id="woBadge" class="chip" title="Списаний за сегодня (бизнес-день)">
+          <span class="dot on"></span>
+          <span>Списаний сегодня: <b id="woCount">0</b> (шт: <b id="woQty">0</b>)</span>
+        </span>
+      </div>
 
       <div class="row" style="margin-bottom:10px">
         <label><input id="onlyActive" type="checkbox" checked> Только активные</label>
@@ -241,11 +250,11 @@ async function openDetail(row){
   row.insertAdjacentElement('afterend', tr);
   const mount = tr.firstChild;
 
+  // ⚠️ Убраны ручные кнопки пересчёта/списаний — остаётся только работа с партиями
   mount.innerHTML = `
     <div class="block">
       <div style="display:flex;align-items:center;gap:10px;margin:8px 0 6px">
         <div style="font-weight:600">Партии — <span id="dTitle">${row.cells[1].textContent}</span></div>
-        <button class="btn secondary" id="btnRecount">Пересчитать списания (FIFO)</button>
       </div>
 
       <table style="width:100%" id="btTable">
@@ -261,26 +270,6 @@ async function openDetail(row){
       <div class="row" style="margin-top:8px; gap:8px">
         <button class="btn secondary" id="btnAddRow">+ Добавить</button>
         <button class="btn" id="btnSaveRows">Сохранить новые</button>
-      </div>
-
-      <hr style="border:0;border-top:1px solid var(--line);margin:14px 0">
-
-      <div class="row" style="align-items:center;gap:8px">
-        <b>Продажи SKU</b>
-        <span class="muted">KASPI_DELIVERY</span>
-        <label>за</label>
-        <input type="number" id="salesDays" min="1" step="1" value="7" style="width:80px">
-        <span>дн.</span>
-        <button class="btn secondary" id="btnLoadSales">Показать</button>
-        <button class="btn" id="btnSyncSales">Списать по продажам</button>
-        <span id="salesSummary" class="muted"></span>
-      </div>
-
-      <div style="overflow:auto;max-height:260px;margin-top:6px">
-        <table class="table" id="salesTable">
-          <thead><tr><th>№</th><th>Дата</th><th>Сумма</th></tr></thead>
-          <tbody></tbody>
-        </table>
       </div>
     </div>
   `;
@@ -331,6 +320,8 @@ async function openDetail(row){
       await fetchJSON('/products/db/price-batches/'+encodeURIComponent(sku)+'/'+btn.dataset.id, {method:'DELETE'});
       btn.closest('tr').remove();
       setNote('Партия удалена.', true);
+      await updateWriteoffsChip(); // косметически обновим бейдж
+      await loadDB();
     }catch(err){ setNote('Удаление не удалось: ' + err.message); }
   });
 
@@ -356,89 +347,9 @@ async function openDetail(row){
         body: JSON.stringify({entries})
       });
       setNote('Партии сохранены.', true);
+      await updateWriteoffsChip();
       openDetail(row); // перезагрузим
     }catch(e){ setNote('Сохранение партий не удалось: ' + e.message); }
-  };
-
-  // Пересчёт списаний из продаж
-  qs('#btnRecount', mount).onclick = async ()=>{
-    try{
-      const res = await fetchJSON('/products/batches/recount-sold', {method:'POST'});
-      setNote(`Пересчёт списаний выполнен (затронуто партий: ${res.updated_batches||0}).`, true);
-      openDetail(row);
-    }catch(e){ setNote('Пересчёт не удался: ' + e.message); }
-  };
-
-  // ---- Продажи по SKU + списание FIFO ----
-  function isoToday(){ return new Date().toISOString().slice(0,10); }
-  function isoDaysAgo(d){
-    const dt = new Date(); dt.setDate(dt.getDate() - d);
-    return dt.toISOString().slice(0,10);
-  }
-
-  async function loadSalesForSku(sku, days){
-    const start = isoDaysAgo(days);
-    const end   = isoToday();
-    const params = new URLSearchParams({
-      start, end, tz:'Asia/Almaty', date_field:'creationDate',
-      states:'KASPI_DELIVERY', exclude_states:'CANCELED',
-      use_bd:'1', business_day_start:'20:00',
-      order:'desc', grouped:'0', limit:'100000', with_items:'1'
-    });
-    const data = await fetchJSON('/orders/ids?' + params.toString());
-    const rows = (data.items||[]).filter(x => String(x.sku) === String(sku));
-    // таблица
-    const tb = qs('#salesTable tbody', mount); tb.innerHTML = '';
-    rows.slice(0,200).forEach(it=>{
-      const tr = document.createElement('tr');
-      tr.innerHTML = `<td>${it.number}</td><td>${it.date.slice(0,16).replace('T',' ')}</td><td>${fmt(it.amount)} KZT</td>`;
-      tb.appendChild(tr);
-    });
-    qs('#salesSummary', mount).textContent = rows.length
-      ? `найдено: ${rows.length} шт., сумма: ${fmt(rows.reduce((a,r)=>a+(r.amount||0),0))} KZT`
-      : 'нет продаж за выбранный период';
-    return { rows, start, end };
-  }
-
-  qs('#btnLoadSales', mount).onclick = async ()=>{
-    try{
-      await loadSalesForSku(sku, Number(qs('#salesDays', mount).value||7));
-    }catch(e){ setNote('Загрузка продаж не удалась: ' + e.message); }
-  };
-
-  qs('#btnSyncSales', mount).onclick = async ()=>{
-    try{
-      const days = Number(qs('#salesDays', mount).value||7);
-      const { rows, start, end } = await loadSalesForSku(sku, days);
-      if(!rows.length){ setNote('Нет продаж для списания.'); return; }
-
-      // 1) апсертом в FIFO-продажи
-      const orders = rows.map(x => ({
-        id: x.id,
-        date: x.date,
-        customer: null,
-        items: [{ sku: String(x.sku), qty: 1, unit_price: Number(x.amount||0) }]
-      }));
-      await fetchJSON('/profit/orders/upsert-bulk', {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ orders })
-      });
-
-      // 2) пересчитать леджер за период
-      await fetchJSON(`/profit/rebuild-ledger?date_from=${start}&date_to=${end}`, { method:'POST' });
-
-      // 3) протянуть qty_sold/left в партии
-      await fetchJSON('/products/batches/recount-sold', { method:'POST' });
-
-      setNote('Продажи синхронизированы и списания применены.', true);
-
-      // обновим детали и список
-      await loadDB();
-      openDetail(row);
-    }catch(e){
-      setNote('Списание по продажам не удалось: ' + e.message);
-    }
   };
 }
 
@@ -454,6 +365,114 @@ function tableToRows(){
     const active = t[6].querySelector('.dot')?.classList.contains('on') || false;
     return { code, name, brand, category, qty, price, active };
   });
+}
+
+// === Авто-синк продаж → леджер → списания (без кнопок) ===
+async function getStoreHours(){
+  try{
+    const j = await fetchJSON('/api/settings/store-hours');
+    return {
+      use_bd: 1,
+      bd_start: (j?.business_day_start || '20:00'),
+      tz: (j?.timezone || 'Asia/Almaty')
+    };
+  }catch(_){
+    return { use_bd: 1, bd_start:'20:00', tz:'Asia/Almaty' };
+  }
+}
+function businessDayWindow(bd_start='20:00', tz='Asia/Almaty'){
+  // простая реализация: Asia/Almaty => +5 часов
+  const tzOffsetMin = Number(localStorage.getItem('TZ_OFFSET_MIN')) || (tz==='Asia/Almaty' ? 300 : 0);
+  const nowUTC = new Date();
+  const nowLocal = new Date(nowUTC.getTime() + tzOffsetMin*60000);
+  const [hh,mm] = bd_start.split(':').map(Number);
+  const startLocal = new Date(nowLocal); startLocal.setHours(hh||0, mm||0, 0, 0);
+  if(nowLocal < startLocal) startLocal.setDate(startLocal.getDate()-1);
+  const endLocal = new Date(startLocal); endLocal.setDate(endLocal.getDate()+1);
+  const startUTC = new Date(startLocal.getTime() - tzOffsetMin*60000);
+  const endUTC   = new Date(endLocal.getTime() - tzOffsetMin*60000);
+  return { startUTC, endUTC, tzOffsetMin };
+}
+
+async function autoSyncWriteoffs(){
+  try{
+    setNote('Автосинхронизация списаний…');
+    const { bd_start, tz } = await getStoreHours();
+    const { startUTC, endUTC } = businessDayWindow(bd_start, tz);
+
+    // 1) тянем заказы за текущий бизнес-день
+    const p = new URLSearchParams({
+      start: startUTC.toISOString().slice(0,19),
+      end:   endUTC.toISOString().slice(0,19),
+      tz, date_field:'creationDate',
+      states:'KASPI_DELIVERY', exclude_states:'CANCELED',
+      use_bd:'0', order:'desc', grouped:'0', limit:'100000', with_items:'1'
+    });
+    const data = await fetchJSON('/orders/ids?'+p.toString());
+    const rows = data.items || [];
+
+    // 2) собираем массив orders для upsert (группируем по orderId)
+    const byId = new Map();
+    for(const r of rows){
+      const oid = String(r.id || r.number || r.orderId || '');
+      if(!oid) continue;
+      const key = oid;
+      if(!byId.has(key)){
+        byId.set(key, {
+          id: oid,
+          date: r.date || r.creationDate || new Date().toISOString(),
+          customer: null,
+          items: []
+        });
+      }
+      const pkg = byId.get(key);
+      const sku = String(r.sku || r.code || r.vendorCode || r.barcode || '');
+      if(!sku) continue;
+      const unit_price = Number(r.amount || r.price || 0);
+      // агрегируем по SKU внутри заказа
+      const ex = pkg.items.find(it=>it.sku===sku);
+      if(ex){ ex.qty += 1; ex.unit_price = unit_price || ex.unit_price; }
+      else { pkg.items.push({ sku, qty: 1, unit_price }); }
+    }
+    const orders = [...byId.values()];
+    // если нечего, просто обновим бейдж и выходим
+    if(!orders.length){
+      await updateWriteoffsChip();
+      setNote('Автосинхронизация: нет новых продаж за бизнес-день.', true);
+      return;
+    }
+
+    // 3) апсертим заказы
+    await fetchJSON('/profit/orders/upsert-bulk', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ orders })
+    });
+
+    // 4) пересобираем леджер за период
+    const q2 = new URLSearchParams({ date_from: startUTC.toISOString().slice(0,10), date_to: endUTC.toISOString().slice(0,10) });
+    await fetchJSON('/profit/rebuild-ledger?'+q2.toString(), { method:'POST' });
+
+    // 5) протягиваем qty_sold в партии
+    await fetchJSON('/products/batches/recount-sold', { method:'POST' });
+
+    // 6) обновляем UI
+    await updateWriteoffsChip();
+    await loadDB();
+    setNote('Автосинхронизация списаний выполнена.', true);
+  }catch(e){
+    setNote('Автосинхронизация не удалась: ' + e.message);
+  }
+}
+
+// === Бейдж списаний в шапке ===
+async function updateWriteoffsChip(){
+  try{
+    const { bd_start, tz } = await getStoreHours();
+    const p = new URLSearchParams({ use_bd:'1', bd_start, tz });
+    const j = await fetchJSON('/products/db/writeoffs/header?'+p.toString());
+    qs('#woCount').textContent = (j?.count ?? 0);
+    qs('#woQty').textContent = (j?.total_qty ?? 0);
+  }catch(_){}
 }
 
 document.addEventListener('DOMContentLoaded', async ()=>{
@@ -492,6 +511,7 @@ document.addEventListener('DOMContentLoaded', async ()=>{
       if(res?.integrity === 'ok') setNote('БД восстановлена (integrity=ok).', true);
       else setNote('БД загружена, но integrity_check != ok.');
       await loadDB();
+      await updateWriteoffsChip();
     }catch(err){ setNote('Восстановление БД не удалось: ' + err.message); }
     e.target.value = '';
   });
@@ -513,6 +533,7 @@ document.addEventListener('DOMContentLoaded', async ()=>{
       });
       setNote(`Сохранено в БД: вставлено ${res.inserted||0}, обновлено ${res.updated||0}`, true);
       await loadDB();
+      await updateWriteoffsChip();
     }catch(e){ setNote('Сохранение в БД не удалось: ' + e.message); }
   };
 
@@ -523,8 +544,12 @@ document.addEventListener('DOMContentLoaded', async ()=>{
     window.location = '/products/db/export.csv?' + p.toString();
   };
 
-  // авто-загрузка из БД
-  loadDB();
+  // 1) Авто-синк списаний (за текущий бизнес-день)
+  await autoSyncWriteoffs();
+
+  // 2) Загрузим БД и бейдж (на случай пустой синхронизации)
+  await loadDB();
+  await updateWriteoffsChip();
 });
 </script>
 
