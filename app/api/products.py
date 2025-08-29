@@ -1,5 +1,6 @@
 # app/api/products.py
 from __future__ import annotations
+
 from typing import Callable, Optional, List, Dict, Any, Tuple
 from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Body, Depends, Request
 from fastapi.responses import Response, FileResponse
@@ -158,6 +159,7 @@ def _lower_cols(c, table: str) -> set[str]:
 def _ensure_schema():
     if _USE_PG:
         with _db() as c:
+            # products
             c.execute(_q("""
             CREATE TABLE IF NOT EXISTS products(
                 sku TEXT PRIMARY KEY,
@@ -171,6 +173,7 @@ def _ensure_schema():
                 updated_at TIMESTAMP DEFAULT NOW()
             );
             """))
+            # batches
             c.execute(_q("""
             CREATE TABLE IF NOT EXISTS batches(
                 id SERIAL PRIMARY KEY,
@@ -185,6 +188,7 @@ def _ensure_schema():
                 created_at TIMESTAMP DEFAULT NOW()
             );
             """))
+            # categories
             c.execute(_q("""
             CREATE TABLE IF NOT EXISTS categories(
                 name TEXT PRIMARY KEY,
@@ -193,7 +197,7 @@ def _ensure_schema():
                 tax_percent DOUBLE PRECISION DEFAULT 0.0
             );
             """))
-            # лог списаний
+            # writeoffs
             c.execute(_q("""
             CREATE TABLE IF NOT EXISTS writeoffs(
                 id SERIAL PRIMARY KEY,
@@ -206,7 +210,7 @@ def _ensure_schema():
             """))
             c.execute(_q("CREATE INDEX IF NOT EXISTS idx_writeoffs_ts ON writeoffs(ts)"))
             c.execute(_q("CREATE INDEX IF NOT EXISTS idx_writeoffs_sku ON writeoffs(sku)"))
-            # миграции «на лету»
+            # migrations: batches.qty_sold
             c.execute(_q("""
             DO $$
             BEGIN
@@ -218,9 +222,53 @@ def _ensure_schema():
               END IF;
             END$$;
             """))
+            # migrations: writeoffs add order fields
+            c.execute(_q("""
+            DO $$
+            BEGIN
+              IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                 WHERE table_name='writeoffs' AND column_name='order_id'
+              ) THEN
+                ALTER TABLE writeoffs ADD COLUMN order_id   TEXT;
+              END IF;
+              IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                 WHERE table_name='writeoffs' AND column_name='order_code'
+              ) THEN
+                ALTER TABLE writeoffs ADD COLUMN order_code TEXT;
+              END IF;
+              IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                 WHERE table_name='writeoffs' AND column_name='line_index'
+              ) THEN
+                ALTER TABLE writeoffs ADD COLUMN line_index INTEGER;
+              END IF;
+            END$$;
+            """))
+            # order_writeoffs table
+            c.execute(_q("""
+            CREATE TABLE IF NOT EXISTS order_writeoffs(
+              id SERIAL PRIMARY KEY,
+              ts TIMESTAMP DEFAULT NOW(),
+              order_id   TEXT NOT NULL,
+              order_code TEXT,
+              line_index INTEGER NOT NULL,
+              sku        TEXT NOT NULL,
+              qty        INTEGER NOT NULL,
+              unit_price DOUBLE PRECISION,
+              total_price DOUBLE PRECISION,
+              note       TEXT,
+              CONSTRAINT order_writeoffs_uniq UNIQUE(order_id, line_index)
+            );
+            """))
+            c.execute(_q("CREATE INDEX IF NOT EXISTS ix_order_writeoffs_ts ON order_writeoffs(ts)"))
+            c.execute(_q("CREATE INDEX IF NOT EXISTS ix_order_writeoffs_sku ON order_writeoffs(sku)"))
+
             c.execute(_q("CREATE INDEX IF NOT EXISTS idx_batches_sku  ON batches(sku)"))
             c.execute(_q("CREATE INDEX IF NOT EXISTS idx_batches_date ON batches(date)"))
-            # batch_code для старых строк
+
+            # fill batch_code for old rows
             c.execute(_q("""
             UPDATE batches
                SET batch_code = CONCAT(
@@ -280,13 +328,42 @@ def _ensure_schema():
                 batch_id INTEGER
             );
             """)
-            cols = {r["name"] for r in c.execute("PRAGMA table_info(batches)")}
-            if "commission_pct" not in cols:
+            # batches columns
+            cols_b = {r["name"] for r in c.execute("PRAGMA table_info(batches)")}
+            if "commission_pct" not in cols_b:
                 c.execute("ALTER TABLE batches ADD COLUMN commission_pct REAL")
-            if "batch_code" not in cols:
+            if "batch_code" not in cols_b:
                 c.execute("ALTER TABLE batches ADD COLUMN batch_code TEXT")
-            if "qty_sold" not in cols:
+            if "qty_sold" not in cols_b:
                 c.execute("ALTER TABLE batches ADD COLUMN qty_sold INTEGER DEFAULT 0")
+            # writeoffs columns (order context)
+            cols_w = {r["name"] for r in c.execute("PRAGMA table_info(writeoffs)")}
+            if "order_id" not in cols_w:
+                c.execute("ALTER TABLE writeoffs ADD COLUMN order_id TEXT")
+            if "order_code" not in cols_w:
+                c.execute("ALTER TABLE writeoffs ADD COLUMN order_code TEXT")
+            if "line_index" not in cols_w:
+                c.execute("ALTER TABLE writeoffs ADD COLUMN line_index INTEGER")
+
+            # order_writeoffs table + indexes
+            c.executescript("""
+            CREATE TABLE IF NOT EXISTS order_writeoffs(
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              ts TEXT DEFAULT CURRENT_TIMESTAMP,
+              order_id   TEXT NOT NULL,
+              order_code TEXT,
+              line_index INTEGER NOT NULL,
+              sku        TEXT NOT NULL,
+              qty        INTEGER NOT NULL,
+              unit_price REAL,
+              total_price REAL,
+              note       TEXT,
+              UNIQUE(order_id, line_index)
+            );
+            CREATE INDEX IF NOT EXISTS ix_order_writeoffs_ts  ON order_writeoffs(ts);
+            CREATE INDEX IF NOT EXISTS ix_order_writeoffs_sku ON order_writeoffs(sku);
+            """)
+
             c.execute("CREATE INDEX IF NOT EXISTS idx_batches_sku  ON batches(sku)")
             c.execute("CREATE INDEX IF NOT EXISTS idx_batches_date ON batches(date)")
             c.execute("CREATE INDEX IF NOT EXISTS idx_writeoffs_ts  ON writeoffs(ts)")
@@ -419,14 +496,12 @@ def _recompute_all_products_qty():
                        ) b
                  WHERE p.sku = b.sku
             """))
-            # нули для тех, у кого нет партий
             c.execute(_q("""
                 UPDATE products p
                    SET quantity = 0, updated_at = NOW()
                  WHERE NOT EXISTS (SELECT 1 FROM batches b WHERE b.sku = p.sku)
             """))
         else:
-            # проще: обнулим и накатим суммой
             c.execute("UPDATE products SET quantity=0, updated_at=datetime('now')")
             rows = c.execute("""
                 SELECT sku, SUM(qty-COALESCE(qty_sold,0)) AS left
@@ -631,6 +706,21 @@ class WriteoffIn(BaseModel):
     qty: int
     note: str | None = None
 
+# Новые модели: списание по позиции заказа
+class OrderWriteoffIn(BaseModel):
+    order_id: str
+    line_index: int
+    sku: str
+    qty: int
+    order_code: str | None = None
+    unit_price: float | None = None
+    total_price: float | None = None
+    ts_ms: int | None = None
+    note: str | None = None
+
+class OrderWriteoffBulk(BaseModel):
+    rows: List[OrderWriteoffIn]
+
 # ──────────────────────────────────────────────────────────────────────────────
 # FIFO recount helper — обновляет batches.qty_sold из леджера
 # ──────────────────────────────────────────────────────────────────────────────
@@ -714,9 +804,16 @@ def _recount_qty_sold_from_ledger() -> int:
     return updated
 
 # ──────────────────────────────────────────────────────────────────────────────
-# FIFO списание (ручное)
+# FIFO списание (ручное/по заказу)
 # ──────────────────────────────────────────────────────────────────────────────
-def _fifo_writeoff(sku: str, qty: int, note: Optional[str]) -> Dict[str, Any]:
+def _fifo_writeoff(
+    sku: str,
+    qty: int,
+    note: Optional[str],
+    order_id: Optional[str] = None,
+    order_code: Optional[str] = None,
+    line_index: Optional[int] = None
+) -> Dict[str, Any]:
     if qty <= 0:
         raise HTTPException(status_code=400, detail="qty должен быть > 0")
 
@@ -741,12 +838,18 @@ def _fifo_writeoff(sku: str, qty: int, note: Optional[str]) -> Dict[str, Any]:
             if _USE_PG:
                 c.execute(_q("UPDATE batches SET qty_sold = COALESCE(qty_sold,0) + :t WHERE id=:bid"),
                           {"t": int(take), "bid": int(r["id"])})
-                c.execute(_q("INSERT INTO writeoffs(sku,qty,note,batch_id) VALUES(:sku,:q,:note,:bid)"),
-                          {"sku": sku, "q": int(take), "note": note, "bid": int(r["id"])})
+                c.execute(_q("""
+                    INSERT INTO writeoffs(sku,qty,note,batch_id,order_id,order_code,line_index)
+                    VALUES(:sku,:q,:note,:bid,:oid,:ocode,:lidx)
+                """), {"sku": sku, "q": int(take), "note": note,
+                       "bid": int(r["id"]), "oid": order_id,
+                       "ocode": order_code, "lidx": line_index})
             else:
                 c.execute("UPDATE batches SET qty_sold = COALESCE(qty_sold,0) + ? WHERE id=?", (int(take), int(r["id"])))
-                c.execute("INSERT INTO writeoffs(sku,qty,note,batch_id) VALUES(?,?,?,?)",
-                          (sku, int(take), note, int(r["id"])))
+                c.execute("""
+                  INSERT INTO writeoffs(sku,qty,note,batch_id,order_id,order_code,line_index)
+                  VALUES(?,?,?,?,?,?,?)
+                """, (sku, int(take), note, int(r["id"]), order_id, order_code, line_index))
             total_written += int(take)
             batches_touched += 1
             need -= int(take)
@@ -1238,7 +1341,6 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
     @router.post("/batches/recount-sold")
     async def batches_recount_sold(_: bool = Depends(require_api_key)):
         changed = _recount_qty_sold_from_ledger()
-        # после протяжки из леджера пересчитаем products.quantity по всем SKU
         _recompute_all_products_qty()
         return {"ok": True, "updated_batches": int(changed)}
 
@@ -1308,7 +1410,6 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
 
             # Подбираем выражение даты
             if _USE_PG:
-                # Postgres: ts_ms -> to_timestamp(col/1000)::date, иначе ::date
                 date_expr = f"to_timestamp({date_col}/1000)::date" if date_col.endswith("_ms") else f"{date_col}::date"
                 row = c.execute(_q(f"""
                     SELECT COUNT(*) AS c, COALESCE(SUM({qty_col}),0) AS t
@@ -1318,7 +1419,6 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
                 return {"count": int(row._mapping["c"] or 0),
                         "total_qty": int(row._mapping["t"] or 0)}
             else:
-                # SQLite: ts_ms -> date(datetime(col/1000,'unixepoch','localtime')), текст -> substr(...,1,10)
                 date_expr = (
                     f"date(datetime({date_col}/1000,'unixepoch','localtime'))"
                     if date_col.endswith("_ms")
@@ -1367,5 +1467,203 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
                 cnt = int(r["cnt"] or 0)
                 total = int(r["total"] or 0)
         return {"count": cnt, "total_qty": total, "start": start_dt.isoformat(), "end": end_dt.isoformat(), "sku": sku}
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Списание по позиции заказа (идемпотентность по (order_id, line_index))
+    # ──────────────────────────────────────────────────────────────────────────
+    @router.post("/db/writeoff/by-order")
+    async def writeoff_by_order(p: OrderWriteoffIn = Body(...), _: bool = Depends(require_api_key)):
+        _ensure_schema()
+        # идемпотентность
+        with _db() as c:
+            ex = (c.execute(_q("SELECT 1 FROM order_writeoffs WHERE order_id=:o AND line_index=:i"),
+                            {"o": p.order_id, "i": int(p.line_index)}).first()
+                  if _USE_PG
+                  else c.execute("SELECT 1 FROM order_writeoffs WHERE order_id=? AND line_index=?",
+                                 (p.order_id, int(p.line_index))).fetchone())
+            if ex:
+                return {"ok": True, "skipped": True, "reason": "already_written"}
+
+        # FIFO-списание с контекстом заказа
+        res = _fifo_writeoff(
+            p.sku.strip(), int(p.qty), p.note,
+            order_id=p.order_id.strip(),
+            order_code=(p.order_code or None),
+            line_index=int(p.line_index)
+        )
+
+        # записываем «шапку» позиции заказа
+        ts_val_pg = None
+        ts_val_sqlite = None
+        if p.ts_ms:
+            dt = datetime.utcfromtimestamp(p.ts_ms/1000.0)
+            ts_val_pg = dt
+            ts_val_sqlite = dt.strftime("%Y-%m-%d %H:%M:%S")
+
+        with _db() as c:
+            if _USE_PG:
+                c.execute(_q("""
+                  INSERT INTO order_writeoffs(order_id,order_code,line_index,sku,qty,unit_price,total_price,note,ts)
+                  VALUES(:o,:oc,:i,:s,:q,:u,:t,:n, COALESCE(:ts, NOW()))
+                """), {"o": p.order_id, "oc": p.order_code, "i": int(p.line_index),
+                       "s": p.sku, "q": int(p.qty),
+                       "u": float(p.unit_price) if p.unit_price is not None else None,
+                       "t": float(p.total_price) if p.total_price is not None else None,
+                       "n": p.note, "ts": ts_val_pg})
+            else:
+                c.execute("""
+                  INSERT INTO order_writeoffs(order_id,order_code,line_index,sku,qty,unit_price,total_price,note,ts)
+                  VALUES(?,?,?,?,?,?,?,?, COALESCE(?, CURRENT_TIMESTAMP))
+                """, (p.order_id, p.order_code, int(p.line_index), p.sku, int(p.qty),
+                      float(p.unit_price) if p.unit_price is not None else None,
+                      float(p.total_price) if p.total_price is not None else None,
+                      p.note, ts_val_sqlite))
+
+        return {"ok": True, **res}
+
+    @router.post("/db/writeoff/by-order/bulk")
+    async def writeoff_by_order_bulk(payload: OrderWriteoffBulk = Body(...), _: bool = Depends(require_api_key)):
+        _ensure_schema()
+        out = []
+        for p in payload.rows or []:
+            try:
+                r = await writeoff_by_order(p)
+                out.append({"ok": True, **r, "order_id": p.order_id, "line_index": int(p.line_index),
+                            "sku": p.sku, "qty": int(p.qty)})
+            except HTTPException as e:
+                out.append({"ok": False, "order_id": p.order_id, "line_index": int(p.line_index),
+                            "sku": p.sku, "error": e.detail})
+            except Exception as e:
+                out.append({"ok": False, "order_id": p.order_id, "line_index": int(p.line_index),
+                            "sku": p.sku, "error": str(e)})
+        return {"results": out}
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Отчёты
+    # ──────────────────────────────────────────────────────────────────────────
+    @router.get("/db/report/periods")
+    async def report_periods(
+        start: Optional[str] = Query(None),
+        end: Optional[str] = Query(None),
+        limit: int = Query(60, ge=1, le=365)
+    ):
+        _ensure_schema()
+        if not start or not end:
+            end_dt = datetime.utcnow()
+            start_dt = end_dt - timedelta(days=limit)
+        else:
+            end_dt = datetime.fromisoformat(end.replace("Z",""))
+            start_dt = datetime.fromisoformat(start.replace("Z",""))
+
+        if _USE_PG:
+            sql = """
+            SELECT
+              (ow.ts::date) AS period,
+              SUM(COALESCE(ow.total_price, ow.unit_price*ow.qty))                                                   AS revenue,
+              SUM(COALESCE(w.qty,0) * COALESCE(ow.unit_price,0) * COALESCE(b.commission_pct,0)/100.0)              AS commission,
+              SUM(COALESCE(w.qty,0) * COALESCE(b.unit_cost,0))                                                     AS cost,
+              SUM(COALESCE(ow.total_price, ow.unit_price*ow.qty)
+                  - COALESCE(w.qty,0)*COALESCE(ow.unit_price,0)*COALESCE(b.commission_pct,0)/100.0
+                  - COALESCE(w.qty,0)*COALESCE(b.unit_cost,0))                                                     AS profit
+            FROM order_writeoffs ow
+            LEFT JOIN writeoffs w
+              ON w.order_id = ow.order_id AND w.line_index = ow.line_index AND w.sku = ow.sku
+            LEFT JOIN batches b ON b.id = w.batch_id
+            WHERE ow.ts >= :s AND ow.ts < :e
+            GROUP BY 1
+            ORDER BY 1 DESC
+            """
+            with _db() as c:
+                rows = [dict(r._mapping) for r in c.execute(_q(sql), {"s": start_dt, "e": end_dt}).all()]
+        else:
+            sql = """
+            SELECT
+              substr(ow.ts,1,10) AS period,
+              SUM(COALESCE(ow.total_price, ow.unit_price*ow.qty))                                                   AS revenue,
+              SUM(COALESCE(w.qty,0) * COALESCE(ow.unit_price,0) * COALESCE(b.commission_pct,0)/100.0)              AS commission,
+              SUM(COALESCE(w.qty,0) * COALESCE(b.unit_cost,0))                                                     AS cost,
+              SUM(COALESCE(ow.total_price, ow.unit_price*ow.qty)
+                  - COALESCE(w.qty,0)*COALESCE(ow.unit_price,0)*COALESCE(b.commission_pct,0)/100.0
+                  - COALESCE(w.qty,0)*COALESCE(b.unit_cost,0))                                                     AS profit
+            FROM order_writeoffs ow
+            LEFT JOIN writeoffs w
+              ON w.order_id = ow.order_id AND w.line_index = ow.line_index AND w.sku = ow.sku
+            LEFT JOIN batches b ON b.id = w.batch_id
+            WHERE ow.ts >= ? AND ow.ts < ?
+            GROUP BY 1
+            ORDER BY 1 DESC
+            """
+            with _db() as c:
+                rows = [dict(r) for r in c.execute(sql, (start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                                                         end_dt.strftime("%Y-%m-%d %H:%M:%S"))).fetchall()]
+        for r in rows:
+            for k in ("revenue","commission","cost","profit"):
+                r[k] = round(float(r.get(k) or 0), 2)
+        return {"rows": rows}
+
+    @router.get("/db/report/top-lines")
+    async def report_top_lines(
+        start: Optional[str] = Query(None),
+        end: Optional[str] = Query(None),
+        limit: int = Query(100, ge=1, le=1000)
+    ):
+        _ensure_schema()
+        if not start or not end:
+            end_dt = datetime.utcnow()
+            start_dt = end_dt - timedelta(days=30)
+        else:
+            end_dt = datetime.fromisoformat(end.replace("Z",""))
+            start_dt = datetime.fromisoformat(start.replace("Z",""))
+
+        base_pg = """
+          SELECT
+            ow.order_code, ow.order_id, ow.line_index, ow.sku, ow.qty,
+            COALESCE(ow.total_price, ow.unit_price*ow.qty)                                                        AS revenue,
+            SUM(COALESCE(w.qty,0) * COALESCE(ow.unit_price,0) * COALESCE(b.commission_pct,0)/100.0)               AS commission,
+            SUM(COALESCE(w.qty,0) * COALESCE(b.unit_cost,0))                                                     AS cost,
+            COALESCE(ow.total_price, ow.unit_price*ow.qty)
+              - SUM(COALESCE(w.qty,0)*COALESCE(ow.unit_price,0)*COALESCE(b.commission_pct,0)/100.0)
+              - SUM(COALESCE(w.qty,0)*COALESCE(b.unit_cost,0))                                                   AS profit
+          FROM order_writeoffs ow
+          LEFT JOIN writeoffs w
+            ON w.order_id = ow.order_id AND w.line_index = ow.line_index AND w.sku = ow.sku
+          LEFT JOIN batches b ON b.id = w.batch_id
+          WHERE ow.ts >= :s AND ow.ts < :e
+          GROUP BY ow.order_code, ow.order_id, ow.line_index, ow.sku, ow.qty, ow.unit_price, ow.total_price
+          ORDER BY profit DESC
+          LIMIT :lim
+        """
+        base_sqlite = """
+          SELECT
+            ow.order_code, ow.order_id, ow.line_index, ow.sku, ow.qty,
+            COALESCE(ow.total_price, ow.unit_price*ow.qty)                                                        AS revenue,
+            SUM(COALESCE(w.qty,0) * COALESCE(ow.unit_price,0) * COALESCE(b.commission_pct,0)/100.0)               AS commission,
+            SUM(COALESCE(w.qty,0) * COALESCE(b.unit_cost,0))                                                     AS cost,
+            COALESCE(ow.total_price, ow.unit_price*ow.qty)
+              - SUM(COALESCE(w.qty,0)*COALESCE(ow.unit_price,0)*COALESCE(b.commission_pct,0)/100.0)
+              - SUM(COALESCE(w.qty,0)*COALESCE(b.unit_cost,0))                                                   AS profit
+          FROM order_writeoffs ow
+          LEFT JOIN writeoffs w
+            ON w.order_id = ow.order_id AND w.line_index = ow.line_index AND w.sku = ow.sku
+          LEFT JOIN batches b ON b.id = w.batch_id
+          WHERE ow.ts >= ? AND ow.ts < ?
+          GROUP BY ow.order_code, ow.order_id, ow.line_index, ow.sku, ow.qty, ow.unit_price, ow.total_price
+          ORDER BY profit DESC
+          LIMIT ?
+        """
+
+        with _db() as c:
+            if _USE_PG:
+                rows = [dict(r._mapping) for r in c.execute(_q(base_pg),
+                        {"s": start_dt, "e": end_dt, "lim": limit}).all()]
+            else:
+                rows = [dict(r) for r in c.execute(base_sqlite,
+                        (start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                         end_dt.strftime("%Y-%m-%d %H:%M:%S"), limit)).fetchall()]
+
+        for r in rows:
+            for k in ("revenue","commission","cost","profit"):
+                r[k] = round(float(r.get(k) or 0), 2)
+        return {"rows": rows}
 
     return router
