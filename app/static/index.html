@@ -55,10 +55,13 @@
     .order-table{width:100%;border-collapse:collapse;margin:6px 0 12px}
     .order-table th,.order-table td{padding:6px 8px;border-bottom:1px solid var(--line);font-size:13px}
 
-    .note{margin:8px 0 12px;padding:8px 10px;border-radius:10px;display:none}
-    .note.ok{display:block;background:color-mix(in oklab, var(--accent) 12%, transparent);border:1px solid color-mix(in oklab, var(--accent) 45%, transparent);color:var(--fg)}
-    .note.err{display:block;background:color-mix(in oklab, var(--danger) 12%, transparent);border:1px solid color-mix(in oklab, var(--danger) 45%, transparent);color:var(--fg)}
-    .muted{color:var(--muted)}
+    .note{margin:8px 0 12px;padding:10px 12px;border-radius:10px;display:none}
+    .note.ok,.note.progress{display:block;background:color-mix(in oklab, var(--accent) 14%, transparent);border:1px solid color-mix(in oklab, var(--accent) 48%, transparent);color:var(--fg)}
+    .note.err{display:block;background:color-mix(in oklab, var(--danger) 14%, transparent);border:1px solid color-mix(in oklab, var(--danger) 48%, transparent);color:var(--fg)}
+    .note .small{font-size:12px;color:var(--muted)}
+
+    .progress {height:10px;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:rgba(255,255,255,.04);margin-top:6px}
+    .progress .bar{height:100%;width:0%;background:var(--accent);transition:width .2s}
 
     .ids-summary{margin:8px 0}
     .ids-actions{display:flex;gap:8px;margin:8px 0;flex-wrap:wrap}
@@ -122,6 +125,7 @@
         </div>
       </form>
 
+      <!-- ЗЕЛЕНАЯ ПЛАШКА: статус/прогресс/итог -->
       <div id="note" class="note"></div>
 
       <!-- KPI ПЕРИОДА -->
@@ -221,33 +225,46 @@
 /* ─────────── ХЕЛПЕРЫ ─────────── */
 const nf = new Intl.NumberFormat('ru-RU');
 function fmt(n){ return nf.format(Math.round((Number(n) + Number.EPSILON) * 100) / 100); }
-function setNote(msg, ok=false){ const el = document.getElementById('note'); el.textContent = msg; el.className = 'note ' + (ok ? 'ok' : 'err'); }
-
-const DEFAULT_TIMEOUT = 30000;
-function withTimeout(promise, ms=DEFAULT_TIMEOUT){
-  const ctrl = new AbortController(); const t = setTimeout(()=>ctrl.abort(new Error('timeout')), ms);
-  return Promise.race([ promise(ctrl.signal), new Promise((_,rej)=>{ ctrl.signal.addEventListener('abort',()=>rej(new Error('timeout'))); }) ]).finally(()=>clearTimeout(t));
-}
-async function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
-async function fetchJSON(url, opts={}, {retries=2, timeout=DEFAULT_TIMEOUT}={}){
-  const fn = async (signal)=>{ const r = await fetch(url, { ...opts, signal });
-    if(!r.ok){ const body = await r.text().catch(()=>r.statusText); throw new Error(body || `HTTP ${r.status}`); }
-    const ct = r.headers.get('content-type')||''; return ct.includes('application/json') ? r.json() : r.text();
-  };
-  for(let i=0;i<=retries;i++){ try{ return await withTimeout(fn, timeout); } catch(e){ if(i===retries) throw e; await sleep(400*(i+1)); } }
-}
 
 let BUSY = false;
 function setBusy(on){
   BUSY = !!on;
   for(const id of ['btnProfitSync','btnProfitRebuild','btnProfitSyncRebuild','btn-run','btnSkuSearch']){
     const b = document.getElementById(id);
-    if(b){ b.disabled = on; b.textContent = b.dataset.label || (b.dataset.label = b.textContent); b.textContent = on ? (b.dataset.work || (b.dataset.work = '⏳ '+b.textContent)) : b.dataset.label; }
+    if(!b) continue;
+    b.disabled = on;
+    b.dataset.label ??= b.textContent;
+    b.textContent = on ? ('⏳ ' + b.dataset.label) : b.dataset.label;
   }
 }
 
-window.addEventListener('error', e => setNote(e?.error?.message || e.message || 'Ошибка', false));
-window.addEventListener('unhandledrejection', e => setNote(e?.reason?.message || String(e.reason) || 'Ошибка', false));
+function setNote(msg, mode='ok'){ // 'ok' | 'err' | 'progress'
+  const el = document.getElementById('note');
+  el.className = 'note ' + (mode==='progress' ? 'progress' : mode);
+  if(mode==='progress'){
+    el.innerHTML = `
+      <div><b>${msg}</b></div>
+      <div class="small" id="jobText">Подготовка…</div>
+      <div class="progress"><div class="bar" id="jobBar" style="width:0%"></div></div>
+      <div class="row" style="margin-top:6px">
+        <button class="btn secondary" id="btnCancelJob" type="button">Отменить</button>
+      </div>`;
+  }else{
+    el.textContent = msg;
+  }
+  el.style.display = 'block';
+}
+
+function updateProgress(phase, done, total, pct, msg){
+  const t = document.getElementById('jobText');
+  const b = document.getElementById('jobBar');
+  if(t) t.textContent = `${phase==='scan'?'Выгружаем номера заказов':'Обогащаем SKU'} — ${done}/${Math.max(1,total)} · ${Math.round(pct*100)}%` + (msg?` · ${msg}`:'');
+  if(b) b.style.width = `${Math.round(pct*100)}%`;
+}
+
+function hideNote(){ const el=document.getElementById('note'); el.style.display='none'; el.textContent=''; el.className='note'; }
+window.addEventListener('error', e => setNote(e?.error?.message || e.message || 'Ошибка', 'err'));
+window.addEventListener('unhandledrejection', e => setNote(e?.reason?.message || String(e.reason) || 'Ошибка', 'err'));
 
 function fmtMs(ms){
   if(!ms && ms!==0) return '';
@@ -267,18 +284,18 @@ let citiesChart=null, profitChart=null;
 window.APP_CURRENCY='KZT';
 window.__ordersByPeriod={};
 window.__orderToSkus={};
+let CURRENT_JOB_ID=null;
 
 const DATE_FIELD_LABELS = {
   creationDate: 'Создание заказа',
   plannedShipmentDate: 'План передачи',
-  plannedDeliveryDate: 'План доставки',
   shipmentDate: 'Фактическая передача',
   deliveryDate: 'Фактическая доставка'
 };
 
 async function loadMeta(){
   try {
-    const meta = await fetchJSON('/meta', {}, {retries:1});
+    const meta = await fetch('/meta').then(r=>r.json());
     const sel = document.getElementById('date_field');
     sel.innerHTML = '';
     (meta.date_field_options || ['creationDate']).forEach(v=>{
@@ -325,7 +342,7 @@ async function run(e){
     if(states) p.set('states', states); if(exc) p.set('exclude_states', exc);
     if(bd_start) p.set('business_day_start', bd_start);
 
-    const data = await fetchJSON(`/orders/analytics?${p.toString()}`, {}, {retries:1});
+    const data = await fetch(`/orders/analytics?${p.toString()}`).then(r=>r.json());
 
     window.APP_CURRENCY = data.currency || 'KZT';
     document.getElementById('kpiOrders').textContent = fmt(data.total_orders||0);
@@ -352,19 +369,20 @@ async function run(e){
       citiesChart = new Chart(ctx,{type:'bar',data:{labels,datasets:[{label:'Заказы',data:counts}]},options:{responsive:true,plugins:{legend:{display:false}}}});
     }
 
-    await loadIds();          // карты + «Номера заказов»
-    await loadProfitFIFO();   // FIFO KPI
-    renderOrderSkuMatrix();   // матрица
+    // запуск асинхронной выгрузки номеров/обогащения
+    await runIdsJob();          // IDs (async прогресс)
+    await loadProfitFIFO();     // FIFO KPI/таблицы
+    renderOrderSkuMatrix();     // матрица
     await checkProfitStatus(data);
 
-    setNote('Данные обновлены', true);
-  }catch(err){ setNote('Ошибка загрузки: ' + (err?.message || err), false); }
+    setNote('Данные обновлены', 'ok');
+  }catch(err){ setNote('Ошибка загрузки: ' + (err?.message || err), 'err'); }
   finally{ setBusy(false); }
 }
 </script>
 
 <script>
-/* ─────────── НОМЕРА ЗАКАЗОВ: загрузка + карта + рендер ─────────── */
+/* ─────────── НОМЕРА ЗАКАЗОВ: async-джоба + рендер ─────────── */
 function buildOrderItemsTable(group, currency){
   const table = document.createElement('table'); table.className = 'order-table';
   table.innerHTML = `
@@ -411,7 +429,7 @@ function renderOrderSkuMatrix(){
   box.classList.remove('muted'); box.appendChild(tbl);
 }
 
-async function loadIds(){
+function buildParams(){
   const start = document.getElementById('start').value;
   const end   = document.getElementById('end').value;
   const tz    = document.getElementById('tz').value || 'Asia/Almaty';
@@ -423,16 +441,69 @@ async function loadIds(){
   const assign_mode = document.getElementById('assign_mode').value || 'smart';
   const store_until = document.getElementById('store_until').value || '17:00';
 
-  const params = new URLSearchParams({
-    start,end,tz,date_field,order:'asc',grouped:'1',limit:'100000',with_items:'1',use_bd,
-    business_day_start:bd_start, assign_mode, store_accept_until: store_until
+  const p = new URLSearchParams({
+    start,end,tz,date_field,order:'asc',grouped:'1',limit:'100000',with_items:'1',
+    use_bd,business_day_start:bd_start,assign_mode,store_accept_until:store_until,items_mode:'all',enrich_scope:'last_week'
   });
-  if(states) params.set('states', states); if(exc) params.set('exclude_states', exc);
+  if(states) p.set('states', states); if(exc) p.set('exclude_states', exc);
+  return p;
+}
 
-  let data={groups:[],items:[],currency:'KZT'};
-  try{ data = await fetchJSON(`/orders/ids?${params.toString()}`, {}, {retries:1}); }
-  catch(e){ setNote('Не удалось получить номера заказов: ' + e.message); }
+async function runIdsJob(){
+  // отменяем предыдущую задачу, если есть
+  if(CURRENT_JOB_ID){
+    try{ await fetch(`/jobs/${CURRENT_JOB_ID}`, {method:'DELETE'}); }catch(_){}
+    CURRENT_JOB_ID = null;
+  }
 
+  setNote('Готовим данные…', 'progress');
+  setBusy(true);
+
+  const params = buildParams();
+  // для очень коротких периодов быстро пробежимся — back также справится мгновенно
+  const res = await fetch(`/orders/ids.async?${params.toString()}`, {method:'POST'});
+  if(!res.ok){ const txt = await res.text(); setNote(txt || res.statusText, 'err'); setBusy(false); return; }
+  const { job_id } = await res.json();
+  CURRENT_JOB_ID = job_id;
+
+  const cancelBtn = document.getElementById('btnCancelJob');
+  if(cancelBtn) cancelBtn.onclick = async () => {
+    try{ await fetch(`/jobs/${job_id}`, {method:'DELETE'}); }catch(_){}
+  };
+
+  // опрос статуса
+  let done=false, errored=false;
+  while(!done && !errored){
+    await new Promise(r=>setTimeout(r, 700));
+    let st;
+    try{
+      const r = await fetch(`/jobs/${job_id}`);
+      if(!r.ok){ throw new Error(await r.text()||r.statusText); }
+      st = await r.json();
+    }catch(e){
+      errored=true; setNote('Ошибка статуса: '+(e.message||e), 'err'); break;
+    }
+
+    if(st.status==='error'){ errored=true; setNote('Ошибка: '+(st.message||'неизвестно'), 'err'); break; }
+    if(st.status==='canceled'){ errored=true; setNote('Операция отменена', 'err'); break; }
+
+    updateProgress(st.phase, st.done||0, st.total||1, Math.max(0, Math.min(1, st.progress||0)), st.message||'');
+
+    if(st.status==='done'){
+      done=true;
+      // забираем результат
+      const rr = await fetch(`/jobs/${job_id}/result`);
+      const data = await rr.json();
+      CURRENT_JOB_ID=null;
+      await renderIdsResult(data);
+      break;
+    }
+  }
+
+  setBusy(false);
+}
+
+async function renderIdsResult(data){
   // 1) карта «день → номера»
   window.__ordersByPeriod = {};
   for(const g of (data.groups||[])){
@@ -444,7 +515,7 @@ async function loadIds(){
   window.__orderToSkus = {};
   for(const g of (data.groups||[])){
     for(const o of (g.items||[])){
-      const arr = Array.isArray(o.items) && o.items.length
+      const arr = Array.isArray(o.items)&&o.items.length
         ? o.items.map(li=>String(li.sku||'').trim()).filter(Boolean)
         : (o.sku ? [String(o.sku)] : []);
       if(!arr.length) continue;
@@ -453,14 +524,7 @@ async function loadIds(){
     }
   }
 
-  // 3) плоский список (для внутренней логики)
-  const flat = new URLSearchParams(params); flat.set('grouped','0'); flat.set('with_items','0');
-  try{
-    const flatData = await fetchJSON(`/orders/ids?${flat.toString()}`, {}, {retries:1});
-    window.__lastOrderIds = (flatData.items||[]).map(x => ({ id: x.id, date: x.date }));
-  }catch(_){ window.__lastOrderIds = []; }
-
-  // 4) рендер блока «Номера заказов (для сверки)»
+  // 3) рендер блока «Номера заказов (для сверки)»
   const container = document.getElementById('ids'); container.innerHTML='';
   const currency = data.currency || window.APP_CURRENCY || 'KZT';
   const totalCount = (typeof data.period_total_count === 'number') ? data.period_total_count : (data.items||[]).length;
@@ -472,10 +536,12 @@ async function loadIds(){
 
   const bar = document.createElement('div'); bar.className='ids-actions';
   const btnCopy=document.createElement('button'); btnCopy.className='btn'; btnCopy.textContent='Скопировать номера';
-  btnCopy.onclick=()=>{ try{ const all=(data.items||[]).map(it=>it.number).join('\n'); navigator.clipboard?.writeText(all); setNote('Скопировано', true);}catch(_){ setNote('Не удалось скопировать', false);} };
+  btnCopy.onclick=()=>{ try{ const all=(data.items||[]).map(it=>it.number).join('\n'); navigator.clipboard?.writeText(all); setNote('Скопировано', 'ok'); }catch(_){ setNote('Не удалось скопировать', 'err'); } };
   const btnCsv=document.createElement('a'); btnCsv.className='btn'; btnCsv.textContent='Скачать CSV';
-  const csvParams = new URLSearchParams(params); csvParams.delete('grouped'); csvParams.set('limit','100000');
-  btnCsv.href=`/orders/ids.csv?${csvParams.toString()}`; btnCsv.setAttribute('download','ids.csv');
+
+  const params = buildParams(); params.set('grouped','0'); params.set('with_items','0'); params.set('limit','100000'); // чистый csv
+  btnCsv.href=`/orders/ids.csv?${params.toString()}`; btnCsv.setAttribute('download','ids.csv');
+
   const btnExpand=document.createElement('button'); btnExpand.className='btn'; btnExpand.textContent='Раскрыть всё';
   const btnCollapse=document.createElement('button'); btnCollapse.className='btn'; btnCollapse.textContent='Свернуть всё';
   bar.append(btnCopy,btnCsv,btnExpand,btnCollapse); container.appendChild(bar);
@@ -491,6 +557,9 @@ async function loadIds(){
   }
   btnExpand.onclick=()=>detailsList.forEach(d=>d.open=true);
   btnCollapse.onclick=()=>detailsList.forEach(d=>d.open=false);
+
+  // финишная зелёная плашка
+  setNote('Данные обновлены', 'ok');
 }
 </script>
 
@@ -572,7 +641,7 @@ async function pingProfitDb(){
 async function syncProfit(){
   const start=document.getElementById('start').value;
   const end  =document.getElementById('end').value;
-  if(!start||!end){ setNote('Сначала задайте период (начало/конец).'); return; }
+  if(!start||!end){ setNote('Сначала задайте период (начало/конец).', 'err'); return; }
 
   const tz=document.getElementById('tz').value||'Asia/Almaty';
   const date_field=document.getElementById('date_field').value;
@@ -590,7 +659,7 @@ async function syncProfit(){
       return { id:x.id, date:x.date, customer:null, items:lines };
     }).filter(o=>o.items.length);
 
-    if(!orders.length){ setNote('Нет заказов KASPI_DELIVERY с позициями в выбранном периоде'); return; }
+    if(!orders.length){ setNote('Нет заказов KASPI_DELIVERY с позициями в выбранном периоде', 'err'); return; }
 
     const up=await fetch('/profit/orders/upsert-bulk',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({orders}) });
     if(!up.ok) throw new Error(await up.text()||up.statusText);
@@ -600,24 +669,24 @@ async function syncProfit(){
     if(!rb.ok) throw new Error(await rb.text()||rb.statusText);
     const rbRes=await rb.json();
 
-    setNote(`Синхронизация FIFO: заказов=${upRes.orders_inserted+upRes.orders_updated}, позиций=${upRes.items_inserted}, списаний=${rbRes.recomputed}`, true);
+    setNote(`Синхронизация FIFO: заказов=${upRes.orders_inserted+upRes.orders_updated}, позиций=${upRes.items_inserted}, списаний=${rbRes.recomputed}`, 'ok');
 
-    await loadIds(); await loadProfitFIFO(); renderOrderSkuMatrix(); await checkProfitStatus();
-  }catch(e){ setNote('Синхронизация не удалась: ' + (e.message||e)); }
+    await runIdsJob(); await loadProfitFIFO(); renderOrderSkuMatrix(); await checkProfitStatus();
+  }catch(e){ setNote('Синхронизация не удалась: ' + (e.message||e), 'err'); }
 }
 
 async function rebuildFifo(){
   if(BUSY) return;
   const df=document.getElementById('start').value;
   const dt=document.getElementById('end').value;
-  if(!df||!dt){ setNote('Сначала задайте период (начало/конец).'); return; }
+  if(!df||!dt){ setNote('Сначала задайте период (начало/конец).', 'err'); return; }
   setBusy(true);
   try{
     const p=new URLSearchParams({date_from:df,date_to:dt});
     const res=await fetchProfitJSON('/profit/rebuild-ledger?'+p.toString(),{method:'POST'});
-    setNote(`FIFO перестроен. Добавлено списаний: ${res?.recomputed||0}`, true);
-    await loadIds(); await loadProfitFIFO(); renderOrderSkuMatrix(); await checkProfitStatus();
-  }catch(e){ setNote('Перестроение FIFO не удалось: ' + e.message, false); }
+    setNote(`FIFO перестроен. Добавлено списаний: ${res?.recomputed||0}`, 'ok');
+    await runIdsJob(); await loadProfitFIFO(); renderOrderSkuMatrix(); await checkProfitStatus();
+  }catch(e){ setNote('Перестроение FIFO не удалось: ' + e.message, 'err'); }
   finally{ setBusy(false); }
 }
 
@@ -627,9 +696,9 @@ async function syncAndRebuild(){
     const df=document.getElementById('start').value; const dt=document.getElementById('end').value;
     const p=new URLSearchParams({date_from:df,date_to:dt});
     const res=await fetchProfitJSON('/profit/rebuild-ledger?'+p.toString(),{method:'POST'});
-    setNote(`Синхр.+пересчёт выполнены. Списаний: ${res?.recomputed||0}`, true);
-    await loadIds(); await loadProfitFIFO(); renderOrderSkuMatrix(); await checkProfitStatus();
-  }catch(e){ setNote('Пересчёт не удался: ' + e.message, false); }
+    setNote(`Синхр.+пересчёт выполнены. Списаний: ${res?.recomputed||0}`, 'ok');
+    await runIdsJob(); await loadProfitFIFO(); renderOrderSkuMatrix(); await checkProfitStatus();
+  }catch(e){ setNote('Пересчёт не удался: ' + e.message, 'err'); }
   finally{ setBusy(false); }
 }
 </script>
@@ -647,7 +716,7 @@ async function checkProfitStatus(analyticsData){
     const df=document.getElementById('start').value; const dt=document.getElementById('end').value;
     if(!df||!dt){ setSyncChip('warn','нет периода'); return; }
     const ordersCount = (analyticsData && typeof analyticsData.total_orders==='number')
-      ? analyticsData.total_orders : (await fetchJSON(`/orders/analytics?start=${df}&end=${dt}`, {}, {retries:0})).total_orders;
+      ? analyticsData.total_orders : (await fetch(`/orders/analytics?start=${df}&end=${dt}`)).json().total_orders;
 
     const p=new URLSearchParams({ date_from:df, date_to:dt, group_by:'total', use_bd:(document.getElementById('use_bd')?.checked?'1':'0'), bd_start:(document.getElementById('bd_start')?.value||'20:00') });
     const sum=await fetchProfitJSON('/profit/summary?'+p.toString());
@@ -703,7 +772,7 @@ async function loadProfitFIFO(){
 }
 
 async function showOrdersForSKU(sku){
-  if(!sku){ setNote('Укажите SKU', false); return; }
+  if(!sku){ setNote('Укажите SKU', 'err'); return; }
   const df=document.getElementById('start').value;
   const dt=document.getElementById('end').value;
   const info=document.getElementById('skuOrdersInfo');
@@ -753,7 +822,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     uiModeHint();
     await pingProfitDb();
     await run(); // initial
-  }catch(e){ setNote('Ошибка инициализации: ' + (e?.message||e), false); }
+  }catch(e){ setNote('Ошибка инициализации: ' + (e?.message||e), 'err'); }
 });
 </script>
 </body>
