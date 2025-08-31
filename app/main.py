@@ -85,6 +85,9 @@ USE_BUSINESS_DAY = os.getenv("USE_BUSINESS_DAY", "true").lower() in ("1", "true"
 # Параллельность обогащения SKU
 ENRICH_CONCURRENCY = int(os.getenv("ENRICH_CONCURRENCY", "8") or 8)
 
+# По умолчанию включаем доставленные + архивные
+DEFAULT_INCLUDE_STATES: set[str] = {"KASPI_DELIVERY", "ARCHIVE", "ARCHIVED"}
+
 def _bd_delta(hhmm: str) -> timedelta:
     try:
         hh, mm = hhmm.split(":")
@@ -112,7 +115,7 @@ if origins:
 client = KaspiClient(token=KASPI_TOKEN, base_url=KASPI_BASE_URL) if KASPI_TOKEN else None
 
 # Кэш ответов
-orders_cache = TTLCache(maxsize=256, ttl=CACHE_TTL)  # ↑ немного увеличил maxsize
+orders_cache = TTLCache(maxsize=256, ttl=CACHE_TTL)
 
 # Статический UI
 app.mount("/ui", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static"), html=True), name="static")
@@ -269,7 +272,7 @@ async def _get_json_with_retries(cli: httpx.AsyncClient, url: str, *, params: Di
                 raise HTTPStatusError(f"Retryable status: {r.status_code}", request=r.request, response=r)
             r.raise_for_status()
             return r.json()
-        except (HTTPStatusError, RequestError) as e:
+        except (HTTPStatusError, RequestError):
             if i == attempts - 1:
                 raise
             # экспоненциальная пауза + джиттер
@@ -413,13 +416,18 @@ class AnalyticsResponse(BaseModel):
 # -------------------- Вспомогательное расширение состояний --------------------
 _ARCHIVE_ALIASES = {"ARCHIVE", "ARCHIVED"}
 
-def _expand_with_archive(states_inc: Optional[set[str]]) -> Optional[set[str]]:
-    """Если явно просят KASPI_DELIVERY — добавим архивные алиасы, как просили."""
+def _expand_with_archive(states_inc: Optional[set[str]]) -> set[str]:
+    """
+    Теперь логика такая:
+    - если состояний нет (параметр states не передан) → дефолт: KASPI_DELIVERY + ARCHIVE/ARCHIVED
+    - если KASPI_DELIVERY указан явно → добавляем к нему ARCHIVE/ARCHIVED
+    - иначе возвращаем как есть
+    """
     if not states_inc:
-        return states_inc
+        return set(DEFAULT_INCLUDE_STATES)
     if "KASPI_DELIVERY" in states_inc:
         return set(states_inc) | _ARCHIVE_ALIASES
-    return states_inc
+    return set(states_inc)
 
 # -------------------- Endpoints --------------------
 @app.get("/meta")
@@ -593,7 +601,7 @@ async def list_ids(
     order: str = Query("asc", pattern="^(asc|desc)$"),
     grouped: int = Query(0),
     with_items: int = Query(1, description="0=без обогащения; 1=обогащение позициями"),
-    enrich_scope: str = Query("last_day", pattern="^(none|last_day|last_week|all)$"),
+    enrich_scope: str = Query("last_week", pattern="^(none|last_day|last_week|all)$"),
     items_mode: str = Query("all", pattern="^(first|all)$"),
     return_candidates: int = Query(0, description="1=вернуть title_candidates/sku_candidates"),
 ):
@@ -614,7 +622,7 @@ async def list_ids(
 
     inc = parse_states_csv(states)
     exc = parse_states_csv(exclude_states) or set()
-    # Расширим включенные состояния «архивом», если указан KASPI_DELIVERY
+    # Дефолт: доставленные + архивные (и автодобавление ARCHIVE к KASPI_DELIVERY)
     inc = _expand_with_archive(inc)
 
     out: List[Dict[str, object]] = []
@@ -698,10 +706,9 @@ async def list_ids(
             targets = out[: (limit or len(out))]
         elif enrich_scope == "last_week":
             # корзина дат за последнюю неделю по "магазинному" дню
-            last_day = enrich_day
-            y, m, d = map(int, last_day.split("-"))
+            y, m, d = map(int, enrich_day.split("-"))
             last_dt = date(y, m, d)
-            week = { (last_dt - timedelta(days=i)).isoformat() for i in range(7) }
+            week = {(last_dt - timedelta(days=i)).isoformat() for i in range(7)}
             targets = [it for it in out if str(it["date"])[:10] in week]
         else:  # last_day
             targets = [it for it in out if str(it["date"])[:10] == enrich_day]
@@ -726,6 +733,8 @@ async def list_ids(
                                 "title_candidates": extra.get("title_candidates") or {},
                                 "sku_candidates": extra.get("sku_candidates") or {},
                             }
+                # маленькая пауза, чтобы не долбить API
+                await asyncio.sleep(0.03)
 
         await asyncio.gather(*(enrich(it) for it in targets))
 
