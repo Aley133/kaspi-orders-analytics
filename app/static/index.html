@@ -88,9 +88,9 @@
     .chips{display:flex;gap:6px;flex-wrap:wrap}
     .chips .chip{cursor:default}
     .chips .chip .x{cursor:pointer;opacity:.8;margin-left:6px}
-    .status-menu{position:absolute;top:110%;left:0;z-index:5000;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:8px 10px;width:280px;box-shadow:0 12px 30px rgba(0,0,0,.22);display:none}
+    .status-menu{position:absolute;top:110%;left:0;z-index:5000;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:8px 10px;width:320px;box-shadow:0 12px 30px rgba(0,0,0,.22);display:none}
     .status-menu.open{display:block}
-    .status-grid{max-height:260px;overflow:auto;margin:6px 0;display:grid;grid-template-columns:1fr;gap:2px}
+    .status-grid{max-height:320px;overflow:auto;margin:6px 0;display:grid;grid-template-columns:1fr;gap:2px}
     .status-grid label{display:flex;align-items:center;gap:8px;padding:4px 6px}
     .menu-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:6px}
   </style>
@@ -129,7 +129,7 @@
         <div class="row" style="margin-top:8px">
           <div class="status-control">
             <label>Статусы (включить)</label>
-            <input type="text" id="states" placeholder="через запятую, напр. NEW,DELIVERED" style="min-width:320px" />
+            <input type="text" id="states" placeholder="через запятую: Новый, Доставлен…" style="min-width:320px" />
             <button class="btn secondary" id="btnStates" type="button">Выбрать</button>
             <div id="statusChips" class="chips"></div>
 
@@ -161,9 +161,9 @@
           <select id="enrich_scope" title="Глубина обогащения SKU" style="width:180px">
             <option value="none">Не обогащать</option>
             <option value="last_day">За последний день</option>
-            <option value="last_week" selected>За последнюю неделю</option>
+            <option value="last_week">За последнюю неделю</option>
             <option value="last_month">За последний месяц</option>
-            <option value="all">За весь период</option>
+            <option value="all" selected>За весь период</option>
           </select>
 
           <span id="bdInfo" class="muted"></span>
@@ -332,7 +332,7 @@ function fmtMs(ms){
   try{
     const tz = document.getElementById('tz')?.value || 'Asia/Almaty';
     const d  = new Date(Number(ms));
-    const parts = new Intl.DateTimeFormat('ru-RU', { timeZone: tz, year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit' }).formatToParts(d);
+    const parts = new Intl.DateTimeFormat('ru-RRU', { timeZone: tz, year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit' }).formatToParts(d);
     const g = k => parts.find(p=>p.type===k)?.value || '';
     return `${g('year')}-${g('month')}-${g('day')} ${g('hour')}:${g('minute')}`;
   }catch(_){ return new Date(Number(ms)).toISOString().slice(0,16).replace('T',' '); }
@@ -347,22 +347,35 @@ window.__ordersByPeriod={};
 window.__orderToSkus={};
 let CURRENT_JOB_ID=null;
 
-/* multiselect статусов */
-const STATUS_OPTIONS = [
-  'NEW','APPROVED_BY_BANK','ACCEPTED_BY_MERCHANT','READY_FOR_SHIPMENT',
-  'KASPI_DELIVERY','DELIVERED','ARCHIVE','ARCHIVED','RETURNED','CANCELED'
-];
+/* ─────────── multiselect статусов (RU labels → API codes) ─────────── */
+const STATUS_DICT = {
+  NEW: 'Новый',
+  APPROVED_BY_BANK: 'Оплата подтверждена',
+  ACCEPTED_BY_MERCHANT: 'Принят магазином',
+  READY_FOR_SHIPMENT: 'Готов к отгрузке',
+  KASPI_DELIVERY: 'Kaspi Доставка (передан)',
+  DELIVERED: 'Доставлен',
+  ARCHIVE: 'Завершён (архив)',
+  ARCHIVED: 'Архив (история)',
+  RETURNED: 'Возврат',
+  CANCELED: 'Отменён',
+};
+const STATUS_ORDER = ['NEW','APPROVED_BY_BANK','ACCEPTED_BY_MERCHANT','READY_FOR_SHIPMENT','KASPI_DELIVERY','DELIVERED','ARCHIVE','ARCHIVED','RETURNED','CANCELED'];
+const LABEL_TO_CODE = Object.fromEntries(Object.entries(STATUS_DICT).map(([k,v])=>[v.toLowerCase(),k]));
+
 window.STATUS_SELECTED = new Set();
+
+function ruLabel(code){ return STATUS_DICT[code] || code; }
 
 function renderStatusGrid(){
   const g=document.getElementById('statusGrid'); g.innerHTML='';
-  STATUS_OPTIONS.forEach(s=>{
-    const id='st_'+s;
+  STATUS_ORDER.forEach(code=>{
+    const id='st_'+code;
     const lab=document.createElement('label');
-    lab.innerHTML=`<input type="checkbox" id="${id}" value="${s}"> <span>${s}</span>`;
-    lab.querySelector('input').checked = window.STATUS_SELECTED.has(s);
+    lab.innerHTML=`<input type="checkbox" id="${id}" value="${code}"> <span>${ruLabel(code)}</span>`;
+    lab.querySelector('input').checked = window.STATUS_SELECTED.has(code);
     lab.querySelector('input').addEventListener('change', (e)=>{
-      if(e.target.checked) window.STATUS_SELECTED.add(s); else window.STATUS_SELECTED.delete(s);
+      if(e.target.checked) window.STATUS_SELECTED.add(code); else window.STATUS_SELECTED.delete(code);
       renderStatusChips(); syncStatesInput();
     });
     g.appendChild(lab);
@@ -371,22 +384,33 @@ function renderStatusGrid(){
 function renderStatusChips(){
   const box=document.getElementById('statusChips'); box.innerHTML='';
   if(window.STATUS_SELECTED.size===0){ box.innerHTML='<span class="muted">ничего не выбрано</span>'; return; }
-  [...window.STATUS_SELECTED].forEach(s=>{
-    const c=document.createElement('span'); c.className='chip'; c.innerHTML=`${s}<span class="x" title="убрать">×</span>`;
-    c.querySelector('.x').onclick=()=>{ window.STATUS_SELECTED.delete(s); renderStatusChips(); renderStatusGrid(); syncStatesInput(); };
+  [...window.STATUS_SELECTED].forEach(code=>{
+    const c=document.createElement('span'); c.className='chip'; c.innerHTML=`${ruLabel(code)}<span class="x" title="убрать">×</span>`;
+    c.querySelector('.x').onclick=()=>{ window.STATUS_SELECTED.delete(code); renderStatusChips(); renderStatusGrid(); syncStatesInput(); };
     box.appendChild(c);
   });
 }
+
+/* нормализация input: приводим к кодам, если пользователь ввёл русские слова */
+function normalizeStatesValue(val){
+  if(!val) return '';
+  const merged = new Set();
+  val.split(/[\s,;]+/).filter(Boolean).forEach(raw=>{
+    const t = raw.trim();
+    const code = LABEL_TO_CODE[t.toLowerCase()] || t.toUpperCase();
+    merged.add(code);
+  });
+  return [...merged].join(',');
+}
 function syncStatesInput(){
   const inp=document.getElementById('states');
-  const fromSet=[...window.STATUS_SELECTED];
-  const manual = (inp.value||'').trim();
+  const manual = normalizeStatesValue((inp.value||'').trim());
+  const fromSet = [...window.STATUS_SELECTED];
   const merged = new Set();
-  if(manual){ manual.split(/[\s,;]+/).filter(Boolean).forEach(x=>merged.add(x.trim())); }
+  if(manual){ manual.split(',').forEach(x=>merged.add(x)); }
   fromSet.forEach(x=>merged.add(x));
   inp.value = [...merged].filter(Boolean).join(',');
 }
-
 function openStatusMenu(){
   const m=document.getElementById('statusMenu');
   m.classList.add('open'); renderStatusGrid();
@@ -445,7 +469,9 @@ async function run(e){
     const end   = document.getElementById('end').value;
     const tz    = document.getElementById('tz').value || 'Asia/Almaty';
     const date_field = document.getElementById('date_field').value;
-    const states = document.getElementById('states').value;
+    // нормализуем перед использованием
+    const states = normalizeStatesValue(document.getElementById('states').value);
+    document.getElementById('states').value = states;
     const exc    = document.getElementById('exclude_states').checked ? 'CANCELED' : '';
     const use_bd = document.getElementById('use_bd')?.checked ? '1' : '0';
     const bd_start = document.getElementById('bd_start')?.value || '';
@@ -548,16 +574,18 @@ function buildParams(){
   const end   = document.getElementById('end').value;
   const tz    = document.getElementById('tz').value || 'Asia/Almaty';
   const date_field = document.getElementById('date_field').value;
-  const states = document.getElementById('states').value;
+  // нормализуем, чтобы в запрос ушли коды
+  const states = normalizeStatesValue(document.getElementById('states').value);
+  document.getElementById('states').value = states;
   const exc    = document.getElementById('exclude_states').checked ? 'CANCELED' : '';
   const use_bd = document.getElementById('use_bd')?.checked ? '1' : '0';
   const bd_start = document.getElementById('bd_start')?.value || '';
   const assign_mode = document.getElementById('assign_mode').value || 'smart';
   const store_until = document.getElementById('store_until').value || '17:00';
-  const enrich_scope = document.getElementById('enrich_scope').value || 'last_week';
+  const enrich_scope = document.getElementById('enrich_scope').value || 'all';
 
   const p = new URLSearchParams({
-    start,end,tz,date_field,order:'asc',grouped:'1',limit:'100000',with_items:'1',
+    start,end,tz,date_field,order:'asc',grouped:'1',limit:'0',with_items:'1',
     use_bd,business_day_start:bd_start,assign_mode,store_accept_until:store_until,items_mode:'all',enrich_scope
   });
   if(states) p.set('states', states); if(exc) p.set('exclude_states', exc);
@@ -922,7 +950,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     // multiselect UI
     document.getElementById('btnStates')?.addEventListener('click', openStatusMenu);
     document.getElementById('btnStatusesAll')?.addEventListener('click', ()=>{
-      STATUS_OPTIONS.forEach(s=>window.STATUS_SELECTED.add(s));
+      STATUS_ORDER.forEach(k=>window.STATUS_SELECTED.add(k));
       renderStatusGrid(); renderStatusChips(); syncStatesInput();
     });
     document.getElementById('btnStatusesClear')?.addEventListener('click', ()=>{
@@ -931,6 +959,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('btnStatusesApply')?.addEventListener('click', ()=>{
       document.getElementById('statusMenu').classList.remove('open');
       syncStatesInput();
+    });
+
+    // нормализация ручного ввода статусов на лету
+    document.getElementById('states')?.addEventListener('blur', ()=>{ 
+      document.getElementById('states').value = normalizeStatesValue(document.getElementById('states').value);
     });
 
     document.getElementById('f')?.addEventListener('submit', run);
