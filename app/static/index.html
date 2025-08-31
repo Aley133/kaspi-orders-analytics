@@ -729,7 +729,20 @@ async function showOrdersForSKU(sku){
   finally{ setBusy(false); }
 }
 </script>
-
+<script>
+async function pingProfitDb(){
+  try{
+    const r = await fetch('/profit/db/ping');
+    const info = await r.json();
+    const driver = info?.driver || (info?.db_path?.startsWith('postgres') ? 'pg' : 'sqlite');
+    const el = document.getElementById('profitDbInfo');
+    if (el) el.textContent = `FIFO DB: ${driver}${info?.fallback_enabled ? ' · fallback:on' : ''}`;
+  }catch(_){
+    const el = document.getElementById('profitDbInfo');
+    if (el) el.textContent = '';
+  }
+}
+</script>
 <script>
 /* ─────────── BOOT ─────────── */
 document.addEventListener('DOMContentLoaded', async () => {
@@ -744,7 +757,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('btnSkuSearch')?.addEventListener('click', ()=>showOrdersForSKU((document.getElementById('skuSearch')?.value||'').trim()));
     document.getElementById('btnSkuClear')?.addEventListener('click', ()=>{ document.getElementById('skuSearch').value=''; document.getElementById('skuOrders').innerHTML=''; document.getElementById('skuOrdersInfo').textContent=''; });
 
-    await pingProfitDb();
+    if (typeof pingProfitDb === 'function') {
+      try { await pingProfitDb(); } catch(_) {}
+    }
+    await run(); // обязательно оставить!
     await run(); // initial
   }catch(e){ setNote('Ошибка инициализации: ' + (e?.message||e), false); }
 });
