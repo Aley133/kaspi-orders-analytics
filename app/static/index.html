@@ -55,7 +55,6 @@
     .order-table{width:100%;border-collapse:collapse;margin:6px 0 12px}
     .order-table th,.order-table td{padding:6px 8px;border-bottom:1px solid var(--line);font-size:13px}
 
-    /* ─── уведомление/прогресс: читаемый, липкий, не мигает ─── */
     .note{margin:8px 0 12px;padding:10px 12px;border-radius:10px;display:none;position:relative}
     .note.ok,.note.progress{display:block;background:color-mix(in oklab, var(--accent) 14%, transparent);border:1px solid color-mix(in oklab, var(--accent) 48%, transparent);color:var(--fg)}
     .note.err{display:block;background:color-mix(in oklab, var(--danger) 14%, transparent);border:1px solid color-mix(in oklab, var(--danger) 48%, transparent);color:var(--fg)}
@@ -65,7 +64,6 @@
     .progress {height:12px;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:rgba(255,255,255,.06);margin-top:6px}
     .progress .bar{height:100%;width:0%;background:var(--accent);transition:width .2s cubic-bezier(.4,0,.2,1)}
 
-    /* верхний тонкий индикатор */
     #topLoader{position:sticky; top:0; left:0; right:0; height:3px; z-index:7000; background:transparent}
     #topLoader .bar{height:100%; width:0%; background:var(--accent); transition:width .2s cubic-bezier(.4,0,.2,1)}
 
@@ -83,7 +81,6 @@
     .switch input:checked + .slider:before{transform:translateX(20px)}
     body,.note{-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
 
-    /* ─── multiselect статусов ─── */
     .status-control{position:relative;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
     .chips{display:flex;gap:6px;flex-wrap:wrap}
     .chips .chip{cursor:default}
@@ -112,7 +109,6 @@
     </aside>
 
     <main class="content">
-      <!-- верхний тонкий индикатор -->
       <div id="topLoader"><div class="bar"></div></div>
 
       <h1 style="margin:0 0 12px">Аналитика заказов Kaspi</h1>
@@ -171,7 +167,6 @@
         </div>
       </form>
 
-      <!-- ЗЕЛЕНАЯ ПЛАШКА: статус/прогресс/итог -->
       <div id="note" class="note"></div>
 
       <!-- KPI ПЕРИОДА -->
@@ -284,7 +279,6 @@ function setBusy(on){
   }
 }
 
-/* прогресс — липкая плашка + верхняя полоска + троттлинг */
 function setTopLoader(p){
   const bar = document.querySelector('#topLoader .bar');
   if(bar) bar.style.width = (p>0 ? `${Math.min(100, Math.max(2, Math.round(p*100)))}%` : '0%');
@@ -308,13 +302,7 @@ function setNote(msg, mode='ok'){
   }
   el.style.display = 'block';
 }
-
-let _lastUpdTs = 0;
 function updateProgress(phase, done, total, pct, msg){
-  const now = performance.now();
-  if(now - _lastUpdTs < 120) return; // до ~8 FPS
-  _lastUpdTs = now;
-
   const t = document.getElementById('jobText');
   const b = document.getElementById('jobBar');
   const txt = `${phase==='scan'?'Выгружаем номера заказов':'Обогащаем SKU'} — ${done}/${Math.max(1,total)} · ${Math.round(pct*100)}%` + (msg?` · ${msg}`:'');
@@ -322,7 +310,6 @@ function updateProgress(phase, done, total, pct, msg){
   if(b) b.style.width = `${Math.max(1, Math.round(pct*100))}%`;
   setTopLoader(pct);
 }
-
 function hideNote(){ const el=document.getElementById('note'); el.style.display='none'; el.textContent=''; el.className='note'; setTopLoader(0); }
 window.addEventListener('error', e => setNote(e?.error?.message || e.message || 'Ошибка', 'err'));
 window.addEventListener('unhandledrejection', e => setNote(e?.reason?.message || String(e.reason) || 'Ошибка', 'err'));
@@ -332,7 +319,7 @@ function fmtMs(ms){
   try{
     const tz = document.getElementById('tz')?.value || 'Asia/Almaty';
     const d  = new Date(Number(ms));
-    const parts = new Intl.DateTimeFormat('ru-RRU', { timeZone: tz, year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit' }).formatToParts(d);
+    const parts = new Intl.DateTimeFormat('ru-RU', { timeZone: tz, year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit' }).formatToParts(d);
     const g = k => parts.find(p=>p.type===k)?.value || '';
     return `${g('year')}-${g('month')}-${g('day')} ${g('hour')}:${g('minute')}`;
   }catch(_){ return new Date(Number(ms)).toISOString().slice(0,16).replace('T',' '); }
@@ -347,7 +334,7 @@ window.__ordersByPeriod={};
 window.__orderToSkus={};
 let CURRENT_JOB_ID=null;
 
-/* ─────────── multiselect статусов (RU labels → API codes) ─────────── */
+/* ─────────── multiselect статусов ─────────── */
 const STATUS_DICT = {
   NEW: 'Новый',
   APPROVED_BY_BANK: 'Оплата подтверждена',
@@ -390,8 +377,6 @@ function renderStatusChips(){
     box.appendChild(c);
   });
 }
-
-/* нормализация input: приводим к кодам, если пользователь ввёл русские слова */
 function normalizeStatesValue(val){
   if(!val) return '';
   const merged = new Set();
@@ -414,11 +399,7 @@ function syncStatesInput(){
 function openStatusMenu(){
   const m=document.getElementById('statusMenu');
   m.classList.add('open'); renderStatusGrid();
-  const close=(ev)=>{
-    if(!m.contains(ev.target) && !document.getElementById('btnStates').contains(ev.target)){
-      m.classList.remove('open'); document.removeEventListener('click', close, true);
-    }
-  };
+  const close=(ev)=>{ if(!m.contains(ev.target) && !document.getElementById('btnStates').contains(ev.target)){ m.classList.remove('open'); document.removeEventListener('click', close, true); } };
   setTimeout(()=>document.addEventListener('click', close, true),0);
 }
 
@@ -446,7 +427,7 @@ async function loadMeta(){
   document.getElementById('start').value = iso(today);
   document.getElementById('end').value   = iso(today);
 
-  renderStatusChips(); // начальное
+  renderStatusChips();
 }
 
 function uiModeHint(){
@@ -469,7 +450,6 @@ async function run(e){
     const end   = document.getElementById('end').value;
     const tz    = document.getElementById('tz').value || 'Asia/Almaty';
     const date_field = document.getElementById('date_field').value;
-    // нормализуем перед использованием
     const states = normalizeStatesValue(document.getElementById('states').value);
     document.getElementById('states').value = states;
     const exc    = document.getElementById('exclude_states').checked ? 'CANCELED' : '';
@@ -509,10 +489,10 @@ async function run(e){
       citiesChart = new Chart(ctx,{type:'bar',data:{labels,datasets:[{label:'Заказы',data:counts}]},options:{responsive:true,plugins:{legend:{display:false}}}});
     }
 
-    // запуск асинхронной выгрузки номеров/обогащения
-    await runIdsJob();          // IDs (async прогресс)
+    // ——— ПОЛНАЯ СИНХРОНИЗАЦИЯ МОСТА + визуализация ———
+    await runIdsJob();          // async выгрузка номеров (+обогащение)
     await loadProfitFIFO();     // FIFO KPI/таблицы
-    renderOrderSkuMatrix();     // матрица
+    await renderOrderSkuMatrix(); // матрица заказ→SKU
     await checkProfitStatus(data);
 
     setNote('Данные обновлены', 'ok');
@@ -522,7 +502,7 @@ async function run(e){
 </script>
 
 <script>
-/* ─────────── НОМЕРА ЗАКАЗОВ: async-джоба + рендер ─────────── */
+/* ─────────── НОМЕРА ЗАКАЗОВ: async-джоба + мост + рендер ─────────── */
 function buildOrderItemsTable(group, currency){
   const table = document.createElement('table'); table.className = 'order-table';
   table.innerHTML = `
@@ -534,8 +514,8 @@ function buildOrderItemsTable(group, currency){
 
   for(const o of (group.items||[])){
     const lines = (o.items && o.items.length)
-      ? o.items.map(li=>({sku:li.sku||'',title:li.title||'',qty:Number(li.qty||1),sum:Number(li.unit_price||0)}))
-      : [{sku:o.sku||'',title:o.title||o.name||'',qty:1,sum:Number(o.amount||0)}];
+      ? o.items.map(li=>({sku:String(li.sku||''),title:String(li.title||''),qty:Number(li.qty||1),sum:Number(li.total_price ?? li.amount ?? li.unit_price ?? 0)}))
+      : [{sku:String(o.sku||''),title:String(o.title||o.name||''),qty:1,sum:Number(o.amount||0)}];
 
     for(const li of lines){
       const tr=document.createElement('tr');
@@ -546,6 +526,59 @@ function buildOrderItemsTable(group, currency){
     }
   }
   return table;
+}
+
+/* → СИНХРОНИЗАЦИЯ МОСТА: из результата ids.async соберём плоские строки и отправим в /profit/bridge/sync-by-ids */
+async function syncBridgeFromIdsData(data){
+  try{
+    const items = [];
+    for(const g of (data.groups||[])){
+      for(const o of (g.items||[])){
+        const orderId   = String(o.id ?? o.order_id ?? o.number ?? '').trim();
+        const orderCode = String(o.number ?? o.order_code ?? '').trim() || null;
+        const state     = String(o.state||'').trim() || null;
+        const date      = o.date_ms ?? o.date ?? null;
+
+        let idx = 0;
+        const lines = Array.isArray(o.items) && o.items.length
+          ? o.items
+          : (o.sku ? [{ sku:o.sku, qty:1, total_price:o.amount, title:o.title||o.name }] : []);
+
+        for(const li of (lines||[])){
+          const skuRaw = li.sku ?? li.code ?? '';
+          const sku = String(skuRaw ?? '').trim();
+          const qty = Number(li.qty ?? 1) || 1;
+          const total = Number(li.total_price ?? li.amount ?? li.unit_price ?? 0) || 0;
+          const unit  = (Number(li.unit_price ?? 0) || (qty>0 ? total/qty : 0));
+          items.push({
+            id: orderId,
+            code: orderCode,
+            date: date,
+            state: state,
+            sku: sku || null,
+            title: (li.title ?? li.name ?? null),
+            qty: qty,
+            unit_price: unit,
+            total_price: total,
+            line_index: idx++,
+          });
+        }
+      }
+    }
+    if(!items.length) return;
+
+    const res = await fetch('/profit/bridge/sync-by-ids', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(items)
+    });
+    if(!res.ok) throw new Error(await res.text()||res.statusText);
+    const j = await res.json();
+    console.log('bridge sync:', j);
+  }catch(e){
+    console.warn('bridge sync failed:', e);
+    setNote('Синхронизация моста не удалась: ' + (e.message||e), 'err');
+  }
 }
 
 async function renderOrderSkuMatrix(){
@@ -563,7 +596,6 @@ async function renderOrderSkuMatrix(){
 
     if(!data.orders?.length){ box.classList.add('muted'); box.textContent='Нет данных'; return; }
 
-    // таблица: № заказа | SKU | Выручка | Комиссия | Себестоимость | Прибыль
     const tbl=document.createElement('table'); tbl.className='table';
     tbl.innerHTML=`<thead>
       <tr><th style="width:200px">№ заказа</th><th>SKU</th>
@@ -571,24 +603,19 @@ async function renderOrderSkuMatrix(){
     </thead><tbody></tbody>`;
     const tb=tbl.querySelector('tbody');
 
-    // сохраняем карту «день → номера» как раньше (для таблицы периодов)
     window.__ordersByPeriod = window.__ordersByPeriod || {};
 
     for(const ord of data.orders){
-      // одна строка на каждую позицию заказа
       for(const it of (ord.items||[])){
         const tr=document.createElement('tr');
 
-        // № заказа
         const tdNum=document.createElement('td'); tdNum.textContent = ord.order_code || ord.order_id || ''; tr.appendChild(tdNum);
 
-        // SKU с кликом — покажем заказы по SKU
         const tdSku=document.createElement('td'); tdSku.className='matrix-sku';
         const a=document.createElement('a'); a.textContent=it.sku||''; a.href='#';
         a.onclick=(e)=>{ e.preventDefault(); showOrdersForSKU(it.sku); };
         tdSku.appendChild(a); tr.appendChild(tdSku);
 
-        // цифры
         const cols=[it.total_price, it.commission, it.cost, it.profit]
           .map(v => `${fmt(v||0)} ${cur}`);
         for(const v of cols){ const td=document.createElement('td'); td.textContent=v; tr.appendChild(td); }
@@ -608,7 +635,6 @@ function buildParams(){
   const end   = document.getElementById('end').value;
   const tz    = document.getElementById('tz').value || 'Asia/Almaty';
   const date_field = document.getElementById('date_field').value;
-  // нормализуем, чтобы в запрос ушли коды
   const states = normalizeStatesValue(document.getElementById('states').value);
   document.getElementById('states').value = states;
   const exc    = document.getElementById('exclude_states').checked ? 'CANCELED' : '';
@@ -627,7 +653,6 @@ function buildParams(){
 }
 
 async function runIdsJob(){
-  // отменяем предыдущую задачу, если есть
   if(CURRENT_JOB_ID){
     try{ await fetch(`/jobs/${CURRENT_JOB_ID}`, {method:'DELETE'}); }catch(_){}
     CURRENT_JOB_ID = null;
@@ -647,7 +672,6 @@ async function runIdsJob(){
     try{ await fetch(`/jobs/${job_id}`, {method:'DELETE'}); }catch(_){}
   };
 
-  // опрос статуса
   let done=false, errored=false;
   while(!done && !errored){
     await new Promise(r=>setTimeout(r, 700));
@@ -670,6 +694,10 @@ async function runIdsJob(){
       const rr = await fetch(`/jobs/${job_id}/result`);
       const data = await rr.json();
       CURRENT_JOB_ID=null;
+
+      // ← новая обязательная часть: прокидываем строки в мост
+      await syncBridgeFromIdsData(data);
+
       await renderIdsResult(data);
       break;
     }
@@ -679,14 +707,12 @@ async function runIdsJob(){
 }
 
 async function renderIdsResult(data){
-  // 1) карта «день → номера»
   window.__ordersByPeriod = {};
   for(const g of (data.groups||[])){
     const nums = (g.items||[]).map(it=>it.number).filter(Boolean);
     window.__ordersByPeriod[g.day] = Array.from(new Set(nums));
   }
 
-  // 2) карта «номер → список SKU»
   window.__orderToSkus = {};
   for(const g of (data.groups||[])){
     for(const o of (g.items||[])){
@@ -699,7 +725,6 @@ async function renderIdsResult(data){
     }
   }
 
-  // 3) рендер блока «Номера заказов (для сверки)»
   const container = document.getElementById('ids'); container.innerHTML='';
   const currency = data.currency || window.APP_CURRENCY || 'KZT';
   const totalCount = (typeof data.period_total_count === 'number') ? data.period_total_count : (data.items||[]).length;
@@ -714,7 +739,7 @@ async function renderIdsResult(data){
   btnCopy.onclick=()=>{ try{ const all=(data.items||[]).map(it=>it.number).join('\n'); navigator.clipboard?.writeText(all); setNote('Скопировано', 'ok'); }catch(_){ setNote('Не удалось скопировать', 'err'); } };
   const btnCsv=document.createElement('a'); btnCsv.className='btn'; btnCsv.textContent='Скачать CSV';
 
-  const params = buildParams(); params.set('grouped','0'); params.set('with_items','0'); params.set('limit','100000'); // чистый csv
+  const params = buildParams(); params.set('grouped','0'); params.set('with_items','0'); params.set('limit','100000');
   btnCsv.href=`/orders/ids.csv?${params.toString()}`; btnCsv.setAttribute('download','ids.csv');
 
   const btnExpand=document.createElement('button'); btnExpand.className='btn'; btnExpand.textContent='Раскрыть всё';
@@ -828,7 +853,7 @@ async function syncProfit(){
 
     const orders=(ids.items||[]).filter(x=>x.state==='KASPI_DELIVERY').map(x=>{
       const lines = Array.isArray(x.items)&&x.items.length
-        ? x.items.filter(li=>li&&li.sku).map(li=>({sku:String(li.sku),qty:Number(li.qty||1),unit_price:Number(li.unit_price||0)}))
+        ? x.items.filter(li=>li&&li.sku).map(li=>({sku:String(li.sku),qty:Number(li.qty||1),unit_price:Number(li.unit_price ?? (li.total_price && li.qty ? li.total_price/li.qty : 0))}))
         : (x.sku ? [{ sku:String(x.sku), qty:1, unit_price:Number(x.amount||0) }] : []);
       return { id:x.id, date:x.date, customer:null, items:lines };
     }).filter(o=>o.items.length);
@@ -845,7 +870,7 @@ async function syncProfit(){
 
     setNote(`Синхронизация FIFO: заказов=${upRes.orders_inserted+upRes.orders_updated}, позиций=${upRes.items_inserted}, списаний=${rbRes.recomputed}`, 'ok');
 
-    await runIdsJob(); await loadProfitFIFO(); renderOrderSkuMatrix(); await checkProfitStatus();
+    await runIdsJob(); await loadProfitFIFO(); await renderOrderSkuMatrix(); await checkProfitStatus();
   }catch(e){ setNote('Синхронизация не удалась: ' + (e.message||e), 'err'); }
 }
 
@@ -859,7 +884,7 @@ async function rebuildFifo(){
     const p=new URLSearchParams({date_from:df,date_to:dt});
     const res=await fetchProfitJSON('/profit/rebuild-ledger?'+p.toString(),{method:'POST'});
     setNote(`FIFO перестроен. Добавлено списаний: ${res?.recomputed||0}`, 'ok');
-    await runIdsJob(); await loadProfitFIFO(); renderOrderSkuMatrix(); await checkProfitStatus();
+    await runIdsJob(); await loadProfitFIFO(); await renderOrderSkuMatrix(); await checkProfitStatus();
   }catch(e){ setNote('Перестроение FIFO не удалось: ' + e.message, 'err'); }
   finally{ setBusy(false); }
 }
@@ -871,7 +896,7 @@ async function syncAndRebuild(){
     const p=new URLSearchParams({date_from:df,date_to:dt});
     const res=await fetchProfitJSON('/profit/rebuild-ledger?'+p.toString(),{method:'POST'});
     setNote(`Синхр.+пересчёт выполнены. Списаний: ${res?.recomputed||0}`, 'ok');
-    await runIdsJob(); await loadProfitFIFO(); renderOrderSkuMatrix(); await checkProfitStatus();
+    await runIdsJob(); await loadProfitFIFO(); await renderOrderSkuMatrix(); await checkProfitStatus();
   }catch(e){ setNote('Пересчёт не удался: ' + e.message, 'err'); }
   finally{ setBusy(false); }
 }
@@ -889,16 +914,12 @@ async function checkProfitStatus(analyticsData){
   try{
     const df=document.getElementById('start').value; const dt=document.getElementById('end').value;
     if(!df||!dt){ setSyncChip('warn','нет периода'); return; }
-    const ordersCount = (analyticsData && typeof analyticsData.total_orders==='number')
-      ? analyticsData.total_orders : (await fetch(`/orders/analytics?start=${df}&end=${dt}`)).json().total_orders;
-
     const p=new URLSearchParams({ date_from:df, date_to:dt, group_by:'total', use_bd:(document.getElementById('use_bd')?.checked?'1':'0'), bd_start:(document.getElementById('bd_start')?.value||'20:00') });
     const sum=await fetchProfitJSON('/profit/summary?'+p.toString());
     const t=sum.total||{revenue:0,commission:0,cost:0,profit:0};
 
     if((t.revenue||0)>0 || (t.cost||0)>0 || (t.commission||0)>0 || (t.profit||0)!==0) setSyncChip('ok','синхронизировано');
-    else if(ordersCount>0) setSyncChip('warn','требуется синхронизация/перестроение');
-    else setSyncChip('','нет заказов в периоде');
+    else setSyncChip('','нет данных FIFO в периоде');
   }catch(_){ setSyncChip('err','ошибка проверки статуса'); }
 }
 
@@ -981,7 +1002,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   try{
     await loadMeta();
 
-    // multiselect UI
     document.getElementById('btnStates')?.addEventListener('click', openStatusMenu);
     document.getElementById('btnStatusesAll')?.addEventListener('click', ()=>{
       STATUS_ORDER.forEach(k=>window.STATUS_SELECTED.add(k));
@@ -991,12 +1011,10 @@ document.addEventListener('DOMContentLoaded', async () => {
       window.STATUS_SELECTED.clear(); renderStatusGrid(); renderStatusChips(); syncStatesInput();
     });
     document.getElementById('btnStatusesApply')?.addEventListener('click', ()=>{
-      document.getElementById('statusMenu').classList.remove('open');
-      syncStatesInput();
+      document.getElementById('statusMenu').classList.remove('open'); syncStatesInput();
     });
 
-    // нормализация ручного ввода статусов на лету
-    document.getElementById('states')?.addEventListener('blur', ()=>{ 
+    document.getElementById('states')?.addEventListener('blur', ()=>{
       document.getElementById('states').value = normalizeStatesValue(document.getElementById('states').value);
     });
 
