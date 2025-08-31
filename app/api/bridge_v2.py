@@ -14,12 +14,17 @@ router = APIRouter()
 # Конфигурация
 # ─────────────────────────────────────────────────────────────────────
 BRIDGE_ONLY_STATE = (os.getenv("BRIDGE_ONLY_STATE") or "KASPI_DELIVERY").strip() or None
+
 KASPI_FALLBACK_ENABLED = (os.getenv("KASPI_FALLBACK_ENABLED", "0").lower() in ("1", "true", "yes"))
 KASPI_TOKEN   = os.getenv("KASPI_TOKEN", "").strip()
 KASPI_BASEURL = (os.getenv("KASPI_BASE_URL") or "https://kaspi.kz/shop/api/v2").rstrip("/")
 
 # имя таблицы FIFO-ledger (можно переопределить через env)
 FIFO_LEDGER_TABLE = (os.getenv("FIFO_LEDGER_TABLE") or "fifo_ledger").strip()
+
+# откуда читать «Номера заказов»
+ORDERS_SERVICE_URL = (os.getenv("ORDERS_SERVICE_URL") or "http://127.0.0.1:8000").rstrip("/")
+BRIDGE_SOURCE_IDS  = os.getenv("BRIDGE_SOURCE_IDS", "1").lower() in ("1", "true", "yes")
 
 HTTPX_TIMEOUT = httpx.Timeout(connect=10.0, read=40.0, write=15.0, pool=40.0)
 HTTPX_LIMITS  = httpx.Limits(max_connections=30, max_keepalive_connections=10)
@@ -128,8 +133,7 @@ def _canon_sku(x: Optional[str]) -> Optional[str]:
     s = _canon_str(x, 128)
     if s is None:
         return None
-    # снимаем «.0» и пр. артефакты числовых сериализаций
-    if s.endswith(".0") and s.replace(".","",1).isdigit():
+    if s.endswith(".0") and s.replace(".", "", 1).isdigit():
         s = s[:-2]
     return s
 
@@ -345,10 +349,12 @@ def db_ping():
         "fallback_used": _FALLBACK_USED,
         "fallback_enabled": bool(KASPI_FALLBACK_ENABLED),
         "only_state": BRIDGE_ONLY_STATE,
+        "orders_service": ORDERS_SERVICE_URL,
+        "bridge_source_ids": BRIDGE_SOURCE_IDS,
     }
 
 # ─────────────────────────────────────────────────────────────────────
-# Синхронизация строк продаж
+# Синхронизация строк продаж: payload (ручной и из fallback)
 # ─────────────────────────────────────────────────────────────────────
 @router.post("/bridge/sync-by-ids")
 async def bridge_sync_by_ids(items: List[SyncItem] = Body(...)):
@@ -436,8 +442,8 @@ async def bridge_sync_by_ids(items: List[SyncItem] = Body(...)):
                     "sku": _canon_sku(e["sku"]),
                     "title": _canon_str(e.get("title"), 512),
                     "qty": int(e["qty"]),
-                    "unit_price": float(_safe_float(e["unit_price"])),
-                    "total_price": float(_safe_float(e["total_price"])),
+                    "unit_price": float(_safe_float(e["unit_price"]))),
+                    "total_price": float(_safe_float(e["total_price"]))),
                 }]
                 inserted += _upsert_rows(offline_rows)
                 touched_orders.add(str(ref.id))
@@ -452,6 +458,99 @@ async def bridge_sync_by_ids(items: List[SyncItem] = Body(...)):
         "fallback_used": fallback_used,
         "errors": errors,
     }
+
+# ─────────────────────────────────────────────────────────────────────
+# Синхронизация строк продаж: из «Номера заказов» (HTTP)
+# ─────────────────────────────────────────────────────────────────────
+@router.post("/bridge/sync-from-ids")
+def bridge_sync_from_ids(
+    date_from: str = Body(..., embed=True),
+    date_to:   str = Body(..., embed=True),
+    state: Optional[str] = Body(None, embed=True),
+):
+    """
+    Заполняет bridge_sales данными из /orders/ids (источник фронта «Номера заказов»).
+    Это делает таблицу /bridge/list 100% консистентной с тем, что видит пользователь.
+    """
+    ms_from = _to_ms(date_from); ms_to = _to_ms(date_to)
+    if ms_from is None or ms_to is None:
+        raise HTTPException(400, "date_from/date_to должны быть YYYY-MM-DD")
+
+    params = {
+        "start": date_from,
+        "end": date_to,
+        "grouped": "0",
+        "with_items": "1",
+        "items_mode": "all",
+        "limit": "100000",
+        "order": "asc",
+    }
+    if state: params["states"] = state
+    try:
+        with httpx.Client(base_url=ORDERS_SERVICE_URL, timeout=HTTPX_TIMEOUT, limits=HTTPX_LIMITS) as cli:
+            r = cli.get("/orders/ids", params=params)
+            r.raise_for_status()
+            data = r.json()
+    except Exception as e:
+        raise HTTPException(502, f"orders/ids fetch failed: {e}")
+
+    rows: List[Dict[str, Any]] = []
+    counters: DefaultDict[str, int] = defaultdict(int)
+
+    for it in (data.get("items") or []):
+        if BRIDGE_ONLY_STATE and it.get("state") and it["state"] != BRIDGE_ONLY_STATE:
+            continue
+        order_id = str(it.get("id") or "")
+        order_code = _canon_str(it.get("number"), 64)
+        state_val = _canon_str(it.get("state"), 64)
+        date_ms = _to_ms(it.get("date"))
+
+        # разбор позиций
+        if isinstance(it.get("items"), list) and it["items"]:
+            for li in it["items"]:
+                sku = _canon_sku(li.get("sku"))
+                if not sku:
+                    continue
+                qty = int(li.get("qty") or 1)
+                unit = _safe_float(li.get("unit_price"))
+                total = _line_total(qty, unit, li.get("sum"))
+                idx = counters[order_id]; counters[order_id] += 1
+                rows.append({
+                    "order_id": order_id,
+                    "line_index": idx,
+                    "order_code": order_code,
+                    "date_utc_ms": date_ms,
+                    "state": state_val,
+                    "sku": sku,
+                    "title": _canon_str(li.get("title") or li.get("name"), 512),
+                    "qty": qty,
+                    "unit_price": unit,
+                    "total_price": total,
+                })
+        else:
+            # одиночная строка (на всякий случай)
+            sku = _canon_sku(it.get("sku"))
+            if not sku:
+                continue
+            qty = 1
+            unit = _safe_float(it.get("amount"))
+            total = _line_total(qty, unit, it.get("amount"))
+            idx = counters[order_id]; counters[order_id] += 1
+            rows.append({
+                "order_id": order_id,
+                "line_index": idx,
+                "order_code": order_code,
+                "date_utc_ms": date_ms,
+                "state": state_val,
+                "sku": sku,
+                "title": _canon_str(it.get("title") or it.get("name"), 512),
+                "qty": qty,
+                "unit_price": unit,
+                "total_price": total,
+            })
+
+    inserted = _upsert_rows(rows)
+    return {"orders": len(counters), "rows": len(rows), "inserted": inserted}
 
 # ─────────────────────────────────────────────────────────────────────
 # Плоский список строк (фильтр по SKU)
@@ -520,7 +619,7 @@ def bridge_list(
     }
 
 # ─────────────────────────────────────────────────────────────────────
-# «№ заказа → позиции»
+# «№ заказа → позиции» (из bridge_sales, быстрый просмотр)
 # ─────────────────────────────────────────────────────────────────────
 @router.get("/bridge/by-orders")
 def bridge_by_orders(
@@ -609,7 +708,77 @@ def bridge_by_orders(
     }
 
 # ─────────────────────────────────────────────────────────────────────
+# Справка по комиссиям/себестоимости из «Мой склад» (fallback)
+# ─────────────────────────────────────────────────────────────────────
+def _fallback_commission_cost_for_skus(skus: List[str]) -> Dict[str, Dict[str, float]]:
+    """
+    Возвращает по SKU: {'commission_pct': float, 'avg_cost': float}
+    Берём commission_pct из последней партии, если None — из категории.
+    Среднюю себестоимость считаем по всем партиям: SUM(qty*unit_cost)/SUM(qty).
+    """
+    if not skus:
+        return {}
+    uniq = sorted({str(s) for s in skus})
+
+    out: Dict[str, Dict[str, float]] = {s: {"commission_pct": 0.0, "avg_cost": 0.0} for s in uniq}
+    with _get_conn() as c:
+        cur = c.cursor()
+        if _driver_name() == "sqlite":
+            ph = ",".join(["?"] * len(uniq))
+            cur.execute(f"SELECT sku, COALESCE(category,'') AS category FROM products WHERE sku IN ({ph})", uniq)
+            cat_by_sku = {r["sku"]: r["category"] for r in cur.fetchall()}
+            cur.execute("SELECT name, COALESCE(base_percent,0)+COALESCE(extra_percent,0)+COALESCE(tax_percent,0) AS pct FROM categories")
+            pct_by_cat = {r["name"]: float(r["pct"] or 0.0) for r in cur.fetchall()}
+            cur.execute(
+                f"""SELECT b.sku, b.commission_pct
+                    FROM batches b
+                    JOIN (
+                      SELECT sku, MAX(date) AS max_date, MAX(id) AS max_id
+                      FROM batches WHERE sku IN ({ph})
+                      GROUP BY sku
+                    ) m ON m.sku=b.sku AND b.id=m.max_id
+                    WHERE b.sku IN ({ph})""",
+                uniq + uniq
+            )
+            last_comm = {r["sku"]: r["commission_pct"] for r in cur.fetchall()}
+            cur.execute(
+                f"""SELECT sku, (SUM(qty*unit_cost)*1.0)/NULLIF(SUM(qty),0) AS avg_cost
+                    FROM batches WHERE sku IN ({ph}) GROUP BY sku""",
+                uniq
+            )
+            avg_cost = {r["sku"]: float(r["avg_cost"] or 0.0) for r in cur.fetchall()}
+        else:
+            cur.execute("SELECT sku, COALESCE(category,'') AS category FROM products WHERE sku = ANY(%s)", (uniq,))
+            cat_by_sku = {r[0]: r[1] for r in cur.fetchall()}
+            cur.execute("""
+                SELECT name, COALESCE(base_percent,0)+COALESCE(extra_percent,0)+COALESCE(tax_percent,0) AS pct
+                FROM categories
+            """)
+            pct_by_cat = {r[0]: float(r[1] or 0.0) for r in cur.fetchall()}
+            cur.execute("""
+                SELECT DISTINCT ON (sku) sku, commission_pct
+                FROM batches
+                WHERE sku = ANY(%s)
+                ORDER BY sku, date DESC, id DESC
+            """, (uniq,))
+            last_comm = {r[0]: r[1] for r in cur.fetchall()}
+            cur.execute("""
+                SELECT sku, SUM(qty*unit_cost)::float / NULLIF(SUM(qty),0)::float AS avg_cost
+                FROM batches WHERE sku = ANY(%s) GROUP BY sku
+            """, (uniq,))
+            avg_cost = {r[0]: float(r[1] or 0.0) for r in cur.fetchall()}
+
+    for s in uniq:
+        pct = last_comm.get(s)
+        if pct is None:
+            pct = pct_by_cat.get(cat_by_sku.get(s, ""), 0.0)
+        out[s]["commission_pct"] = float(pct or 0.0)
+        out[s]["avg_cost"] = float(avg_cost.get(s, 0.0))
+    return out
+
+# ─────────────────────────────────────────────────────────────────────
 # «№ заказа → позиции» + маржинальность (FIFO) с точным распределением
+# (источник данных по заказам — «Номера заказов», при сбое — bridge_sales)
 # ─────────────────────────────────────────────────────────────────────
 @router.get("/bridge/by-orders-margins")
 def bridge_by_orders_margins(
@@ -620,42 +789,121 @@ def bridge_by_orders_margins(
 ):
     """
     Возвращает заказы с позициями и маржой по каждой позиции.
-    Источник позиций: bridge_sales.
-    Маржа берётся из FIFO-ledger и распределяется по строкам (одинаковым ключам) ПРОПОРЦИОНАЛЬНО
-    сумме строки (если сумма недоступна — по qty). Это исключает дублирование и расхождения.
-    Поля items: sku, title, qty, unit_price, total_price, commission, cost, profit
-    Поля totals: revenue, commission, cost, profit, count_items, count_lines
+
+    Источник позиций: /orders/ids (Номера заказов). Fallback: bridge_sales.
+    Маржа берётся из FIFO-ledger и распределяется по строкам ПРОПОРЦИОНАЛЬНО сумме строки
+    (если сумма недоступна — по qty). Так исключаем дублирование/расхождения.
     """
-    _init_bridge_sales()
-    ms_from = _to_ms(date_from)
-    ms_to   = _to_ms(date_to)
+    # 0) временной диапазон и ms/sec для ledger
+    ms_from = _to_ms(date_from); ms_to = _to_ms(date_to)
     if ms_from is None or ms_to is None:
         raise HTTPException(400, "date_from/date_to должны быть YYYY-MM-DD")
-    ms_to = ms_to + 24*3600*1000 - 1  # включительно
+    ms_to = ms_to + 24*3600*1000 - 1
+    sec_from, sec_to = ms_from // 1000, ms_to // 1000
 
-    # 1) Читаем строки продаж (bridge_sales)
-    where = ["date_utc_ms BETWEEN :ms_from AND :ms_to"]
-    params: Dict[str, Any] = {"ms_from": ms_from, "ms_to": ms_to}
-    if state:
-        where.append("state = :state")
-        params["state"] = state
+    # 1) Грузим заказы из «Номера заказов» (или fallback на bridge_sales)
+    orders_lines: List[Dict[str, Any]] = []  # элементы: {order_code, order_id, date_ms, state, sku, title, qty, unit_price, total_price}
+    source_used = "ids"
+    if BRIDGE_SOURCE_IDS:
+        try:
+            params = {
+                "start": date_from,
+                "end": date_to,
+                "grouped": "0",
+                "with_items": "1",
+                "items_mode": "all",
+                "limit": "100000",
+                "order": order,
+            }
+            if state: params["states"] = state
+            with httpx.Client(base_url=ORDERS_SERVICE_URL, timeout=HTTPX_TIMEOUT, limits=HTTPX_LIMITS) as cli:
+                r = cli.get("/orders/ids", params=params)
+                r.raise_for_status()
+                j = r.json()
+            for it in (j.get("items") or []):
+                if BRIDGE_ONLY_STATE and it.get("state") and it["state"] != BRIDGE_ONLY_STATE:
+                    continue
+                order_id = str(it.get("id") or "")
+                order_code = _canon_str(it.get("number"), 64) or ""
+                date_ms = _to_ms(it.get("date"))
+                st = _canon_str(it.get("state"), 64)
+                if isinstance(it.get("items"), list) and it["items"]:
+                    for li in it["items"]:
+                        sku = _canon_sku(li.get("sku")); 
+                        if not sku: 
+                            continue
+                        qty = int(li.get("qty") or 1)
+                        unit = _safe_float(li.get("unit_price"))
+                        total = _line_total(qty, unit, li.get("sum"))
+                        orders_lines.append(dict(
+                            order_code=order_code, order_id=order_id, date_ms=date_ms, state=st,
+                            sku=sku, title=_canon_str(li.get("title") or li.get("name"), 512),
+                            qty=qty, unit_price=unit, total_price=total
+                        ))
+                else:
+                    sku = _canon_sku(it.get("sku"))
+                    if not sku:
+                        continue
+                    qty = 1
+                    unit = _safe_float(it.get("amount"))
+                    total = _line_total(qty, unit, it.get("amount"))
+                    orders_lines.append(dict(
+                        order_code=order_code, order_id=order_id, date_ms=date_ms, state=st,
+                        sku=sku, title=_canon_str(it.get("title") or it.get("name"), 512),
+                        qty=qty, unit_price=unit, total_price=total
+                    ))
+        except Exception:
+            source_used = "bridge"
 
+    if not orders_lines:
+        # fallback: читаем из bridge_sales
+        source_used = "bridge"
+        where = ["date_utc_ms BETWEEN :ms_from AND :ms_to"]
+        params: Dict[str, Any] = {"ms_from": ms_from, "ms_to": ms_to}
+        if state:
+            where.append("state = :state")
+            params["state"] = state
+        _init_bridge_sales()
+        with _get_conn() as c:
+            cur = c.cursor()
+            if _driver_name() == "sqlite":
+                sql = f"""
+                    SELECT order_id, order_code, date_utc_ms, state, sku, title, qty, unit_price, total_price
+                    FROM bridge_sales
+                    WHERE {" AND ".join(where)}
+                    ORDER BY date_utc_ms {"ASC" if order=="asc" else "DESC"}, order_id, line_index
+                """
+                cur.execute(sql, params)
+                rows = [dict(r) for r in cur.fetchall()]
+            else:
+                sql = f"""
+                    SELECT order_id, order_code, date_utc_ms, state, sku, title, qty, unit_price, total_price
+                    FROM bridge_sales
+                    WHERE {" AND ".join([w.replace(":", "%(")+")" for w in where])}
+                    ORDER BY date_utc_ms {"ASC" if order=="asc" else "DESC"}, order_id, line_index
+                """
+                cur.execute(sql, params)
+                rows = [dict(zip([d[0] for d in cur.description], r)) for r in cur.fetchall()]
+        for r in rows:
+            qty = int(r.get("qty") or 1)
+            unit = _safe_float(r.get("unit_price"))
+            total = _line_total(qty, unit, r.get("total_price"))
+            orders_lines.append(dict(
+                order_code=str(r.get("order_code") or ""),
+                order_id=str(r.get("order_id") or ""),
+                date_ms=int(r.get("date_utc_ms") or 0),
+                state=_canon_str(r.get("state"), 64),
+                sku=str(r.get("sku") or ""),
+                title=_canon_str(r.get("title"), 512),
+                qty=qty, unit_price=unit, total_price=total
+            ))
+
+    # 2) Агрегаты FIFO-ledger по (order_code, sku) — учитываем и ms, и sec
     with _get_conn() as c:
         cur = c.cursor()
         if _driver_name() == "sqlite":
-            sql_bs = f"""
-                SELECT order_id, order_code, date_utc_ms, state, sku, title, qty, unit_price, total_price, line_index
-                FROM bridge_sales
-                WHERE {" AND ".join(where)}
-                ORDER BY date_utc_ms {"ASC" if order=="asc" else "DESC"}, order_id, line_index
-            """
-            cur.execute(sql_bs, params)
-            bs_rows = [dict(r) for r in cur.fetchall()]
-
-            # наличие ledger
             cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (FIFO_LEDGER_TABLE,))
             ledger_exists = cur.fetchone() is not None
-
             if ledger_exists:
                 sql_l = f"""
                     SELECT order_code, sku,
@@ -664,26 +912,19 @@ def bridge_by_orders_margins(
                            SUM(COALESCE(revenue,0))    AS revenue,
                            SUM(COALESCE(profit,0))     AS profit
                     FROM {FIFO_LEDGER_TABLE}
-                    WHERE date_utc_ms BETWEEN :ms_from AND :ms_to
+                    WHERE
+                      (date_utc_ms BETWEEN ? AND ?)
+                      OR (date_utc_ms BETWEEN ? AND ?)
+                      OR (date_utc_ms IS NULL)
                     GROUP BY order_code, sku
                 """
-                cur.execute(sql_l, params)
+                cur.execute(sql_l, (ms_from, ms_to, sec_from, sec_to))
                 ledger_rows = [dict(r) for r in cur.fetchall()]
             else:
                 ledger_rows = []
         else:
-            sql_bs = f"""
-                SELECT order_id, order_code, date_utc_ms, state, sku, title, qty, unit_price, total_price, line_index
-                FROM bridge_sales
-                WHERE {" AND ".join([w.replace(":", "%(")+")" for w in where])}
-                ORDER BY date_utc_ms {"ASC" if order=="asc" else "DESC"}, order_id, line_index
-            """
-            cur.execute(sql_bs, params)
-            bs_rows = [dict(zip([d[0] for d in cur.description], r)) for r in cur.fetchall()]
-
             cur.execute("SELECT to_regclass(%s)", (FIFO_LEDGER_TABLE,))
             ledger_exists = cur.fetchone()[0] is not None
-
             if ledger_exists:
                 sql_l = f"""
                     SELECT order_code, sku,
@@ -692,15 +933,17 @@ def bridge_by_orders_margins(
                            SUM(COALESCE(revenue,0))    AS revenue,
                            SUM(COALESCE(profit,0))     AS profit
                     FROM {FIFO_LEDGER_TABLE}
-                    WHERE date_utc_ms BETWEEN %(ms_from)s AND %(ms_to)s
+                    WHERE
+                      (date_utc_ms BETWEEN %(msf)s AND %(mst)s)
+                      OR (date_utc_ms BETWEEN %(sf)s AND %(st)s)
+                      OR (date_utc_ms IS NULL)
                     GROUP BY order_code, sku
                 """
-                cur.execute(sql_l, params)
+                cur.execute(sql_l, dict(msf=ms_from, mst=ms_to, sf=sec_from, st=sec_to))
                 ledger_rows = [dict(zip([d[0] for d in cur.description], r)) for r in cur.fetchall()]
             else:
                 ledger_rows = []
 
-    # 2) Готовим агрегаты ledger по ключу (order_code, sku)
     ledger_map: Dict[Tuple[str, str], Dict[str, float]] = {}
     for r in ledger_rows:
         key = (str(r.get("order_code") or ""), str(r.get("sku") or ""))
@@ -711,50 +954,39 @@ def bridge_by_orders_margins(
             "profit": _safe_float(r.get("profit")),
         }
 
-    # 3) Группируем строки продаж по заказам и по ключу (order_code, sku) для распределения
+    # 3) Группировка по заказам + подготовка распределения по ключу (order_code, sku)
     grouped_orders: Dict[str, Dict[str, Any]] = {}
     lines_by_key: DefaultDict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
     weight_sum_by_key: DefaultDict[Tuple[str, str], float] = defaultdict(float)
 
-    for r in bs_rows:
-        code = str(r.get("order_code") or "")
+    for ln in orders_lines:
+        code = ln["order_code"]
         if code not in grouped_orders:
             grouped_orders[code] = {
                 "order_code": code,
-                "order_id": r.get("order_id"),
-                "date": datetime.utcfromtimestamp((r.get("date_utc_ms") or 0)/1000).isoformat(timespec="seconds"),
-                "state": r.get("state"),
+                "order_id": ln["order_id"],
+                "date": datetime.utcfromtimestamp((ln["date_ms"] or 0)/1000).isoformat(timespec="seconds"),
+                "state": ln.get("state"),
                 "items": [],
                 "totals": {"revenue": 0.0, "commission": 0.0, "cost": 0.0, "profit": 0.0, "count_items": 0, "count_lines": 0},
+                "source": source_used,
             }
-
-        qty = int(r.get("qty") or 1)
-        unit = _safe_float(r.get("unit_price"))
-        revenue = _line_total(qty, unit, r.get("total_price"))
-
-        line = {
-            "order_code": code,
-            "sku": str(r.get("sku") or ""),
-            "title": r.get("title"),
-            "qty": qty,
-            "unit_price": unit,
-            "total_price": revenue,
-            "commission": 0.0,
-            "cost": 0.0,
-            "profit": 0.0,
-        }
-        grouped_orders[code]["items"].append(line)
-        grouped_orders[code]["totals"]["revenue"]    += revenue
-        grouped_orders[code]["totals"]["count_items"]+= qty
+        grouped_orders[code]["items"].append({
+            "sku": ln["sku"], "title": ln.get("title"),
+            "qty": ln["qty"], "unit_price": ln["unit_price"],
+            "total_price": ln["total_price"],
+            "commission": 0.0, "cost": 0.0, "profit": 0.0,
+        })
+        grouped_orders[code]["totals"]["revenue"]    += ln["total_price"]
+        grouped_orders[code]["totals"]["count_items"]+= int(ln["qty"] or 1)
         grouped_orders[code]["totals"]["count_lines"]+= 1
 
-        key = (code, line["sku"])
-        lines_by_key[key].append(line)
-        # вес распределения: сумма строки, если >0; иначе qty
-        weight = revenue if revenue > 0 else float(qty or 0)
-        weight_sum_by_key[key] += (weight if weight > 0 else 1.0)
+        key = (code, ln["sku"])
+        lines_by_key[key].append(grouped_orders[code]["items"][-1])
+        w = ln["total_price"] if ln["total_price"] > 0 else float(ln["qty"] or 0)
+        weight_sum_by_key[key] += (w if w > 0 else 1.0)
 
-    # 4) Распределяем агрегаты ledger по строкам
+    # 4) Распределяем агрегации ledger по строкам
     for key, agg in ledger_map.items():
         lines = lines_by_key.get(key) or []
         if not lines:
@@ -763,23 +995,29 @@ def bridge_by_orders_margins(
         if total_weight <= 0:
             total_weight = float(len(lines))
 
-        for i, ln in enumerate(lines):
-            # доля строки
+        for ln in lines:
             w = ln["total_price"] if ln["total_price"] > 0 else float(ln["qty"] or 0)
-            if w <= 0:
-                w = 1.0
+            if w <= 0: w = 1.0
             share = min(1.0, max(0.0, w / total_weight))
-
             commission = agg["commission"] * share
             cost       = agg["cost"] * share
-            # прибыль считаем надёжно от выручки строки + распределённых затрат:
-            profit     = ln["total_price"] - commission - cost
-
             ln["commission"] = commission
             ln["cost"]       = cost
-            ln["profit"]     = profit
+            ln["profit"]     = ln["total_price"] - commission - cost
 
-    # 5) Итоги по заказам
+    # 5) Fallback: если по ключу нет ledger, добиваем из «Мой склад»
+    need_fallback_skus = sorted({ ln["sku"] for key, lines in lines_by_key.items() if key not in ledger_map for ln in lines })
+    fb_map = _fallback_commission_cost_for_skus(need_fallback_skus) if need_fallback_skus else {}
+    for key, lines in lines_by_key.items():
+        if key in ledger_map:
+            continue
+        for ln in lines:
+            ref = fb_map.get(ln["sku"], {"commission_pct": 0.0, "avg_cost": 0.0})
+            ln["commission"] = round(ln["total_price"] * (ref["commission_pct"] / 100.0), 4)
+            ln["cost"]       = round(ref["avg_cost"] * int(ln["qty"] or 1), 4)
+            ln["profit"]     = ln["total_price"] - ln["commission"] - ln["cost"]
+
+    # 6) Финальные итоги по заказам
     orders_out = []
     for code, od in grouped_orders.items():
         t = od["totals"]
@@ -796,5 +1034,5 @@ def bridge_by_orders_margins(
         "orders": orders_out,
         "driver": _driver_name(),
         "fallback_used": _FALLBACK_USED,
-        "note": "Привязка заказ → SKU с маржой по FIFO; распределение по строкам пропорционально сумме строки.",
+        "note": "Источник: Номера заказов (fallback bridge). Ledger ms/sec. Fallback комиссия/себестоимость из «Мой склад».",
     }
