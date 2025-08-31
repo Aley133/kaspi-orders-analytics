@@ -548,25 +548,59 @@ function buildOrderItemsTable(group, currency){
   return table;
 }
 
-function renderOrderSkuMatrix(){
-  const box = document.getElementById('orderSkuMatrix');
-  box.innerHTML = '';
-  const entries = Object.entries(window.__orderToSkus||{});
-  if(!entries.length){ box.textContent='Нет данных'; box.classList.add('muted'); return; }
-  const tbl = document.createElement('table'); tbl.className='table';
-  tbl.innerHTML = `<thead><tr><th style="width:200px">№ заказа</th><th>SKU</th></tr></thead><tbody></tbody>`;
-  const tb = tbl.querySelector('tbody');
-  for(const [order, skus] of entries.sort()){
-    const tr = document.createElement('tr');
-    const tdNum = document.createElement('td'); tdNum.textContent = order; tr.appendChild(tdNum);
-    const tdSku = document.createElement('td'); tdSku.className='matrix-sku';
-    (skus||[]).forEach(s=>{
-      const a=document.createElement('a'); a.textContent=s; a.href='#'; a.onclick=(e)=>{ e.preventDefault(); showOrdersForSKU(s); };
-      tdSku.appendChild(a);
-    });
-    tr.appendChild(tdSku); tb.appendChild(tr);
+async function renderOrderSkuMatrix(){
+  const df=document.getElementById('start').value;
+  const dt=document.getElementById('end').value;
+  const box=document.getElementById('orderSkuMatrix');
+  box.innerHTML='Загружаем…';
+
+  try{
+    const url = '/profit/bridge/by-orders-margins?' + new URLSearchParams({
+      date_from: df, date_to: dt, state: 'KASPI_DELIVERY', order: 'asc'
+    }).toString();
+    const data = await fetchProfitJSON(url);
+    const cur = window.APP_CURRENCY || 'KZT';
+
+    if(!data.orders?.length){ box.classList.add('muted'); box.textContent='Нет данных'; return; }
+
+    // таблица: № заказа | SKU | Выручка | Комиссия | Себестоимость | Прибыль
+    const tbl=document.createElement('table'); tbl.className='table';
+    tbl.innerHTML=`<thead>
+      <tr><th style="width:200px">№ заказа</th><th>SKU</th>
+          <th>Выручка</th><th>Комиссия</th><th>Себестоимость</th><th>Прибыль</th></tr>
+    </thead><tbody></tbody>`;
+    const tb=tbl.querySelector('tbody');
+
+    // сохраняем карту «день → номера» как раньше (для таблицы периодов)
+    window.__ordersByPeriod = window.__ordersByPeriod || {};
+
+    for(const ord of data.orders){
+      // одна строка на каждую позицию заказа
+      for(const it of (ord.items||[])){
+        const tr=document.createElement('tr');
+
+        // № заказа
+        const tdNum=document.createElement('td'); tdNum.textContent = ord.order_code || ord.order_id || ''; tr.appendChild(tdNum);
+
+        // SKU с кликом — покажем заказы по SKU
+        const tdSku=document.createElement('td'); tdSku.className='matrix-sku';
+        const a=document.createElement('a'); a.textContent=it.sku||''; a.href='#';
+        a.onclick=(e)=>{ e.preventDefault(); showOrdersForSKU(it.sku); };
+        tdSku.appendChild(a); tr.appendChild(tdSku);
+
+        // цифры
+        const cols=[it.total_price, it.commission, it.cost, it.profit]
+          .map(v => `${fmt(v||0)} ${cur}`);
+        for(const v of cols){ const td=document.createElement('td'); td.textContent=v; tr.appendChild(td); }
+
+        tb.appendChild(tr);
+      }
+    }
+
+    box.classList.remove('muted'); box.innerHTML=''; box.appendChild(tbl);
+  }catch(e){
+    box.className='muted'; box.textContent='Ошибка: ' + (e.message||e);
   }
-  box.classList.remove('muted'); box.appendChild(tbl);
 }
 
 function buildParams(){
