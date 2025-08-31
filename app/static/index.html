@@ -676,6 +676,12 @@ async function syncProfit(){
     });
     const ids = await (await fetch('/orders/ids?' + qs.toString())).json();
 
+    const firstSku = (top.rows || [])[0]?.sku;
+    if (firstSku) {
+      document.getElementById('skuInput').value = firstSku; // если есть инпут
+      await showOrdersForSku(firstSku); // твоя функция, которая ходит в /profit/bridge/list
+    }
+    
     const orders = (ids.items||[])
       .filter(x => x.state === 'KASPI_DELIVERY')
       .map(x => {
