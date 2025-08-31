@@ -4,74 +4,45 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Kaspi Orders Analytics</title>
+  <link rel="stylesheet" href="style.css" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <style>
-    :root{
-      --bg:#0b0c0f; --fg:#e5e7eb; --muted:#9ca3af; --line:#2a2f3a; --card:#111318; --accent:#10b981;
-      --danger:#ef4444; --warn:#f59e0b;
-    }
-    [data-theme="light"]{
-      --bg:#f8fafc; --fg:#0f172a; --muted:#64748b; --line:#e2e8f0; --card:#ffffff; --accent:#059669;
-      --danger:#dc2626; --warn:#d97706;
-    }
-
-    *{box-sizing:border-box}
-    html,body{height:100%}
-    body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Helvetica Neue","Noto Sans",Arial,"Apple Color Emoji","Segoe UI Emoji"}
-    a{color:inherit}
-    .layout{display:flex;min-height:100vh}
-    .sidebar{width:240px;border-right:1px solid var(--line);padding:16px;background:var(--card)}
-    .content{flex:1;min-width:0;padding:16px 18px}
-
-    .brand{font-weight:800;letter-spacing:.3px;margin-bottom:12px}
-    .nav{display:flex;flex-direction:column;gap:6px;margin:6px 0 16px}
-    .nav a{padding:6px 8px;border-radius:8px;color:var(--fg);text-decoration:none}
-    .nav a:hover{background:var(--bg)}
-
-    .row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-    .filters input,.filters select{height:32px;border:1px solid var(--line);background:var(--card);color:var(--fg);border-radius:8px;padding:0 10px}
-    .btn{height:32px;padding:0 12px;border:1px solid var(--line);background:var(--card);color:var(--fg);border-radius:8px;cursor:pointer}
-    .btn.secondary{opacity:.9}
-    .btn[disabled]{opacity:.5;pointer-events:none}
-
-    .shell{border:1px solid var(--line);background:var(--card);border-radius:14px;padding:12px;margin:16px 0}
-    .kpi{display:flex;gap:12px;flex-wrap:wrap}
-    .kpi-item{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 12px;min-width:170px}
-    .kpi-label{font-size:12px;color:var(--muted)}
-    .kpi-value{font-size:22px;font-weight:700}
-    .kpi-sub{font-size:12px;color:var(--muted)}
-
+    /* утилиты */
     .chip{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:999px;padding:4px 8px;background:var(--card);font-size:12px}
-    .dot{width:8px;height:8px;border-radius:50%;background:#9ca3af;display:inline-block}
-    .dot.on{background:var(--accent)} .dot.warn{background:var(--warn)} .dot.err{background:var(--danger)}
-
+    .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#9ca3af}
+    .dot.on{background:#10b981}.dot.warn{background:#f59e0b}.dot.err{background:#ef4444}
     .table{width:100%;border-collapse:collapse}
-    .table th,.table td{border-bottom:1px solid var(--line);padding:8px 10px;vertical-align:top;text-align:left}
-    .table thead th{font-size:12px;color:var(--muted);font-weight:600}
-    .nowrap{white-space:nowrap}
-    .codes-cell{max-width:520px;white-space:normal;word-break:break-word}
-    .clickable{cursor:pointer;text-decoration:underline}
-
-    .order-table{width:100%;border-collapse:collapse;margin:6px 0 12px}
-    .order-table th,.order-table td{padding:6px 8px;border-bottom:1px solid var(--line);font-size:13px}
-
-    .note{margin:8px 0 12px;padding:8px 10px;border-radius:10px;display:none}
-    .note.ok{display:block;background:color-mix(in oklab, var(--accent) 12%, transparent);border:1px solid color-mix(in oklab, var(--accent) 45%, transparent);color:var(--fg)}
-    .note.err{display:block;background:color-mix(in oklab, var(--danger) 12%, transparent);border:1px solid color-mix(in oklab, var(--danger) 45%, transparent);color:var(--fg)}
-    .muted{color:var(--muted)}
-
+    .table th,.table td{border-bottom:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top}
+    .note{margin:8px 0 12px;padding:8px 10px;border-radius:8px;display:none}
+    .note.ok{display:block;background:#ecfdf5;color:#065f46;border:1px solid #a7f3d0}
+    .note.err{display:block;background:#fef2f2;color:#991b1b;border:1px solid #fecaca}
+    .muted{color:#6b7280}
+    .btn[disabled]{opacity:.6;pointer-events:none}
     .ids-summary{margin:8px 0}
     .ids-actions{display:flex;gap:8px;margin:8px 0;flex-wrap:wrap}
     .ids-groups details{margin:8px 0}
     .pill{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:4px 8px;margin:2px 4px 0 0;background:var(--card)}
-    .matrix-sku a{display:inline-block;margin:2px 8px 2px 0}
+    .kpi{display:flex;gap:12px;flex-wrap:wrap}
+    .kpi-item{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 12px;min-width:160px}
+    .kpi-label{font-size:12px;color:#6b7280}.kpi-value{font-size:20px;font-weight:600}.kpi-sub{font-size:12px;color:#6b7280}
+    .layout{display:flex;min-height:100vh}.sidebar{width:240px;border-right:1px solid var(--line);padding:16px}
+    .content{flex:1;padding:16px;min-width:0}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+    .shell{border:1px solid var(--line);border-radius:12px;padding:12px;margin:16px 0}
+    .brand{font-weight:700;margin-bottom:12px}.nav{display:flex;flex-direction:column;gap:6px;margin-bottom:16px}
+    .nav-item{padding:6px 8px;border-radius:6px}.nav-item:hover{background:var(--card)}
     .theme-switch{display:flex;align-items:center;gap:8px;margin-top:auto}
-    .switch{position:relative;display:inline-block;width:40px;height:20px}
-    .switch input{opacity:0;width:0;height:0}
+    .switch{position:relative;display:inline-block;width:40px;height:20px}.switch input{opacity:0;width:0;height:0}
     .slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:#d1d5db;border-radius:999px;transition:.2s}
     .slider:before{position:absolute;content:"";height:16px;width:16px;left:2px;top:2px;background:white;border-radius:50%;transition:.2s}
-    .switch input:checked + .slider{background:var(--accent)}
-    .switch input:checked + .slider:before{transform:translateX(20px)}
+    .switch input:checked + .slider{background:#10b981}.switch input:checked + .slider:before{transform:translateX(20px)}
+    .order-table{width:100%;border-collapse:collapse;margin:6px 0 12px}
+    .order-table th,.order-table td{padding:6px 8px;border-bottom:1px solid var(--line);font-size:13px}
+    .nowrap{white-space:nowrap}.clickable{cursor:pointer;text-decoration:underline}
+    .codes-cell{max-width:520px;white-space:normal;word-break:break-word}
+    /* аккуратная «одна табличка» № заказа → SKU */
+    .order-sku-shell{border:1px solid var(--line);border-radius:12px;padding:0;margin:16px 0}
+    .order-sku-shell table{margin:0}
+    .order-sku-shell thead th{background:var(--card);font-weight:600}
   </style>
 </head>
 <body data-theme="light">
@@ -79,10 +50,10 @@
     <aside class="sidebar">
       <div class="brand">⚡ LeoXpress</div>
       <nav class="nav">
-        <a href="stock.html">Мой склад</a>
-        <a href="#">Предзаказ</a>
-        <a href="#">Демпинг</a>
-        <a href="#">WhatsApp Рассылка</a>
+        <a class="nav-item" href="stock.html">Мой склад</a>
+        <a class="nav-item" href="#">Предзаказ</a>
+        <a class="nav-item" href="#">Демпинг</a>
+        <a class="nav-item" href="#">WhatsApp Рассылка</a>
       </nav>
       <div class="theme-switch">
         <label class="switch"><input type="checkbox" id="themeToggle"><span class="slider"></span></label>
@@ -90,44 +61,42 @@
       </div>
     </aside>
 
-    <main class="content">
-      <h1 style="margin:0 0 12px">Аналитика заказов Kaspi</h1>
+    <div class="content">
+      <h1>Аналитика заказов Kaspi</h1>
 
-      <!-- ФИЛЬТРЫ -->
-      <form id="f" class="filters shell" style="margin-top:12px">
+      <form id="f" class="filters">
         <div class="row">
           <label>Начало</label><input type="date" id="start" required>
           <label>Конец</label><input type="date" id="end" required>
-          <label>Часовой пояс</label><input type="text" id="tz" value="Asia/Almaty" style="width:140px">
-          <label>Поле даты</label><select id="date_field" style="width:170px"></select>
+          <label>Часовой пояс</label><input type="text" id="tz" value="Asia/Almaty">
+          <label>Поле даты</label><select id="date_field"></select>
         </div>
-        <div class="row" style="margin-top:8px">
-          <label>Статусы (включить)</label><input type="text" id="states" placeholder="через запятую, напр. NEW,DELIVERED" style="min-width:320px">
+        <div class="row">
+          <label>Статусы (включить)</label><input type="text" id="states" placeholder="через запятую, напр. NEW,DELIVERED">
           <label class="chk"><input type="checkbox" id="exclude_states" checked> Исключить CANCELED</label>
         </div>
-        <div class="row" style="margin-top:8px">
+        <div class="row">
           <label class="chk"><input type="checkbox" id="use_bd" checked> День магазина</label>
           <label>Начало дня</label><input type="time" id="bd_start" value="20:00" step="60">
-          <span id="bdInfo" class="muted"></span>
-          <button type="submit" class="btn" id="btn-run" style="margin-left:auto">Показать</button>
+          <button type="submit" class="btn" id="btn-run">Показать</button>
         </div>
+        <div id="bdInfo" class="muted"></div>
       </form>
 
       <div id="note" class="note"></div>
 
-      <!-- KPI ПЕРИОДА -->
       <section class="kpi">
         <div class="kpi-item"><div class="kpi-label">Период</div><div class="kpi-value" id="periodLabel">—</div><div class="kpi-sub">до <span id="periodCutoff">—:—</span></div></div>
         <div class="kpi-item"><div class="kpi-label">Заказы</div><div class="kpi-value" id="kpiOrders">0</div></div>
         <div class="kpi-item"><div class="kpi-label">Оборот</div><div class="kpi-value" id="kpiAmount">0</div></div>
       </section>
 
-      <!-- БЛОК FIFO -->
+      <!-- ======== FIFO ======== -->
       <section class="shell">
         <div class="row" style="justify-content:space-between;align-items:center;">
           <h2 style="margin:0">Прибыль (FIFO)</h2>
           <div class="row" style="gap:10px;align-items:center">
-            <span id="profitKeyBadge" class="chip" title="Ключ для защищённых эндпоинтов"><span class="dot"></span><span>ключ не задан</span></span>
+            <span id="profitKeyBadge" class="chip" title="Ключ Kaspi для защищённых эндпоинтов FIFO"><span class="dot"></span><span>ключ не задан</span></span>
             <span id="profitSyncChip" class="chip" title="Статус синхронизации"><span class="dot"></span><span>статус неизвестен</span></span>
             <button type="button" class="btn secondary" id="btnProfitApiKey">API-Key</button>
             <label for="profitGroup">Группировка</label>
@@ -151,17 +120,19 @@
         <div id="profitEmpty" class="muted" style="display:none;padding:8px 0">Нет данных для выбранного периода</div>
 
         <div class="row" style="gap:16px; margin-top:16px; align-items:flex-start; flex-wrap:wrap">
-          <div style="flex:1; min-width:340px">
+          <div style="flex:1; min-width:320px">
             <h3 style="margin:0 0 6px">Таблица периодов</h3>
             <table id="tbl-profit" class="table">
-              <thead><tr>
-                <th>Период</th><th>Выручка</th><th>Комиссия</th><th>Себестоимость</th><th>Прибыль</th><th>Номера заказа</th>
-              </tr></thead>
+              <thead>
+                <tr>
+                  <th>Период</th><th>Выручка</th><th>Комиссия</th><th>Себестоимость</th><th>Прибыль</th><th>Номера заказа</th>
+                </tr>
+              </thead>
               <tbody></tbody>
             </table>
           </div>
 
-          <div style="flex:1; min-width:340px">
+          <div style="flex:1; min-width:320px">
             <h3 style="margin:0 0 6px">Топ SKU по прибыли <span class="muted">(кликните SKU — покажем номера заказов)</span></h3>
             <table id="tbl-profit-sku" class="table">
               <thead><tr><th>SKU</th><th>Выручка</th><th>Комиссия</th><th>Себестоимость</th><th>Прибыль</th></tr></thead>
@@ -170,6 +141,7 @@
           </div>
         </div>
 
+        <!-- Заказы по SKU -->
         <div class="shell" style="margin-top:12px">
           <div class="row" style="justify-content:space-between;align-items:center">
             <h3 style="margin:0">Заказы по SKU</h3>
@@ -183,14 +155,8 @@
           <div id="skuOrders"></div>
         </div>
       </section>
+      <!-- ======== /FIFO ======== -->
 
-      <!-- МАТРИЦА: № заказа → SKU -->
-      <section class="shell">
-        <h3 style="margin:0 0 6px">Привязка: № заказа → SKU</h3>
-        <div id="orderSkuMatrix" class="muted">Пусто…</div>
-      </section>
-
-      <!-- ГОРОДА / ДИАГНОСТИКА -->
       <section class="shell">
         <h2>Топ города</h2>
         <div id="chart-cities"><canvas id="cities"></canvas></div>
@@ -205,15 +171,31 @@
         <h2>Номера заказов (для сверки)</h2>
         <div id="ids"></div>
       </section>
-    </main>
+
+      <!-- ОДНА таблица «№ заказа → SKU» (без заголовка) -->
+      <section class="order-sku-shell" id="orderSkuShell" style="display:none">
+        <table id="tbl-order-sku" class="table">
+          <thead><tr><th>№ заказа</th><th>SKU</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </section>
+    </div>
   </div>
 
 <script>
 /* ─────────── ХЕЛПЕРЫ ─────────── */
 const nf = new Intl.NumberFormat('ru-RU');
 function fmt(n){ return nf.format(Math.round((Number(n) + Number.EPSILON) * 100) / 100); }
-function setNote(msg, ok=false){ const el = document.getElementById('note'); el.textContent = msg; el.className = 'note ' + (ok ? 'ok' : 'err'); }
-
+function tableFill(id, rows){
+  const tb = document.querySelector(`#${id} tbody`); if(!tb) return;
+  tb.innerHTML = '';
+  for(const r of (rows||[])){
+    const tr = document.createElement('tr');
+    for(const c of r){ const td = document.createElement('td'); td.textContent = c; tr.appendChild(td); }
+    tb.appendChild(tr);
+  }
+}
+function setNote(msg, ok=false){ const el = document.getElementById('note'); if(!el) return; el.textContent = msg; el.className = 'note ' + (ok ? 'ok' : 'err'); }
 const DEFAULT_TIMEOUT = 30000;
 function withTimeout(promise, ms=DEFAULT_TIMEOUT){
   const ctrl = new AbortController(); const t = setTimeout(()=>ctrl.abort(new Error('timeout')), ms);
@@ -227,18 +209,17 @@ async function fetchJSON(url, opts={}, {retries=2, timeout=DEFAULT_TIMEOUT}={}){
   };
   for(let i=0;i<=retries;i++){ try{ return await withTimeout(fn, timeout); } catch(e){ if(i===retries) throw e; await sleep(400*(i+1)); } }
 }
-
 let BUSY = false;
 function setBusy(on){
   BUSY = !!on;
   for(const id of ['btnProfitSync','btnProfitRebuild','btnProfitSyncRebuild','btn-run','btnSkuSearch']){
     const b = document.getElementById(id);
-    if(b){ b.disabled = on; b.textContent = b.dataset.label || (b.dataset.label = b.textContent); b.textContent = on ? (b.dataset.work || (b.dataset.work = '⏳ '+b.textContent)) : b.dataset.label; }
+    if(b){ b.disabled = on; b.textContent = b.dataset.label || (b.dataset.label = b.textContent);
+      b.textContent = on ? (b.dataset.work || (b.dataset.work = '⏳ '+b.textContent)) : b.dataset.label; }
   }
 }
-
-window.addEventListener('error', e => setNote(e?.error?.message || e.message || 'Ошибка', false));
-window.addEventListener('unhandledrejection', e => setNote(e?.reason?.message || String(e.reason) || 'Ошибка', false));
+window.addEventListener('error', (e)=>{ try{ setNote(e?.error?.message || e.message || 'Ошибка', false); }catch(_){} });
+window.addEventListener('unhandledrejection', (e)=>{ try{ setNote(e?.reason?.message || String(e.reason) || 'Ошибка', false); }catch(_){} });
 
 function fmtMs(ms){
   if(!ms && ms!==0) return '';
@@ -254,44 +235,41 @@ function fmtMs(ms){
 
 <script>
 /* ─────────── UI/STATE ─────────── */
-let citiesChart=null, profitChart=null;
-window.APP_CURRENCY='KZT';
-window.__ordersByPeriod={};         // { '2025-08-31': [ '6276..', ... ] }
-window.__orderToSkus={};            // { '6276..': [ 'sku1','sku2',.. ] }
+let citiesChart = null; let profitChart = null;
+window.APP_CURRENCY = 'KZT';
 
 async function loadMeta(){
   try {
     const meta = await fetchJSON('/meta', {}, {retries:1});
     const sel = document.getElementById('date_field');
-    sel.innerHTML = '';
-    (meta.date_field_options || ['creationDate']).forEach(v=>{
-      const o=document.createElement('option'); o.value=v; o.textContent=v; sel.appendChild(o);
-    });
-    sel.value = meta.date_field_default || 'creationDate';
-    document.getElementById('tz').value = meta.timezone || 'Asia/Almaty';
-    document.getElementById('bd_start').value = meta.business_day_start || '20:00';
-  } catch(_){}
+    if(sel){ sel.innerHTML = ''; (meta.date_field_options || ['creationDate']).forEach(v=>{ const o = document.createElement('option'); o.value=v; o.textContent=v; sel.appendChild(o); }); sel.value = meta.date_field_default || 'creationDate'; }
+    const tz = document.getElementById('tz'); if(tz) tz.value = meta.timezone || 'Asia/Almaty';
+    const bd = document.getElementById('bd_start'); if(bd) bd.value = meta.business_day_start || '20:00';
+  } catch(e){}
   const today = new Date(); const iso = d=>d.toISOString().slice(0,10);
-  document.getElementById('start').value = iso(today);
-  document.getElementById('end').value   = iso(today);
+  const s = document.getElementById('start'); if(s) s.value = iso(today);
+  const e = document.getElementById('end'); if(e) e.value = iso(today);
 }
 
 async function run(e){
   if(e) e.preventDefault();
   try{
     setBusy(true);
+
     const start = document.getElementById('start').value;
-    const end   = document.getElementById('end').value;
-    const tz    = document.getElementById('tz').value || 'Asia/Almaty';
+    const end = document.getElementById('end').value;
+    const tz = document.getElementById('tz').value || 'Asia/Almaty';
     const date_field = document.getElementById('date_field').value;
     const states = document.getElementById('states').value;
-    const exc    = document.getElementById('exclude_states').checked ? 'CANCELED' : '';
+    const exc = document.getElementById('exclude_states').checked ? 'CANCELED' : '';
     const use_bd = document.getElementById('use_bd')?.checked ? '1' : '0';
     const bd_start = document.getElementById('bd_start')?.value || '';
 
-    const p = new URLSearchParams({ start, end, tz, date_field, use_bd });
-    if(states) p.set('states', states); if(exc) p.set('exclude_states', exc);
-    if(bd_start) p.set('business_day_start', bd_start);
+    const p = new URLSearchParams();
+    p.set('start', start); p.set('end', end); p.set('tz', tz);
+    p.set('date_field', date_field); if(states) p.set('states', states);
+    if(exc) p.set('exclude_states', exc);
+    p.set('use_bd', use_bd); if(bd_start) p.set('business_day_start', bd_start);
 
     const data = await fetchJSON(`/orders/analytics?${p.toString()}`, {}, {retries:1});
 
@@ -299,40 +277,51 @@ async function run(e){
     document.getElementById('kpiOrders').textContent = fmt(data.total_orders||0);
     document.getElementById('kpiAmount').textContent = `${fmt(data.total_amount||0)} ${window.APP_CURRENCY}`;
     document.getElementById('periodLabel').textContent = `${data.range?.start||start} → ${data.range?.end||end}`;
+
     document.getElementById('periodCutoff').textContent = (use_bd==='1' ? (bd_start || '20:00') : '24:00');
     document.getElementById('bdInfo').textContent = (use_bd==='1' ? `День магазина: ${bd_start||'20:00'} → ${bd_start||'20:00'}` : 'День магазина: выключен');
 
-    // состояния
+    // Состояния
     const sb = document.getElementById('statesBox');
-    sb.innerHTML = '';
-    const entries = Object.entries(data.state_breakdown||{}).sort((a,b)=>b[1]-a[1]);
-    entries.forEach(([k,v])=>{ const span=document.createElement('span'); span.className='pill'; span.textContent=`${k}: ${v}`; sb.appendChild(span); });
-    if(!entries.length) sb.innerHTML = '<div class="muted">Нет данных</div>';
+    if(sb){
+      sb.innerHTML = '';
+      const entries = Object.entries(data.state_breakdown||{}).sort((a,b)=>b[1]-a[1]);
+      for(const [k,v] of entries){ const span = document.createElement('span'); span.className='pill'; span.textContent=`${k}: ${v}`; sb.appendChild(span); }
+      if((entries||[]).length===0){ sb.innerHTML = '<div class="muted">Нет данных</div>'; }
+    }
 
-    // города
+    // Таблица дней
+    tableFill('tbl-days', (data.days||[]).map(d=>[d.x, d.count, `${fmt(d.amount)} ${window.APP_CURRENCY}`]));
+
+    // Топ города
     const labels = (data.cities||[]).map(c=>c.city);
     const counts = (data.cities||[]).map(c=>c.count);
     const holder = document.getElementById('chart-cities');
-    holder.innerHTML = labels.length ? '<canvas id="cities"></canvas>' : '<div class="muted" style="padding:12px">Нет данных по городам</div>';
-    if(labels.length && typeof Chart!=='undefined'){
-      try{ if(citiesChart) citiesChart.destroy(); }catch(_){}
-      const ctx = document.getElementById('cities').getContext('2d');
-      citiesChart = new Chart(ctx,{type:'bar',data:{labels,datasets:[{label:'Заказы',data:counts}]},options:{responsive:true,plugins:{legend:{display:false}}}});
+    if(holder){
+      holder.innerHTML = '<canvas id="cities"></canvas>';
+      if(labels.length===0 || typeof Chart === 'undefined'){
+        holder.innerHTML = '<div class="muted" style="padding:12px">Нет данных по городам</div>';
+      } else {
+        const ctx = document.getElementById('cities').getContext('2d');
+        try{
+          if(citiesChart) citiesChart.destroy();
+          citiesChart = new Chart(ctx, { type: 'bar', data: { labels, datasets: [{ label: 'Заказы', data: counts }] }, options: { responsive:true, plugins: { legend: { display:false } } }});
+        }catch(_){ holder.innerHTML = '<div class="muted" style="padding:12px">Нет данных по городам</div>'; }
+      }
     }
 
-    await loadIds();          // строит карты: __ordersByPeriod и __orderToSkus + рендер «Номера заказов (для сверки)»
-    await loadProfitFIFO();   // KPI FIFO + график + таблицы (использует __ordersByPeriod)
-    renderOrderSkuMatrix();   // вывод матрицы «№ заказа → SKU»
+    await loadIds();          // формируем карту номеров и номер→SKU
+    await loadProfitFIFO();   // KPI + график + таблицы
     await checkProfitStatus(data);
-
     setNote('Данные обновлены', true);
-  }catch(err){ setNote('Ошибка загрузки: ' + (err?.message || err), false); }
-  finally{ setBusy(false); }
+  }catch(err){
+    setNote('Ошибка загрузки: ' + (err?.message || err), false);
+  }finally{ setBusy(false); }
 }
 </script>
 
 <script>
-/* ─────────── НОМЕРА ЗАКАЗОВ: загрузка + карта + рендер ─────────── */
+/* ─────────── Номера заказов (список + карта для периодов и таблица №→SKU) ─────────── */
 function buildOrderItemsTable(group, currency){
   const table = document.createElement('table'); table.className = 'order-table';
   table.innerHTML = `
@@ -340,359 +329,403 @@ function buildOrderItemsTable(group, currency){
       <th class="nowrap">№ заказа</th><th>SKU</th><th>Название</th><th class="nowrap">Qty</th>
       <th class="nowrap">Сумма строки</th><th class="nowrap">Состояние</th><th class="nowrap">Время</th>
     </tr></thead><tbody></tbody>`;
-  const tb = table.querySelector('tbody');
+  const tbody = table.querySelector('tbody');
 
-  for(const o of (group.items||[])){
+  for(const o of (group.items || [])){
     const lines = (o.items && o.items.length)
-      ? o.items.map(li=>({sku:li.sku||'',title:li.title||'',qty:Number(li.qty||1),sum:Number(li.unit_price||0)}))
-      : [{sku:o.sku||'',title:o.title||o.name||'',qty:1,sum:Number(o.amount||0)}];
+      ? o.items.map(li => ({ sku: li.sku||'', title: li.title||'', qty: Number(li.qty||1), sum: Number(li.unit_price||0) }))
+      : [{ sku: o.sku||'', title: o.title||o.name||'', qty: 1, sum: Number(o.amount||0) }];
 
     for(const li of lines){
-      const tr=document.createElement('tr');
-      [ String(o.number||''), li.sku||'', li.title||'', String(li.qty||1),
-        `${fmt(li.sum||0)} ${currency}`, o.state||'', (String(o.date||'').slice(0,16).replace('T',' ')||'') ]
-      .forEach(v=>{ const td=document.createElement('td'); td.textContent=v; tr.appendChild(td); });
-      tb.appendChild(tr);
+      const tr = document.createElement('tr');
+      const tds = [ String(o.number||''), String(li.sku||''), String(li.title||''), String(li.qty||1),
+                    `${fmt(li.sum||0)} ${currency}`, String(o.state||''), (String(o.date||'').slice(0,16).replace('T',' ')||'') ];
+      for(const v of tds){ const td = document.createElement('td'); td.textContent = v; tr.appendChild(td); }
+      tbody.appendChild(tr);
     }
   }
   return table;
 }
 
-function renderOrderSkuMatrix(){
-  const box = document.getElementById('orderSkuMatrix');
-  box.innerHTML = '';
-  const entries = Object.entries(window.__orderToSkus||{});
-  if(!entries.length){ box.textContent='Нет данных'; box.classList.add('muted'); return; }
-  const tbl = document.createElement('table'); tbl.className='table';
-  tbl.innerHTML = `<thead><tr><th style="width:200px">№ заказа</th><th>SKU</th></tr></thead><tbody></tbody>`;
-  const tb = tbl.querySelector('tbody');
-  for(const [order, skus] of entries.sort()){
+function renderOrderSkuTable(orderSkuSeq){
+  const shell = document.getElementById('orderSkuShell');
+  const tb = document.querySelector('#tbl-order-sku tbody');
+  if(!shell || !tb) return;
+  tb.innerHTML = '';
+  for(const row of orderSkuSeq){
     const tr = document.createElement('tr');
-    const tdNum = document.createElement('td'); tdNum.textContent = order; tr.appendChild(tdNum);
-    const tdSku = document.createElement('td'); tdSku.className='matrix-sku';
-    (skus||[]).forEach(s=>{
-      const a=document.createElement('a'); a.textContent=s; a.href='#'; a.onclick=(e)=>{ e.preventDefault(); showOrdersForSKU(s); };
-      tdSku.appendChild(a);
-    });
-    tr.appendChild(tdSku); tb.appendChild(tr);
+    const tdLeft = document.createElement('td'); tdLeft.textContent = row.order; tr.appendChild(tdLeft);
+    const tdRight = document.createElement('td');
+    if(row.skus.length){
+      row.skus.forEach((sku, i) => {
+        const a = document.createElement('a'); a.href = 'javascript:void(0)'; a.className='clickable'; a.textContent = sku;
+        a.addEventListener('click', ()=>showOrdersForSKU(sku));
+        tdRight.appendChild(a);
+        if(i < row.skus.length-1) tdRight.appendChild(document.createTextNode('  '));
+      });
+    }else{
+      tdRight.textContent = '—';
+    }
+    tr.appendChild(tdRight);
+    tb.appendChild(tr);
   }
-  box.classList.remove('muted'); box.appendChild(tbl);
+  shell.style.display = orderSkuSeq.length ? 'block' : 'none';
 }
 
 async function loadIds(){
   const start = document.getElementById('start').value;
-  const end   = document.getElementById('end').value;
-  const tz    = document.getElementById('tz').value || 'Asia/Almaty';
+  const end = document.getElementById('end').value;
+  const tz = document.getElementById('tz').value || 'Asia/Almaty';
   const date_field = document.getElementById('date_field').value;
   const states = document.getElementById('states').value;
-  const exc    = document.getElementById('exclude_states').checked ? 'CANCELED' : '';
+  const exc = document.getElementById('exclude_states').checked ? 'CANCELED' : '';
   const use_bd = document.getElementById('use_bd')?.checked ? '1' : '0';
   const bd_start = document.getElementById('bd_start')?.value || '';
-  const params = new URLSearchParams({ start,end,tz,date_field,order:'asc',grouped:'1',limit:'100000',with_items:'1',use_bd,business_day_start:bd_start });
+  const order = 'asc';
+
+  const params = new URLSearchParams({ start, end, tz, date_field, order, grouped:'1', limit:'100000', with_items:'1', use_bd, business_day_start:bd_start });
   if(states) params.set('states', states); if(exc) params.set('exclude_states', exc);
 
-  let data={groups:[],items:[],currency:'KZT'};
+  let data = {groups:[], items:[], currency:'KZT'};
   try{ data = await fetchJSON(`/orders/ids?${params.toString()}`, {}, {retries:1}); }
   catch(e){ setNote('Не удалось получить номера заказов: ' + e.message); }
 
-  // 1) карта «день → номера»
+  // карта номеров по дню → для «Таблица периодов»
   window.__ordersByPeriod = {};
+  // последовательность (для красивого рендера) и карта номер→массив SKU
+  const orderSeq = [];
+  const orderSkuMap = new Map();
+
   for(const g of (data.groups||[])){
     const nums = (g.items||[]).map(it=>it.number).filter(Boolean);
     window.__ordersByPeriod[g.day] = Array.from(new Set(nums));
-  }
 
-  // 2) карта «номер → список SKU»
-  window.__orderToSkus = {};
-  for(const g of (data.groups||[])){
     for(const o of (g.items||[])){
-      const arr = Array.isArray(o.items) && o.items.length
-        ? o.items.map(li=>String(li.sku||'').trim()).filter(Boolean)
-        : (o.sku ? [String(o.sku)] : []);
-      if(!arr.length) continue;
-      const key = String(o.number||'').trim(); if(!key) continue;
-      window.__orderToSkus[key] = Array.from(new Set([...(window.__orderToSkus[key]||[]), ...arr]));
+      const set = new Set(orderSkuMap.get(o.number) || []);
+      if (Array.isArray(o.items) && o.items.length){
+        for(const li of o.items){ if(li && li.sku) set.add(String(li.sku)); }
+      }else if (o.sku){ set.add(String(o.sku)); }
+      orderSkuMap.set(o.number, Array.from(set));
+      orderSeq.push(o.number);
     }
   }
 
-  // 3) плоский список (для внутренней логики)
+  // Плоский список (служебно)
   const flat = new URLSearchParams(params); flat.set('grouped','0'); flat.set('with_items','0');
   try{
     const flatData = await fetchJSON(`/orders/ids?${flat.toString()}`, {}, {retries:1});
     window.__lastOrderIds = (flatData.items||[]).map(x => ({ id: x.id, date: x.date }));
   }catch(_){ window.__lastOrderIds = []; }
 
-  // 4) рендер блока «Номера заказов (для сверки)»
-  const container = document.getElementById('ids'); container.innerHTML='';
+  // Рендер группы внизу (как раньше)
+  const container = document.getElementById('ids'); if(!container) return;
+  container.innerHTML = '';
+
   const currency = data.currency || window.APP_CURRENCY || 'KZT';
   const totalCount = (typeof data.period_total_count === 'number') ? data.period_total_count : (data.items||[]).length;
   const totalAmount = (typeof data.period_total_amount === 'number') ? data.period_total_amount : (data.items||[]).reduce((a,it)=>a+(Number(it.amount)||0),0);
 
-  const summary = document.createElement('div'); summary.className='ids-summary';
-  summary.innerHTML = `<span>Итого за период:</span> <b>${fmt(totalCount)}</b><span> шт.</span> · <b>${fmt(totalAmount)}</b> <span>${currency}</span>`;
+  const summary = document.createElement('div'); summary.className = 'ids-summary';
+  summary.innerHTML = `<span>Итого за период:</span> <b>${fmt(totalCount)}</b><span>шт.</span> · <b>${fmt(totalAmount)}</b> <span>${currency}</span>`;
   container.appendChild(summary);
 
   const bar = document.createElement('div'); bar.className='ids-actions';
-  const btnCopy=document.createElement('button'); btnCopy.className='btn'; btnCopy.textContent='Скопировать номера';
-  btnCopy.onclick=()=>{ try{ const all=(data.items||[]).map(it=>it.number).join('\n'); navigator.clipboard?.writeText(all); setNote('Скопировано', true);}catch(_){ setNote('Не удалось скопировать', false);} };
-  const btnCsv=document.createElement('a'); btnCsv.className='btn'; btnCsv.textContent='Скачать CSV';
+  const btnCopy = document.createElement('button'); btnCopy.className='btn'; btnCopy.textContent='Скопировать номера';
+  btnCopy.onclick = () => { try{
+      const all = (data.items||[]).map(it=>it.number).join('\n');
+      if(navigator.clipboard?.writeText){ navigator.clipboard.writeText(all); setNote('Скопировано', true); }
+      else { throw new Error('clipboard недоступен'); }
+    }catch(_){ setNote('Не удалось скопировать', false); } };
+  const btnCsv = document.createElement('a'); btnCsv.className='btn'; btnCsv.textContent='Скачать CSV';
   const csvParams = new URLSearchParams(params); csvParams.delete('grouped'); csvParams.set('limit','100000');
-  btnCsv.href=`/orders/ids.csv?${csvParams.toString()}`; btnCsv.setAttribute('download','ids.csv');
-  const btnExpand=document.createElement('button'); btnExpand.className='btn'; btnExpand.textContent='Раскрыть всё';
-  const btnCollapse=document.createElement('button'); btnCollapse.className='btn'; btnCollapse.textContent='Свернуть всё';
-  bar.append(btnCopy,btnCsv,btnExpand,btnCollapse); container.appendChild(bar);
+  btnCsv.href = `/orders/ids.csv?${csvParams.toString()}`; btnCsv.setAttribute('download','ids.csv');
+  const btnExpand = document.createElement('button'); btnExpand.className='btn'; btnExpand.textContent='Раскрыть всё';
+  const btnCollapse = document.createElement('button'); btnCollapse.className='btn'; btnCollapse.textContent='Свернуть всё';
+  bar.appendChild(btnCopy); bar.appendChild(btnCsv); bar.appendChild(btnExpand); bar.appendChild(btnCollapse);
+  container.appendChild(bar);
 
-  const wrapper=document.createElement('div'); wrapper.className='ids-groups'; container.appendChild(wrapper);
-  const detailsList=[];
-  for(const group of (data.groups||[])){
-    const det=document.createElement('details'); det.open=true;
-    const dayTotal=(typeof group.total_amount==='number')?group.total_amount:group.items.reduce((acc,it)=>acc+(Number(it.amount)||0),0);
-    const sum=document.createElement('summary'); sum.textContent=`${group.day} — ${group.items.length} шт. · ${fmt(dayTotal)} ${currency}`;
-    det.appendChild(sum); det.appendChild(buildOrderItemsTable(group, currency));
+  const wrapper = document.createElement('div'); wrapper.className='ids-groups'; container.appendChild(wrapper);
+
+  const detailsList = [];
+  for(const group of (data.groups || [])){
+    const det = document.createElement('details'); det.open = true;
+    const dayTotal = (typeof group.total_amount === 'number') ? group.total_amount : group.items.reduce((acc, it) => acc + (Number(it.amount) || 0), 0);
+    const sum = document.createElement('summary'); sum.textContent = `${group.day} — ${group.items.length} шт. · ${fmt(dayTotal)} ${currency}`;
+    det.appendChild(sum);
+    det.appendChild(buildOrderItemsTable(group, currency));
     detailsList.push(det); wrapper.appendChild(det);
   }
-  btnExpand.onclick=()=>detailsList.forEach(d=>d.open=true);
-  btnCollapse.onclick=()=>detailsList.forEach(d=>d.open=false);
+  btnExpand.onclick = ()=> detailsList.forEach(d=>d.open=true);
+  btnCollapse.onclick = ()=> detailsList.forEach(d=>d.open=false);
+
+  // ОДНА красивая таблица «№ заказа → SKU»
+  const uniqueSeq = Array.from(new Set(orderSeq));
+  const orderSkuSeq = uniqueSeq.map(n => ({ order: n, skus: (orderSkuMap.get(n)||[]) }));
+  renderOrderSkuTable(orderSkuSeq);
 }
 </script>
 
 <script>
-/* ─────────── FIFO: ключ/инъекции + API-хелперы ─────────── */
-(()=> {
-  const KEY="KASPI_API_KEY";
-  const badge=()=>document.getElementById('profitKeyBadge');
-  function refreshBadge(){ const v=localStorage.getItem(KEY)||""; const el=badge(); el.querySelector('.dot').className='dot ' + (v ? 'on' : ''); el.querySelector('span:last-child').textContent = v ? 'ключ установлен' : 'ключ не задан'; }
-  window.KASPI_API_KEY=localStorage.getItem(KEY)||""; refreshBadge();
+/* ─────────── FIFO: ключ и инъекции ─────────── */
+(() => {
+  const KEY = "KASPI_API_KEY";
+  const badge = ()=>document.getElementById('profitKeyBadge');
+  function refreshBadge(){ const v = localStorage.getItem(KEY) || ""; const el = badge(); if(!el) return;
+    el.querySelector('.dot').className = 'dot ' + (v ? 'on' : ''); el.querySelector('span:last-child').textContent = v ? 'ключ установлен' : 'ключ не задан'; }
+  window.KASPI_API_KEY = localStorage.getItem(KEY) || ""; refreshBadge();
 
-  const origFetch=window.fetch.bind(window);
-  window.fetch=function(input,init){
+  const origFetch = window.fetch.bind(window);
+  window.fetch = function(input, init){
     try{
-      let urlStr=typeof input==='string'?input:(input&&input.url)||'';
-      if(urlStr.startsWith('/profit/')){
-        init=init||{};
-        const k=window.KASPI_API_KEY||'';
-        let headers=init.headers instanceof Headers?init.headers:new Headers(init.headers||{});
-        if(k) headers.set('X-API-Key',k);
-        init.headers=headers;
-        if(k){ const u=new URL(urlStr,location.origin); if(!u.searchParams.has('api_key')) u.searchParams.set('api_key',k);
-          input=(typeof input==='string')?(u.pathname+u.search):new Request(u.toString(),init);
+      let urlStr = typeof input === 'string' ? input : (input && input.url) || '';
+      if (urlStr.startsWith('/profit/')) {
+        init = init || {};
+        const k = window.KASPI_API_KEY || '';
+        let headers = init.headers instanceof Headers ? init.headers : new Headers(init.headers || {});
+        if (k) headers.set('X-API-Key', k);
+        init.headers = headers;
+        if (k) {
+          const u = new URL(urlStr, location.origin);
+          if (!u.searchParams.has('api_key')) u.searchParams.set('api_key', k);
+          input = (typeof input === 'string') ? (u.pathname + u.search) : new Request(u.toString(), init);
         }
       }
-    }catch(_){}
-    return origFetch(input,init);
+    }catch(e){}
+    return origFetch(input, init);
   };
 
-  window.setApiKey=function(k){ localStorage.setItem(KEY,k||''); window.KASPI_API_KEY=k||''; refreshBadge(); };
+  window.setApiKey = function(k){ localStorage.setItem(KEY, k || ''); window.KASPI_API_KEY = k || ''; refreshBadge(); };
 
   document.addEventListener('DOMContentLoaded', ()=>{
     document.getElementById('btnProfitApiKey')?.addEventListener('click', ()=>{
-      const v=prompt('Введите X-API-Key (сохранится в этом браузере):', window.KASPI_API_KEY||'');
+      const v = prompt('Введите X-API-Key (сохранится в этом браузере):', window.KASPI_API_KEY||'');
       if(v!==null){ setApiKey(v.trim()); alert('Сохранено. Повторите действие.'); }
     });
   });
 })();
+</script>
 
+<script>
+/* ─────────── FIFO: API-хелперы ─────────── */
 async function fetchProfitJSON(url, opts, _retry){
-  const r=await fetch(url, opts||{});
-  if(r.status===401||r.status===403){
-    if(!_retry){ const v=prompt('Укажите X-API-Key для блока FIFO:', window.KASPI_API_KEY||''); if(v!==null){ window.setApiKey(v.trim()); return fetchProfitJSON(url, opts, true); } }
-    throw new Error(await r.text()||'Unauthorized');
+  const r = await fetch(url, opts||{});
+  if(r.status===401 || r.status===403){
+    if(!_retry){ const v = prompt('Укажите X-API-Key для блока FIFO:', window.KASPI_API_KEY||''); if(v!==null){ window.setApiKey(v.trim()); return fetchProfitJSON(url, opts, true); } }
+    throw new Error(await r.text() || 'Unauthorized');
   }
-  if(!r.ok){ const body=await r.text(); throw new Error(body||r.statusText||('HTTP '+r.status)); }
-  const ct=r.headers.get('content-type')||''; return ct.includes('application/json')?r.json():r.text();
+  if(!r.ok){ const body = await r.text(); throw new Error(body || r.statusText || ('HTTP '+r.status)); }
+  const ct = r.headers.get('content-type')||''; return ct.includes('application/json') ? r.json() : r.text();
 }
-
-function setFifoKPIs(total,cur){
-  const t=total||{revenue:0,commission:0,cost:0,profit:0};
+function setFifoKPIs(total, cur){
+  const t = total || {revenue:0, commission:0, cost:0, profit:0};
   document.getElementById('kpiPRevenue').textContent   = `${fmt(t.revenue||0)} ${cur}`;
   document.getElementById('kpiPCommission').textContent= `${fmt(t.commission||0)} ${cur}`;
   document.getElementById('kpiPCost').textContent      = `${fmt(t.cost||0)} ${cur}`;
   document.getElementById('kpiPProfit').textContent    = `${fmt(t.profit||0)} ${cur}`;
 }
-
-function drawProfitChart(rows,cur){
-  const empty=document.getElementById('profitEmpty'); const holder=document.getElementById('profitChartHolder'); const canvas=document.getElementById('profitChart');
-  if(!canvas||typeof Chart==='undefined'){ if(empty) empty.style.display='block'; if(holder) holder.style.display='none'; return; }
-  const ctx=canvas.getContext('2d'); if(profitChart){ try{ profitChart.destroy(); }catch(_){ } profitChart=null; }
+function drawProfitChart(rows, cur){
+  const empty = document.getElementById('profitEmpty'); const holder = document.getElementById('profitChartHolder'); const canvas = document.getElementById('profitChart');
+  if(!canvas || typeof Chart==='undefined'){ if(empty) empty.style.display='block'; if(holder) holder.style.display='none'; return; }
+  const ctx = canvas.getContext('2d'); if(profitChart){ try{ profitChart.destroy(); }catch(_){ } profitChart=null; }
   if(!(rows||[]).length){ if(empty) empty.style.display='block'; if(holder) holder.style.display='none'; return; }
   if(empty) empty.style.display='none'; if(holder) holder.style.display='block';
-  profitChart=new Chart(ctx,{ type:'bar',
-    data:{ labels:(rows||[]).map(r=>r.period), datasets:[{ label:'Прибыль', data:(rows||[]).map(r=>Number(r.profit||0)) }] },
-    options:{ responsive:true, plugins:{ legend:{ display:false }, tooltip:{ callbacks:{ label:(c)=>`Прибыль: ${fmt(c.parsed.y)} ${cur}` } } }, scales:{ x:{ ticks:{ maxRotation:0 } }, y:{ beginAtZero:true } } }
-  });
+  try{
+    profitChart = new Chart(ctx, { type:'bar',
+      data:{ labels:(rows||[]).map(r=>r.period), datasets:[{ label:'Прибыль', data:(rows||[]).map(r=>Number(r.profit||0)) }] },
+      options:{ responsive:true, plugins:{ legend:{ display:false }, tooltip:{ callbacks:{ label:(ctx)=>`Прибыль: ${fmt(ctx.parsed.y)} ${cur}` } } },
+        scales:{ x:{ ticks:{ maxRotation:0 } }, y:{ beginAtZero:true } } });
+  }catch(_){ if(empty) empty.style.display='block'; if(holder) holder.style.display='none'; }
 }
-
 async function pingProfitDb(){
-  try{ const info=await fetchProfitJSON('/profit/db/ping'); const driver=info?.driver||(info?.db_path?.startsWith('postgres')?'pg':'sqlite');
-    document.getElementById('profitDbInfo').textContent = `FIFO DB: ${driver}${info?.fallback_enabled?' · fallback:on':''}`;
-  }catch(_){ document.getElementById('profitDbInfo').textContent=''; }
+  try{ const info = await fetchProfitJSON('/profit/db/ping'); const driver = info?.driver || (info?.db_path?.startsWith('postgres') ? 'pg' : 'sqlite');
+       document.getElementById('profitDbInfo').textContent = `FIFO DB: ${driver}${info?.fallback_enabled ? ' · fallback:on' : ''}`; }
+  catch(e){ document.getElementById('profitDbInfo').textContent = ''; }
 }
 </script>
 
 <script>
-/* ─────────── FIFO: операции ─────────── */
+/* ─────────── FIFO: sync/rebuild ─────────── */
 async function syncProfit(){
-  const start=document.getElementById('start').value;
-  const end  =document.getElementById('end').value;
-  if(!start||!end){ setNote('Сначала задайте период (начало/конец).'); return; }
+  const start = document.getElementById('start').value;
+  const end   = document.getElementById('end').value;
+  if(!start || !end){ setNote('Сначала задайте период (начало/конец).'); return; }
 
-  const tz=document.getElementById('tz').value||'Asia/Almaty';
-  const date_field=document.getElementById('date_field').value;
-  const use_bd=document.getElementById('use_bd')?.checked ? '1':'0';
-  const bd_start=document.getElementById('bd_start')?.value||'20:00';
+  const tz = document.getElementById('tz').value || 'Asia/Almaty';
+  const date_field = document.getElementById('date_field').value;
+  const use_bd = document.getElementById('use_bd')?.checked ? '1' : '0';
+  const bd_start = document.getElementById('bd_start')?.value || '20:00';
 
   try{
-    const qs=new URLSearchParams({ start,end,tz,date_field,states:'KASPI_DELIVERY',exclude_states:'CANCELED',use_bd,business_day_start:bd_start,order:'asc',grouped:'0',limit:'100000',with_items:'1',items_mode:'all' });
-    const ids=await (await fetch('/orders/ids?'+qs.toString())).json();
+    const qs = new URLSearchParams({
+      start, end, tz, date_field,
+      states:'KASPI_DELIVERY', exclude_states:'CANCELED',
+      use_bd, business_day_start: bd_start,
+      order:'asc', grouped:'0', limit:'100000', with_items:'1', items_mode:'all'
+    });
+    const ids = await (await fetch('/orders/ids?' + qs.toString())).json();
 
-    const orders=(ids.items||[]).filter(x=>x.state==='KASPI_DELIVERY').map(x=>{
-      const lines = Array.isArray(x.items)&&x.items.length
-        ? x.items.filter(li=>li&&li.sku).map(li=>({sku:String(li.sku),qty:Number(li.qty||1),unit_price:Number(li.unit_price||0)}))
-        : (x.sku ? [{ sku:String(x.sku), qty:1, unit_price:Number(x.amount||0) }] : []);
-      return { id:x.id, date:x.date, customer:null, items:lines };
-    }).filter(o=>o.items.length);
+    const orders = (ids.items||[])
+      .filter(x => x.state === 'KASPI_DELIVERY')
+      .map(x => {
+        const lines = Array.isArray(x.items) && x.items.length
+          ? x.items.filter(li => li && li.sku).map(li => ({ sku:String(li.sku), qty:Number(li.qty||1), unit_price:Number(li.unit_price||0) }))
+          : (x.sku ? [{ sku:String(x.sku), qty:1, unit_price:Number(x.amount||0) }] : []);
+        return { id: x.id, date: x.date, customer: null, items: lines };
+      })
+      .filter(o => o.items.length);
 
-    if(!orders.length){ setNote('Нет заказов KASPI_DELIVERY с позициями в выбранном периоде'); return; }
+    if(orders.length === 0){ setNote('Нет заказов KASPI_DELIVERY с позициями в выбранном периоде'); return; }
 
-    const up=await fetch('/profit/orders/upsert-bulk',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({orders}) });
-    if(!up.ok) throw new Error(await up.text()||up.statusText);
-    const upRes=await up.json();
+    const up = await fetch('/profit/orders/upsert-bulk', { method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify({ orders }) });
+    if(!up.ok) throw new Error(await up.text() || up.statusText);
+    const upRes = await up.json();
 
-    const rb=await fetch(`/profit/rebuild-ledger?date_from=${start}&date_to=${end}`,{method:'POST'});
-    if(!rb.ok) throw new Error(await rb.text()||rb.statusText);
-    const rbRes=await rb.json();
+    const rb = await fetch(`/profit/rebuild-ledger?date_from=${start}&date_to=${end}`, { method:'POST' });
+    if(!rb.ok) throw new Error(await rb.text() || rb.statusText);
+    const rbRes = await rb.json();
 
     setNote(`Синхронизация FIFO: заказов=${upRes.orders_inserted+upRes.orders_updated}, позиций=${upRes.items_inserted}, списаний=${rbRes.recomputed}`, true);
 
-    await loadIds(); await loadProfitFIFO(); renderOrderSkuMatrix(); await checkProfitStatus();
-  }catch(e){ setNote('Синхронизация не удалась: ' + (e.message||e)); }
+    await loadIds();        // обновить карту и таблицу №→SKU
+    await loadProfitFIFO();
+    await checkProfitStatus();
+  }catch(e){ setNote('Синхронизация не удалась: ' + (e.message || e)); }
 }
 
 async function rebuildFifo(){
-  if(BUSY) return;
-  const df=document.getElementById('start').value;
-  const dt=document.getElementById('end').value;
-  if(!df||!dt){ setNote('Сначала задайте период (начало/конец).'); return; }
+  if(BUSY){ return; }
+  const df = document.getElementById('start').value;
+  const dt = document.getElementById('end').value;
+  if(!df || !dt){ setNote('Сначала задайте период (начало/конец).'); return; }
   setBusy(true);
   try{
-    const p=new URLSearchParams({date_from:df,date_to:dt});
-    const res=await fetchProfitJSON('/profit/rebuild-ledger?'+p.toString(),{method:'POST'});
+    const p = new URLSearchParams({ date_from: df, date_to: dt });
+    const res = await fetchProfitJSON('/profit/rebuild-ledger?' + p.toString(), { method:'POST' });
     setNote(`FIFO перестроен. Добавлено списаний: ${res?.recomputed||0}`, true);
-    await loadIds(); await loadProfitFIFO(); renderOrderSkuMatrix(); await checkProfitStatus();
+    await loadIds(); await loadProfitFIFO(); await checkProfitStatus();
   }catch(e){ setNote('Перестроение FIFO не удалось: ' + e.message, false); }
   finally{ setBusy(false); }
 }
 
-async function syncAndRebuild(){
-  await syncProfit(); if(BUSY) return; setBusy(true);
+async function syncAndRebuild(){ await syncProfit(); if(BUSY) return; setBusy(true);
   try{
-    const df=document.getElementById('start').value; const dt=document.getElementById('end').value;
-    const p=new URLSearchParams({date_from:df,date_to:dt});
-    const res=await fetchProfitJSON('/profit/rebuild-ledger?'+p.toString(),{method:'POST'});
+    const df = document.getElementById('start').value; const dt = document.getElementById('end').value;
+    const p = new URLSearchParams({ date_from: df, date_to: dt });
+    const res = await fetchProfitJSON('/profit/rebuild-ledger?' + p.toString(), { method:'POST' });
     setNote(`Синхр.+пересчёт выполнены. Списаний: ${res?.recomputed||0}`, true);
-    await loadIds(); await loadProfitFIFO(); renderOrderSkuMatrix(); await checkProfitStatus();
+    await loadIds(); await loadProfitFIFO(); await checkProfitStatus();
   }catch(e){ setNote('Пересчёт не удался: ' + e.message, false); }
   finally{ setBusy(false); }
 }
 </script>
 
 <script>
-/* ─────────── FIFO: статус + KPI + таблицы + Заказы по SKU ─────────── */
-function setSyncChip(state,text){
-  const el=document.getElementById('profitSyncChip'); const dot=el.querySelector('.dot');
-  dot.className='dot ' + (state==='ok'?'on':state==='warn'?'warn':state==='err'?'err':'');
-  el.querySelector('span:last-child').textContent=text; el.title=text;
+/* ─────────── FIFO: статус + KPI + Топ SKU + Заказы по SKU ─────────── */
+function setSyncChip(state, text){
+  const el = document.getElementById('profitSyncChip'); if(!el) return;
+  const dot = el.querySelector('.dot'); if(dot) dot.className = 'dot ' + (state==='ok' ? 'on' : state==='warn' ? 'warn' : state==='err' ? 'err' : '');
+  const span = el.querySelector('span:last-child'); if(span) span.textContent = text; el.title = text;
 }
 
 async function checkProfitStatus(analyticsData){
   try{
-    const df=document.getElementById('start').value; const dt=document.getElementById('end').value;
-    if(!df||!dt){ setSyncChip('warn','нет периода'); return; }
+    const df = document.getElementById('start').value; const dt = document.getElementById('end').value;
+    if(!df || !dt){ setSyncChip('warn','нет периода'); return; }
+
     const ordersCount = (analyticsData && typeof analyticsData.total_orders==='number')
       ? analyticsData.total_orders : (await fetchJSON(`/orders/analytics?start=${df}&end=${dt}`, {}, {retries:0})).total_orders;
 
-    const p=new URLSearchParams({ date_from:df, date_to:dt, group_by:'total', use_bd:(document.getElementById('use_bd')?.checked?'1':'0'), bd_start:(document.getElementById('bd_start')?.value||'20:00') });
-    const sum=await fetchProfitJSON('/profit/summary?'+p.toString());
-    const t=sum.total||{revenue:0,commission:0,cost:0,profit:0};
+    const p = new URLSearchParams({ date_from: df, date_to: dt, group_by: 'total', use_bd: (document.getElementById('use_bd')?.checked ? '1':'0'), bd_start: (document.getElementById('bd_start')?.value||'20:00') });
+    const sum = await fetchProfitJSON('/profit/summary?' + p.toString());
+    const t = sum.total || {revenue:0,commission:0,cost:0,profit:0};
 
-    if((t.revenue||0)>0 || (t.cost||0)>0 || (t.commission||0)>0 || (t.profit||0)!==0) setSyncChip('ok','синхронизировано');
-    else if(ordersCount>0) setSyncChip('warn','требуется синхронизация/перестроение');
-    else setSyncChip('','нет заказов в периоде');
-  }catch(_){ setSyncChip('err','ошибка проверки статуса'); }
+    if((t.revenue||0) > 0 || (t.cost||0) > 0 || (t.commission||0) > 0 || (t.profit||0) !== 0){ setSyncChip('ok','синхронизировано'); }
+    else if(ordersCount>0){ setSyncChip('warn','требуется синхронизация/перестроение'); }
+    else{ setSyncChip('','нет заказов в периоде'); }
+  }catch(e){ setSyncChip('err','ошибка проверки статуса'); }
 }
 
 async function loadProfitFIFO(){
-  const df=document.getElementById('start').value;
-  const dt=document.getElementById('end').value;
-  if(!df||!dt) return;
+  const df = document.getElementById('start').value;
+  const dt = document.getElementById('end').value;
+  if(!df || !dt) return;
 
-  const use_bd=document.getElementById('use_bd')?.checked?'1':'0';
-  const bd_start=document.getElementById('bd_start')?.value||'20:00';
-  const group_by=document.getElementById('profitGroup')?.value||'day';
+  const use_bd   = document.getElementById('use_bd')?.checked ? '1' : '0';
+  const bd_start = document.getElementById('bd_start')?.value || '20:00';
+  const group_by = document.getElementById('profitGroup')?.value || 'day';
 
   try{
-    // summary + график
-    const p=new URLSearchParams({date_from:df,date_to:dt,group_by,use_bd,bd_start});
-    const sum=await fetchProfitJSON('/profit/summary?'+p.toString());
-    const cur=sum.currency||window.APP_CURRENCY||'KZT';
-    setFifoKPIs(sum.total,cur); drawProfitChart(sum.rows||[], cur);
+    // summary
+    const p = new URLSearchParams({ date_from: df, date_to: dt, group_by, use_bd, bd_start });
+    const sum = await fetchProfitJSON('/profit/summary?' + p.toString());
+    const cur = sum.currency || window.APP_CURRENCY || 'KZT';
+    setFifoKPIs(sum.total, cur);
+    drawProfitChart(sum.rows||[], cur);
 
-    // таблица периодов (+ номера)
-    const tb=document.querySelector('#tbl-profit tbody'); tb.innerHTML='';
+    // таблица периодов + «Номера заказа»
+    const tb = document.querySelector('#tbl-profit tbody'); tb.innerHTML = '';
     for(const r of (sum.rows||[])){
-      const tr=document.createElement('tr');
-      const nums=(window.__ordersByPeriod && window.__ordersByPeriod[r.period]) ? window.__ordersByPeriod[r.period] : [];
-      [ r.period, `${fmt(r.revenue)} ${cur}`, `${fmt(r.commission)} ${cur}`, `${fmt(r.cost)} ${cur}`, `${fmt(r.profit)} ${cur}` ]
-       .forEach(c=>{ const td=document.createElement('td'); td.textContent=c; tr.appendChild(td); });
-      const tdCodes=document.createElement('td'); tdCodes.textContent = nums.length ? nums.join(', ') : '—'; tdCodes.className='codes-cell'; tr.appendChild(tdCodes);
+      const tr = document.createElement('tr');
+      const numbers = (window.__ordersByPeriod && window.__ordersByPeriod[r.period]) ? window.__ordersByPeriod[r.period] : [];
+      const numsText = numbers.length ? numbers.join(', ') : '—';
+      const cells = [ r.period, `${fmt(r.revenue)} ${cur}`, `${fmt(r.commission)} ${cur}`, `${fmt(r.cost)} ${cur}`, `${fmt(r.profit)} ${cur}` ];
+      for(const c of cells){ const td = document.createElement('td'); td.textContent = c; tr.appendChild(td); }
+      const tdCodes = document.createElement('td'); tdCodes.textContent = numsText; tdCodes.className='codes-cell'; tr.appendChild(tdCodes);
       tb.appendChild(tr);
     }
 
-    // топ sku (кликабельно)
-    const top = await fetchProfitJSON('/profit/by-sku?'+new URLSearchParams({date_from:df,date_to:dt,limit:50}).toString());
-    const tbSku=document.querySelector('#tbl-profit-sku tbody'); tbSku.innerHTML='';
+    // топ sku
+    const s = new URLSearchParams({ date_from: df, date_to: dt, limit: 50 });
+    const top = await fetchProfitJSON('/profit/by-sku?' + s.toString());
+    const tbSku = document.querySelector('#tbl-profit-sku tbody'); tbSku.innerHTML = '';
     for(const row of (top.rows||[])){
-      const tr=document.createElement('tr');
-      const skuTd=document.createElement('td'); skuTd.textContent=row.sku; skuTd.className='clickable'; skuTd.title='Показать номера заказов этого SKU';
-      skuTd.addEventListener('click',()=>showOrdersForSKU(row.sku)); tr.appendChild(skuTd);
-      [row.revenue,row.commission,row.cost,row.profit].forEach(v=>{ const td=document.createElement('td'); td.textContent=`${fmt(v)} ${cur}`; tr.appendChild(td); });
+      const tr = document.createElement('tr');
+      const skuTd = document.createElement('td'); skuTd.textContent = row.sku; skuTd.className = 'clickable'; skuTd.title = 'Показать номера заказов этого SKU';
+      skuTd.addEventListener('click', ()=>showOrdersForSKU(row.sku)); tr.appendChild(skuTd);
+      for(const val of [row.revenue,row.commission,row.cost,row.profit]){
+        const td = document.createElement('td'); td.textContent = `${fmt(val)} ${cur}`; tr.appendChild(td);
+      }
       tbSku.appendChild(tr);
     }
   }catch(e){
-    console.warn('FIFO:',e);
+    console.warn('FIFO:', e);
     setFifoKPIs({revenue:0,commission:0,cost:0,profit:0}, window.APP_CURRENCY||'KZT');
     drawProfitChart([], window.APP_CURRENCY||'KZT');
-    document.querySelector('#tbl-profit tbody').innerHTML='';
-    document.querySelector('#tbl-profit-sku tbody').innerHTML='';
+    tableFill('tbl-profit', []); tableFill('tbl-profit-sku', []);
   }
 }
 
+/* Заказы по SKU */
 async function showOrdersForSKU(sku){
   if(!sku){ setNote('Укажите SKU', false); return; }
-  const df=document.getElementById('start').value;
-  const dt=document.getElementById('end').value;
-  const info=document.getElementById('skuOrdersInfo');
-  const holder=document.getElementById('skuOrders');
-  info.textContent=`SKU: ${sku} · период ${df} — ${dt}`; holder.innerHTML='';
+  const df = document.getElementById('start').value;
+  const dt = document.getElementById('end').value;
+  const info = document.getElementById('skuOrdersInfo');
+  const holder = document.getElementById('skuOrders');
+  info.textContent = `SKU: ${sku} · период ${df} — ${dt}`; holder.innerHTML = '';
   try{
     setBusy(true);
-    const data=await fetchProfitJSON('/profit/bridge/list?'+new URLSearchParams({sku,date_from:df,date_to:dt,limit:100000}).toString());
-    const rows=data.items || data.rows || [];
-    if(!rows.length){ holder.innerHTML='<div class="muted">Ничего не найдено</div>'; return; }
-    const tbl=document.createElement('table'); tbl.className='table';
-    tbl.innerHTML=`<thead><tr><th>№ заказа</th><th>SKU</th><th>Название</th><th>Qty</th><th>Сумма строки</th><th>Состояние</th><th>Время</th></tr></thead><tbody></tbody>`;
-    const tb=tbl.querySelector('tbody');
+    const p = new URLSearchParams({ sku, date_from: df, date_to: dt, limit: 100000 });
+    const data = await fetchProfitJSON('/profit/bridge/list?' + p.toString());
+    const rows = data.items || data.rows || [];
+    if(rows.length === 0){ holder.innerHTML = '<div class="muted">Ничего не найдено</div>'; return; }
+    const tbl = document.createElement('table'); tbl.className = 'table';
+    tbl.innerHTML = `<thead><tr><th>№ заказа</th><th>SKU</th><th>Название</th><th>Qty</th><th>Сумма строки</th><th>Состояние</th><th>Время</th></tr></thead><tbody></tbody>`;
+    const tb = tbl.querySelector('tbody');
     for(const r of rows){
-      const tr=document.createElement('tr');
-      [ r.order_code||r.order_id||'', r.sku||'', r.title||'', String(r.qty||1),
-        fmt(r.total_price||r.unit_price||0)+' '+(window.APP_CURRENCY||'KZT'),
-        r.state||'', r.date||fmtMs(r.date_utc_ms) ]
-      .forEach(c=>{ const td=document.createElement('td'); td.textContent=c; tr.appendChild(td); });
+      const tr = document.createElement('tr');
+      const cells = [
+        r.order_code || r.order_id || '',
+        r.sku || '', r.title || '', String(r.qty || 1),
+        fmt(r.total_price || r.unit_price || 0) + ' ' + (window.APP_CURRENCY || 'KZT'),
+        r.state || '', r.date || fmtMs(r.date_utc_ms)
+      ];
+      for(const c of cells){ const td = document.createElement('td'); td.textContent = c; tr.appendChild(td); }
       tb.appendChild(tr);
     }
     holder.appendChild(tbl);
-    (document.getElementById('skuSearch')||{}).value=sku;
-  }catch(e){ holder.innerHTML=`<div class="muted">Ошибка: ${e.message||e}</div>`; }
+    (document.getElementById('skuSearch')||{}).value = sku;
+  }catch(e){ holder.innerHTML = `<div class="muted">Ошибка: ${e.message||e}</div>`; }
   finally{ setBusy(false); }
 }
 </script>
