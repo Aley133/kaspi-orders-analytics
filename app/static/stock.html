@@ -36,7 +36,6 @@
     .content{padding:20px 16px}
     .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
     .btn{background:var(--pri);color:#fff;border:0;border-radius:10px;padding:8px 12px;cursor:pointer}
-    .btn[disabled]{opacity:.6;cursor:not-allowed}
     .btn.secondary{background:var(--pri-weak);color:var(--fg)}
     .btn-link{background:transparent;border:0;color:var(--pri);cursor:pointer;padding:0}
     input[type="text"],input[type="number"],input[type="date"],select{
@@ -55,7 +54,6 @@
     .block{padding:12px}
     .chip{display:inline-flex;align-items:center;gap:6px;background:var(--chip);color:var(--fg);padding:4px 8px;border-radius:999px;font-size:12px}
     .chip .dot{width:8px;height:8px}
-    .spacer{flex:1}
   </style>
 </head>
 <body data-theme="light">
@@ -76,18 +74,12 @@
     </aside>
 
     <main class="content">
-      <div class="row" style="align-items:baseline; margin-bottom:6px">
-        <h1 style="margin:0">Мой склад</h1>
-        <div class="spacer"></div>
-        <span id="woBadge" class="chip" title="Списаний за сегодня (календарный день)">
-          <span class="dot on"></span>
-          <span>Списаний сегодня: <b id="woCount">0</b> (шт: <b id="woQty">0</b>)</span>
-        </span>
-      </div>
+      <h1>Мой склад</h1>
 
       <div class="row" style="margin-bottom:10px">
         <label><input id="onlyActive" type="checkbox" checked> Только активные</label>
         <input id="search" type="text" placeholder="Название, код, бренд..." style="min-width:260px">
+        <!-- быстрый переход к SKU -->
         <input id="findSku" type="text" placeholder="SKU" style="width:160px">
         <button class="btn secondary" id="btnFindSku">Открыть SKU</button>
 
@@ -100,7 +92,7 @@
         <button class="btn secondary" id="btnApiKey">API-Key</button>
         <span id="apiKeyBadge" class="chip"><span class="dot"></span><span>ключ не задан</span></span>
 
-        <!-- только для SQLite -->
+        <!-- элементы только для локальной SQLite -->
         <button class="btn secondary" id="btnBackup" data-sqlite-only>Бэкап БД</button>
         <label class="btn secondary" for="restoreFile" data-sqlite-only>Восстановить БД</label>
         <input type="file" id="restoreFile" accept=".sqlite3" style="display:none" data-sqlite-only>
@@ -138,7 +130,6 @@ const qs=(s,el=document)=>el.querySelector(s);
 const qsa=(s,el=document)=>[...el.querySelectorAll(s)];
 const nf = new Intl.NumberFormat('ru-RU');
 const fmt = n => nf.format(Number(n||0));
-const debounce = (fn,ms=250)=>{let t;return(...a)=>{clearTimeout(t);t=setTimeout(()=>fn(...a),ms)}};
 
 function setNote(msg, ok=false){
   const el = qs('#note');
@@ -157,7 +148,7 @@ function setNote(msg, ok=false){
   });
 })();
 
-// --- fetch helper с автоповтором при 401/403 ---
+// --- Fetch helper с автоповтором при 401/403 (запрос ключа) ---
 async function fetchJSON(url, opts, _retry){
   const r = await fetch(url, opts||{});
   if(r.status===401 || r.status===403){
@@ -230,7 +221,7 @@ async function importFile(file){
   const fd = new FormData(); fd.append('file', file);
   try{
     const data = await fetchJSON('/products/manual-upload', {method:'POST', body:fd});
-    setNote(\`Файл загружен: \${file.name}. Позиции: \${data.count||0}. Вставлено: \${data.inserted||0}, обновлено: \${data.updated||0}\`, true);
+    setNote(`Файл загружен: ${file.name}. Позиции: ${data.count||0}. Вставлено: ${data.inserted||0}, обновлено: ${data.updated||0}`, true);
     renderProducts(data.items||[]);
   }catch(e){ setNote('Импорт не удался: ' + e.message); }
 }
@@ -254,6 +245,7 @@ async function openDetail(row){
     <div class="block">
       <div style="display:flex;align-items:center;gap:10px;margin:8px 0 6px">
         <div style="font-weight:600">Партии — <span id="dTitle">${row.cells[1].textContent}</span></div>
+        <button class="btn secondary" id="btnRecount">Пересчитать списания (FIFO)</button>
       </div>
 
       <table style="width:100%" id="btTable">
@@ -269,6 +261,26 @@ async function openDetail(row){
       <div class="row" style="margin-top:8px; gap:8px">
         <button class="btn secondary" id="btnAddRow">+ Добавить</button>
         <button class="btn" id="btnSaveRows">Сохранить новые</button>
+      </div>
+
+      <hr style="border:0;border-top:1px solid var(--line);margin:14px 0">
+
+      <div class="row" style="align-items:center;gap:8px">
+        <b>Продажи SKU</b>
+        <span class="muted">KASPI_DELIVERY</span>
+        <label>за</label>
+        <input type="number" id="salesDays" min="1" step="1" value="7" style="width:80px">
+        <span>дн.</span>
+        <button class="btn secondary" id="btnLoadSales">Показать</button>
+        <button class="btn" id="btnSyncSales">Списать по продажам</button>
+        <span id="salesSummary" class="muted"></span>
+      </div>
+
+      <div style="overflow:auto;max-height:260px;margin-top:6px">
+        <table class="table" id="salesTable">
+          <thead><tr><th>№</th><th>Дата</th><th>Сумма</th></tr></thead>
+          <tbody></tbody>
+        </table>
       </div>
     </div>
   `;
@@ -287,7 +299,7 @@ async function openDetail(row){
   function addRow(data={}){
     const tr = document.createElement('tr');
     const codeCell = (data && data.batch_code) ? data.batch_code : '<span class="muted">— генерируется</span>';
-    const delBtn = (data && data.id) ? \`<button class="btn-link btnDel" data-id="\${data.id}">Удалить</button>\` : '';
+    const delBtn = (data && data.id) ? `<button class="btn-link btnDel" data-id="${data.id}">Удалить</button>` : '';
     const sold = data.qty_sold ?? data.sold ?? null;
     const left = data.left ?? (typeof sold === 'number' && typeof data.qty === 'number' ? (data.qty - sold) : null);
     tr.innerHTML = `
@@ -319,8 +331,6 @@ async function openDetail(row){
       await fetchJSON('/products/db/price-batches/'+encodeURIComponent(sku)+'/'+btn.dataset.id, {method:'DELETE'});
       btn.closest('tr').remove();
       setNote('Партия удалена.', true);
-      await updateWriteoffsChip();
-      await loadDB();
     }catch(err){ setNote('Удаление не удалось: ' + err.message); }
   });
 
@@ -346,9 +356,89 @@ async function openDetail(row){
         body: JSON.stringify({entries})
       });
       setNote('Партии сохранены.', true);
-      await updateWriteoffsChip();
-      openDetail(row);
+      openDetail(row); // перезагрузим
     }catch(e){ setNote('Сохранение партий не удалось: ' + e.message); }
+  };
+
+  // Пересчёт списаний из продаж
+  qs('#btnRecount', mount).onclick = async ()=>{
+    try{
+      const res = await fetchJSON('/products/batches/recount-sold', {method:'POST'});
+      setNote(`Пересчёт списаний выполнен (затронуто партий: ${res.updated_batches||0}).`, true);
+      openDetail(row);
+    }catch(e){ setNote('Пересчёт не удался: ' + e.message); }
+  };
+
+  // ---- Продажи по SKU + списание FIFO ----
+  function isoToday(){ return new Date().toISOString().slice(0,10); }
+  function isoDaysAgo(d){
+    const dt = new Date(); dt.setDate(dt.getDate() - d);
+    return dt.toISOString().slice(0,10);
+  }
+
+  async function loadSalesForSku(sku, days){
+    const start = isoDaysAgo(days);
+    const end   = isoToday();
+    const params = new URLSearchParams({
+      start, end, tz:'Asia/Almaty', date_field:'creationDate',
+      states:'KASPI_DELIVERY', exclude_states:'CANCELED',
+      use_bd:'1', business_day_start:'20:00',
+      order:'desc', grouped:'0', limit:'100000', with_items:'1'
+    });
+    const data = await fetchJSON('/orders/ids?' + params.toString());
+    const rows = (data.items||[]).filter(x => String(x.sku) === String(sku));
+    // таблица
+    const tb = qs('#salesTable tbody', mount); tb.innerHTML = '';
+    rows.slice(0,200).forEach(it=>{
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${it.number}</td><td>${it.date.slice(0,16).replace('T',' ')}</td><td>${fmt(it.amount)} KZT</td>`;
+      tb.appendChild(tr);
+    });
+    qs('#salesSummary', mount).textContent = rows.length
+      ? `найдено: ${rows.length} шт., сумма: ${fmt(rows.reduce((a,r)=>a+(r.amount||0),0))} KZT`
+      : 'нет продаж за выбранный период';
+    return { rows, start, end };
+  }
+
+  qs('#btnLoadSales', mount).onclick = async ()=>{
+    try{
+      await loadSalesForSku(sku, Number(qs('#salesDays', mount).value||7));
+    }catch(e){ setNote('Загрузка продаж не удалась: ' + e.message); }
+  };
+
+  qs('#btnSyncSales', mount).onclick = async ()=>{
+    try{
+      const days = Number(qs('#salesDays', mount).value||7);
+      const { rows, start, end } = await loadSalesForSku(sku, days);
+      if(!rows.length){ setNote('Нет продаж для списания.'); return; }
+
+      // 1) апсертом в FIFO-продажи
+      const orders = rows.map(x => ({
+        id: x.id,
+        date: x.date,
+        customer: null,
+        items: [{ sku: String(x.sku), qty: 1, unit_price: Number(x.amount||0) }]
+      }));
+      await fetchJSON('/profit/orders/upsert-bulk', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ orders })
+      });
+
+      // 2) пересчитать леджер за период
+      await fetchJSON(`/profit/rebuild-ledger?date_from=${start}&date_to=${end}`, { method:'POST' });
+
+      // 3) протянуть qty_sold/left в партии
+      await fetchJSON('/products/batches/recount-sold', { method:'POST' });
+
+      setNote('Продажи синхронизированы и списания применены.', true);
+
+      // обновим детали и список
+      await loadDB();
+      openDetail(row);
+    }catch(e){
+      setNote('Списание по продажам не удалось: ' + e.message);
+    }
   };
 }
 
@@ -366,30 +456,8 @@ function tableToRows(){
   });
 }
 
-// ——— Пересчёт qty_sold по леджеру (новый products.py) ———
-async function recountSold(){
-  try{
-    setNote('Пересчитываю продажи по леджеру…');
-    await fetchJSON('/products/batches/recount-sold', {method:'POST'});
-    await updateWriteoffsChip();
-    await loadDB();
-    setNote('Пересчёт завершён.', true);
-  }catch(e){
-    setNote('Пересчёт не удался: ' + e.message);
-  }
-}
-
-// === Бейдж списаний (за сегодня, без use_bd/tz) ===
-async function updateWriteoffsChip(){
-  try{
-    const j = await fetchJSON('/products/db/writeoffs/header');
-    qs('#woCount').textContent = (j?.count ?? 0);
-    qs('#woQty').textContent = (j?.total_qty ?? 0);
-  }catch(_){}
-}
-
 document.addEventListener('DOMContentLoaded', async ()=>{
-  // ping
+  // ping: показываем безопасный драйвер, без подробностей урла
   try{
     const ping = await fetchJSON('/products/db/ping');
     const backend = ping?.driver ? ('db=' + ping.driver) : (ping?.db_path || '');
@@ -398,25 +466,18 @@ document.addEventListener('DOMContentLoaded', async ()=>{
     setNote('Не найден /products/db/ping. Проверь main.py -> include_router(..., prefix="/products").');
   }
 
-  // хэндлеры
   qs('#btnLoadApi').onclick = loadAPI;
   qs('#btnLoadDb').onclick = loadDB;
 
-  // поиск Enter в SKU
-  qs('#findSku').addEventListener('keydown', e=>{
-    if(e.key==='Enter') qs('#btnFindSku').click();
-  });
-
+  // быстрый поиск/открытие SKU
   qs('#btnFindSku').onclick = ()=>{
     const sku = qs('#findSku').value.trim();
     if(!sku) return;
     const row = qsa('#tbl tbody tr').find(tr => (tr.dataset.sku||tr.cells[0].textContent.trim()) === sku);
-    if(!row){ setNote('SKU не найден в таблице. Нажми «Загрузить из БД» или сделай общий поиск.'); return; }
+    if(!row){ setNote('SKU не найден в таблице. Попробуй «Загрузить из БД» или общий поиск.'); return; }
     row.scrollIntoView({behavior:'smooth', block:'center'});
     openDetail(row);
   };
-
-  qs('#search').addEventListener('input', debounce(() => loadDB(), 350));
 
   qs('#fileInput').addEventListener('change', async (e)=>{
     const f = e.target.files?.[0]; if(!f) return;
@@ -431,7 +492,6 @@ document.addEventListener('DOMContentLoaded', async ()=>{
       if(res?.integrity === 'ok') setNote('БД восстановлена (integrity=ok).', true);
       else setNote('БД загружена, но integrity_check != ok.');
       await loadDB();
-      await updateWriteoffsChip();
     }catch(err){ setNote('Восстановление БД не удалось: ' + err.message); }
     e.target.value = '';
   });
@@ -451,9 +511,8 @@ document.addEventListener('DOMContentLoaded', async ()=>{
       const res = await fetchJSON('/products/db/bulk-upsert', {
         method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(rows)
       });
-      setNote(\`Сохранено в БД: вставлено \${res.inserted||0}, обновлено \${res.updated||0}\`, true);
+      setNote(`Сохранено в БД: вставлено ${res.inserted||0}, обновлено ${res.updated||0}`, true);
       await loadDB();
-      await updateWriteoffsChip();
     }catch(e){ setNote('Сохранение в БД не удалось: ' + e.message); }
   };
 
@@ -464,15 +523,12 @@ document.addEventListener('DOMContentLoaded', async ()=>{
     window.location = '/products/db/export.csv?' + p.toString();
   };
 
-  // запуск
-  await loadDB();
-  await updateWriteoffsChip();
-  // Автозапуск пересчёта qty_sold (попросит API-Key при 401)
-  await recountSold();
+  // авто-загрузка из БД
+  loadDB();
 });
 </script>
 
-<!-- Автоподстановка X-API-Key и значок статуса -->
+<!-- Автоподстановка X-API-Key ко всем запросам /products/* и /profit/* + статус ключа -->
 <script>
 (() => {
   const KEY = "KASPI_API_KEY";
@@ -482,8 +538,13 @@ document.addEventListener('DOMContentLoaded', async ()=>{
     const v = localStorage.getItem(KEY) || "";
     const el = badge(); if(!el) return;
     const dot = el.querySelector('.dot'); const text = el.querySelector('span:last-child');
-    if(v){ dot.classList.add('on'); text.textContent = 'ключ установлен'; }
-    else { dot.classList.remove('on'); text.textContent = 'ключ не задан'; }
+    if(v){
+      dot.classList.add('on');
+      text.textContent = 'ключ установлен';
+    }else{
+      dot.classList.remove('on');
+      text.textContent = 'ключ не задан';
+    }
   }
 
   window.KASPI_API_KEY = localStorage.getItem(KEY) || "";
@@ -493,14 +554,16 @@ document.addEventListener('DOMContentLoaded', async ()=>{
   window.fetch = function(input, init) {
     try {
       let urlStr = typeof input === "string" ? input : (input && input.url) || "";
-      if (urlStr.startsWith("/products/")) {
+      if (urlStr.startsWith("/products/") || urlStr.startsWith("/profit/")) {
         init = init || {};
         const k = window.KASPI_API_KEY || "";
 
+        // Заголовок
         let headers = init.headers instanceof Headers ? init.headers : new Headers(init.headers || {});
         if (k) headers.set("X-API-Key", k);
         init.headers = headers;
 
+        // Fallback: подпишем ?api_key=... (на тот же ключ)
         if (k) {
           const u = new URL(urlStr, location.origin);
           if (!u.searchParams.has("api_key")) u.searchParams.set("api_key", k);
@@ -511,10 +574,11 @@ document.addEventListener('DOMContentLoaded', async ()=>{
           }
         }
       }
-    } catch (e) {}
+    } catch (e) { /* no-op */ }
     return _origFetch(input, init);
   };
 
+  // Удобный setter (сохранит ключ и тут же начнёт подставлять)
   window.setApiKey = function(k) {
     localStorage.setItem(KEY, k || "");
     window.KASPI_API_KEY = k || "";
@@ -522,6 +586,7 @@ document.addEventListener('DOMContentLoaded', async ()=>{
     console.log("API key set");
   };
 
+  // Кнопка "API-Key": спросить и сохранить
   document.addEventListener("DOMContentLoaded", () => {
     const btn = document.getElementById("btnApiKey");
     if (btn) {
@@ -535,7 +600,7 @@ document.addEventListener('DOMContentLoaded', async ()=>{
 })();
 </script>
 
-<!-- Скрыть sqlite-only элементы в режиме Postgres -->
+<!-- Скрыть элементы с data-sqlite-only в режиме Postgres -->
 <script>
 document.addEventListener("DOMContentLoaded", async () => {
   let isPG = false;
@@ -558,6 +623,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.querySelectorAll('form[action$="/products/db/restore"]').forEach(hide);
   document.querySelectorAll('button[data-action="restore"]').forEach(hide);
   document.querySelectorAll("[data-sqlite-only]").forEach(hide);
+  // Fallback по тексту
   document.querySelectorAll("button, a, form, div, section").forEach((el) => {
     const t = (el.innerText || "").toLowerCase();
     if (/(backup|бэкап|restore|восстанов)/.test(t)) hide(el);
