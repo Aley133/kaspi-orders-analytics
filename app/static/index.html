@@ -35,12 +35,15 @@
     .slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:#d1d5db;border-radius:999px;transition:.2s}
     .slider:before{position:absolute;content:"";height:16px;width:16px;left:2px;top:2px;background:white;border-radius:50%;transition:.2s}
     .switch input:checked + .slider{background:#10b981}.switch input:checked + .slider:before{transform:translateX(20px)}
+
+    /* для «Номера заказов» и других таблиц */
     .order-table{width:100%;border-collapse:collapse;margin:6px 0 12px}
     .order-table th,.order-table td{padding:6px 8px;border-bottom:1px solid var(--line);font-size:13px}
-    .nowrap{white-space:nowrap}.clickable{cursor:pointer;text-decoration:underline}
+    .nowrap{white-space:nowrap}
+    .clickable{cursor:pointer;text-decoration:underline}
     .codes-cell{max-width:520px;white-space:normal;word-break:break-word}
 
-    /* компактный блок «№ заказа → SKU» (новый групповой) */
+    /* блок «№ заказа → SKU» (групповой) */
     .order-sku-shell{border-top:1px solid var(--line);padding-top:8px;margin-top:8px}
     .order-sep td{border-bottom:2px dashed var(--line); height:6px; padding:0}
     .order-code-cell{font-weight:600; white-space:nowrap}
@@ -93,7 +96,7 @@
         <div class="kpi-item"><div class="kpi-label">Оборот</div><div class="kpi-value" id="kpiAmount">0</div></div>
       </section>
 
-      <!-- ======== FIFO (переписанный блок) ======== -->
+      <!-- ======== FIFO (обновлённый блок) ======== -->
       <section class="shell">
         <div class="row" style="justify-content:space-between;align-items:center;">
           <h2 style="margin:0">Прибыль (FIFO)</h2>
@@ -160,7 +163,7 @@
           </div>
         </div>
 
-        <!-- Поиск «заказы по SKU» – остаётся как и было -->
+        <!-- Поиск «заказы по SKU» -->
         <div class="shell" style="margin-top:12px">
           <div class="row" style="justify-content:space-between;align-items:center">
             <h3 style="margin:0">Заказы по SKU</h3>
@@ -318,13 +321,124 @@ async function run(e){
       }
     }
 
-    // Обновляем FIFO-блок (сам тянет всё нужное внутри)
+    // ОБЯЗАТЕЛЬНО: сначала номера заказов (для сверки), затем FIFO
+    await loadIds();
     await loadProfitFIFO();
     await checkProfitStatus(data);
+
     setNote('Данные обновлены', true);
   }catch(err){
     setNote('Ошибка загрузки: ' + (err?.message || err), false);
   }finally{ setBusy(false); }
+}
+</script>
+
+<script>
+/* ─────────── «Номера заказов (для сверки)» ─────────── */
+function buildOrderItemsTable(group, currency){
+  const table = document.createElement('table'); table.className = 'order-table';
+  table.innerHTML = `
+    <thead><tr>
+      <th class="nowrap">№ заказа</th><th>SKU</th><th>Название</th><th class="nowrap">Qty</th>
+      <th class="nowrap">Сумма строки</th><th class="nowrap">Состояние</th><th class="nowrap">Время</th>
+    </tr></thead><tbody></tbody>`;
+  const tbody = table.querySelector('tbody');
+
+  for(const o of (group.items || [])){
+    const lines = (o.items && o.items.length)
+      ? o.items.map(li => ({ sku: li.sku||'', title: li.title||'', qty: Number(li.qty||1), sum: Number(li.unit_price||li.total_price||0) }))
+      : [{ sku: o.sku||'', title: o.title||o.name||'', qty: Number(o.qty||1), sum: Number(o.amount||0) }];
+
+    for(const li of lines){
+      const tr = document.createElement('tr');
+      const tds = [
+        String(o.number||''),
+        String(li.sku||''),
+        String(li.title||''),
+        String(li.qty||1),
+        `${fmt(li.sum||0)} ${currency||'KZT'}`,
+        String(o.state||''),
+        (String(o.date||'').slice(0,16).replace('T',' ')||'')
+      ];
+      for(const v of tds){ const td = document.createElement('td'); td.textContent = v; tr.appendChild(td); }
+      tbody.appendChild(tr);
+    }
+  }
+  return table;
+}
+
+async function loadIds(){
+  const start = document.getElementById('start').value;
+  const end = document.getElementById('end').value;
+  const tz = document.getElementById('tz').value || 'Asia/Almaty';
+  const date_field = document.getElementById('date_field').value;
+  const states = document.getElementById('states').value;
+  const exc = document.getElementById('exclude_states').checked ? 'CANCELED' : '';
+  const use_bd = document.getElementById('use_bd')?.checked ? '1' : '0';
+  const bd_start = document.getElementById('bd_start')?.value || '';
+  const order = 'asc';
+
+  const params = new URLSearchParams({ start, end, tz, date_field, order, grouped:'1', limit:'100000', with_items:'1', use_bd, business_day_start:bd_start });
+  if(states) params.set('states', states); if(exc) params.set('exclude_states', exc);
+
+  let data = {groups:[], items:[], currency:'KZT'};
+  try{ data = await fetchJSON(`/orders/ids?${params.toString()}`, {}, {retries:1}); }
+  catch(e){ setNote('Не удалось получить номера заказов: ' + (e.message||e), false); }
+
+  // карта «день -> массив уникальных номеров» для таблицы периодов в FIFO
+  window.__ordersByPeriod = {};
+  for(const g of (data.groups||[])){
+    const nums = (g.items||[]).map(it=>it.number).filter(Boolean);
+    window.__ordersByPeriod[g.day] = Array.from(new Set(nums));
+  }
+
+  // Плоский список (служебно)
+  const flat = new URLSearchParams(params); flat.set('grouped','0'); flat.set('with_items','0');
+  try{
+    const flatData = await fetchJSON(`/orders/ids?${flat.toString()}`, {}, {retries:1});
+    window.__lastOrderIds = (flatData.items||[]).map(x => ({ id: x.id, date: x.date }));
+  }catch(_){ window.__lastOrderIds = []; }
+
+  // Рендер групп
+  const container = document.getElementById('ids'); if(!container) return;
+  container.innerHTML = '';
+
+  const currency = data.currency || window.APP_CURRENCY || 'KZT';
+  const totalCount = (typeof data.period_total_count === 'number') ? data.period_total_count : (data.items||[]).length;
+  const totalAmount = (typeof data.period_total_amount === 'number') ? data.period_total_amount : (data.items||[]).reduce((a,it)=>a+(Number(it.amount)||0),0);
+
+  const summary = document.createElement('div'); summary.className = 'ids-summary';
+  summary.innerHTML = `<span>Итого за период:</span> <b>${fmt(totalCount)}</b><span>шт.</span> · <b>${fmt(totalAmount)}</b> <span>${currency}</span>`;
+  container.appendChild(summary);
+
+  const bar = document.createElement('div'); bar.className='ids-actions';
+  const btnCopy = document.createElement('button'); btnCopy.className='btn'; btnCopy.textContent='Скопировать номера';
+  btnCopy.onclick = () => { try{
+      const all = (data.items||[]).map(it=>it.number).join('\n');
+      if(navigator.clipboard?.writeText){ navigator.clipboard.writeText(all); setNote('Скопировано', true); }
+      else { throw new Error('clipboard недоступен'); }
+    }catch(_){ setNote('Не удалось скопировать', false); } };
+  const btnCsv = document.createElement('a'); btnCsv.className='btn'; btnCsv.textContent='Скачать CSV';
+  const csvParams = new URLSearchParams(params); csvParams.delete('grouped'); csvParams.set('limit','100000');
+  btnCsv.href = `/orders/ids.csv?${csvParams.toString()}`; btnCsv.setAttribute('download','ids.csv');
+  const btnExpand = document.createElement('button'); btnExpand.className='btn'; btnExpand.textContent='Раскрыть всё';
+  const btnCollapse = document.createElement('button'); btnCollapse.className='btn'; btnCollapse.textContent='Свернуть всё';
+  bar.appendChild(btnCopy); bar.appendChild(btnCsv); bar.appendChild(btnExpand); bar.appendChild(btnCollapse);
+  container.appendChild(bar);
+
+  const wrapper = document.createElement('div'); wrapper.className='ids-groups'; container.appendChild(wrapper);
+
+  const detailsList = [];
+  for(const group of (data.groups || [])){
+    const det = document.createElement('details'); det.open = true;
+    const dayTotal = (typeof group.total_amount === 'number') ? group.total_amount : (group.items||[]).reduce((acc, it) => acc + (Number(it.amount)||Number(it.total_price)||0), 0);
+    const sum = document.createElement('summary'); sum.textContent = `${group.day} — ${group.items.length} шт. · ${fmt(dayTotal)} ${currency}`;
+    det.appendChild(sum);
+    det.appendChild(buildOrderItemsTable(group, currency));
+    detailsList.push(det); wrapper.appendChild(det);
+  }
+  btnExpand.onclick = ()=> detailsList.forEach(d=>d.open=true);
+  btnCollapse.onclick = ()=> detailsList.forEach(d=>d.open=false);
 }
 </script>
 
@@ -414,7 +528,7 @@ async function pingProfitDb(){
 </script>
 
 <script>
-/* ─────────── FIFO: sync/rebuild (как было) ─────────── */
+/* ─────────── FIFO: sync/rebuild ─────────── */
 async function syncProfit(){
   const start = document.getElementById('start').value;
   const end   = document.getElementById('end').value;
@@ -457,6 +571,7 @@ async function syncProfit(){
 
     setNote(`Синхронизация FIFO: заказов=${upRes.orders_inserted+upRes.orders_updated}, позиций=${upRes.items_inserted}, списаний=${rbRes.recomputed}`, true);
 
+    await loadIds();
     await loadProfitFIFO();
     await checkProfitStatus();
   }catch(e){ setNote('Синхронизация не удалась: ' + (e.message || e)); }
@@ -472,7 +587,7 @@ async function rebuildFifo(){
     const p = new URLSearchParams({ date_from: df, date_to: dt });
     const res = await fetchProfitJSON('/profit/rebuild-ledger?' + p.toString(), { method:'POST' });
     setNote(`FIFO перестроен. Добавлено списаний: ${res?.recomputed||0}`, true);
-    await loadProfitFIFO(); await checkProfitStatus();
+    await loadIds(); await loadProfitFIFO(); await checkProfitStatus();
   }catch(e){ setNote('Перестроение FIFO не удалось: ' + e.message, false); }
   finally{ setBusy(false); }
 }
@@ -483,14 +598,14 @@ async function syncAndRebuild(){ await syncProfit(); if(BUSY) return; setBusy(tr
     const p = new URLSearchParams({ date_from: df, date_to: dt });
     const res = await fetchProfitJSON('/profit/rebuild-ledger?' + p.toString(), { method:'POST' });
     setNote(`Синхр.+пересчёт выполнены. Списаний: ${res?.recomputed||0}`, true);
-    await loadProfitFIFO(); await checkProfitStatus();
+    await loadIds(); await loadProfitFIFO(); await checkProfitStatus();
   }catch(e){ setNote('Пересчёт не удался: ' + e.message, false); }
   finally{ setBusy(false); }
 }
 </script>
 
 <script>
-/* ─────────── FIFO: статус + KPI + Топ SKU + Группировка «№ → SKU» ─────────── */
+/* ─────────── FIFO: статус + KPI + Top SKU + «№ → SKU» ─────────── */
 function setSyncChip(state, text){
   const el = document.getElementById('profitSyncChip'); if(!el) return;
   const dot = el.querySelector('.dot'); if(dot) dot.className = 'dot ' + (state==='ok' ? 'on' : state==='warn' ? 'warn' : state==='err' ? 'err' : '');
@@ -508,10 +623,15 @@ function toLocalDay(isoUtc){
 }
 
 async function fetchOrdersByCode(df, dt){
+  // Эндпоинт моста: возвращает заказы с массивом items [{sku, total_price, ...}]
   const p = new URLSearchParams({ date_from: df, date_to: dt, state: 'KASPI_DELIVERY', limit_orders: 100000, order: 'asc' });
-  // ⚠️ эндпоинт из bridge_v2
-  const data = await fetchProfitJSON('/profit/bridge/by-orders?' + p.toString());
-  return data?.orders || [];
+  try{
+    const data = await fetchProfitJSON('/profit/bridge/by-orders?' + p.toString());
+    return data?.orders || [];
+  }catch(_){
+    // если бридж недоступен — вернём пусто, и групповой блок скроется
+    return [];
+  }
 }
 
 async function fetchSkuAggregates(df, dt){
@@ -524,13 +644,20 @@ async function fetchSkuAggregates(df, dt){
 
 function renderPeriodsTable(rows, cur, orders){
   const tb = document.querySelector('#tbl-profit tbody'); tb.innerHTML = '';
-  // карта период → уникальные номера заказов (локальная дата по Asia/Almaty)
+  // 1) пробуем собрать из bridge/by-orders
   const perNums = {};
   for(const o of (orders||[])){
     const day = toLocalDay(o.date);
     if(!perNums[day]) perNums[day] = new Set();
     if(o.order_code) perNums[day].add(String(o.order_code));
   }
+  // 2) если бридж пуст — fallback на карту из loadIds()
+  if(Object.keys(perNums).length===0 && window.__ordersByPeriod){
+    for(const k of Object.keys(window.__ordersByPeriod)){
+      perNums[k] = new Set(window.__ordersByPeriod[k]);
+    }
+  }
+
   for(const r of (rows||[])){
     const tr = document.createElement('tr');
     const cells = [ r.period, `${fmt(r.revenue)} ${cur}`, `${fmt(r.commission)} ${cur}`, `${fmt(r.cost)} ${cur}`, `${fmt(r.profit)} ${cur}` ];
@@ -566,7 +693,7 @@ function renderOrderSkuGrouped(orders, skuAggMap, cur){
   const tb = document.querySelector('#tbl-order-sku-grouped tbody');
   tb.innerHTML = '';
 
-  // посчитаем суммарную выручку по каждому SKU по строкам заказов (для пропорционального распределения комиссии/себестоимости)
+  // суммарная выручка по каждому SKU (для пропорционального распределения комиссии/себестоимости)
   const skuLineRevenue = new Map();
   for(const o of orders){
     for(const it of (o.items||[])){
@@ -671,7 +798,7 @@ async function loadProfitFIFO(){
   }
 }
 
-/* «Заказы по SKU» (подробная таблица внизу; как и было) */
+/* «Заказы по SKU» (подробная таблица внизу) */
 async function showOrdersForSKU(sku){
   if(!sku){ setNote('Укажите SKU', false); return; }
   const df = document.getElementById('start').value;
