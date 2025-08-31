@@ -292,7 +292,6 @@ async def _get_json_with_retries(cli: httpx.AsyncClient, url: str, *, params: Di
         try:
             r = await cli.get(url, params=params, headers=headers)
             if r.status_code in (429, 500, 502, 503, 504):
-                # «уважаем» Retry-After (если есть)
                 ra = r.headers.get("Retry-After")
                 if ra:
                     try:
@@ -743,8 +742,10 @@ async def analytics(start: str = Query(...), end: str = Query(...), tz: str = Qu
 
 # -------------------- Вспомогательная «ядровая» функция list_ids --------------------
 def _select_targets(out: List[Dict[str, object]], enrich_day: str, enrich_scope: str, limit: int) -> List[Dict[str, object]]:
+    # В режиме "all" возвращаем все элементы периода без учёта limit —
+    # ограничение, если задано, применяем позже к финальному out.
     if enrich_scope == "all":
-        return out[: (limit or len(out))]
+        return out
     if enrich_scope == "last_day":
         return [it for it in out if str(it["op_day"]) == enrich_day]
     if enrich_scope == "last_week":
@@ -861,6 +862,7 @@ async def _list_ids_core(
 
         await asyncio.gather(*(enrich(it) for it in targets))
 
+    # Применяем лимит только к финальному списку
     if limit and limit > 0:
         out = out[:limit]
 
@@ -886,11 +888,11 @@ async def list_ids(
     exclude_states: Optional[str] = Query(None),
     use_bd: Optional[bool] = Query(None),
     business_day_start: Optional[str] = Query(None),
-    limit: int = Query(1000),
+    limit: int = Query(0, description="0 = без ограничения"),
     order: str = Query("asc", pattern="^(asc|desc)$"),
     grouped: int = Query(0),
     with_items: int = Query(1, description="0=без обогащения; 1=обогащение позициями"),
-    enrich_scope: str = Query("last_week", pattern="^(none|last_day|last_week|last_month|all)$"),
+    enrich_scope: str = Query("all", pattern="^(none|last_day|last_week|last_month|all)$"),
     items_mode: str = Query("all", pattern="^(first|all)$"),
     return_candidates: int = Query(0, description="1=вернуть title_candidates/sku_candidates"),
     assign_mode: str = Query("smart", pattern="^(smart|business|raw)$"),
@@ -938,11 +940,11 @@ async def list_ids_async(
     exclude_states: Optional[str] = Query(None),
     use_bd: Optional[bool] = Query(None),
     business_day_start: Optional[str] = Query(None),
-    limit: int = Query(1000),
+    limit: int = Query(0, description="0 = без ограничения"),
     order: str = Query("asc", pattern="^(asc|desc)$"),
     grouped: int = Query(0),
     with_items: int = Query(1),
-    enrich_scope: str = Query("last_week", pattern="^(none|last_day|last_week|last_month|all)$"),
+    enrich_scope: str = Query("all", pattern="^(none|last_day|last_week|last_month|all)$"),
     items_mode: str = Query("all"),
     return_candidates: int = Query(0),
     assign_mode: str = Query("smart"),
