@@ -99,15 +99,24 @@
           <label>Начало</label><input type="date" id="start" required>
           <label>Конец</label><input type="date" id="end" required>
           <label>Часовой пояс</label><input type="text" id="tz" value="Asia/Almaty" style="width:140px">
-          <label>Поле даты</label><select id="date_field" style="width:170px"></select>
+          <label>Поле даты</label><select id="date_field" style="width:220px"></select>
         </div>
+
         <div class="row" style="margin-top:8px">
           <label>Статусы (включить)</label><input type="text" id="states" placeholder="через запятую, напр. NEW,DELIVERED" style="min-width:320px">
           <label class="chk"><input type="checkbox" id="exclude_states" checked> Исключить CANCELED</label>
         </div>
+
         <div class="row" style="margin-top:8px">
           <label class="chk"><input type="checkbox" id="use_bd" checked> День магазина</label>
           <label>Начало дня</label><input type="time" id="bd_start" value="20:00" step="60">
+          <label>Режим дня</label>
+          <select id="assign_mode" title="Как определяем, к какому дню относится заказ" style="width:220px">
+            <option value="smart">Умный: приём до HH:MM + бизнес-день</option>
+            <option value="business">Бизнес-день (до времени «Начало дня»)</option>
+            <option value="raw">По выбранному полю даты (без сдвигов)</option>
+          </select>
+          <label>Приём до</label><input type="time" id="store_until" value="17:00" step="60" title="Заказы после этого времени и без комплектации идут на завтра">
           <span id="bdInfo" class="muted"></span>
           <button type="submit" class="btn" id="btn-run" style="margin-left:auto">Показать</button>
         </div>
@@ -256,8 +265,16 @@ function fmtMs(ms){
 /* ─────────── UI/STATE ─────────── */
 let citiesChart=null, profitChart=null;
 window.APP_CURRENCY='KZT';
-window.__ordersByPeriod={};         // { '2025-08-31': [ '6276..', ... ] }
-window.__orderToSkus={};            // { '6276..': [ 'sku1','sku2',.. ] }
+window.__ordersByPeriod={};
+window.__orderToSkus={};
+
+const DATE_FIELD_LABELS = {
+  creationDate: 'Создание заказа',
+  plannedShipmentDate: 'План передачи',
+  plannedDeliveryDate: 'План доставки',
+  shipmentDate: 'Фактическая передача',
+  deliveryDate: 'Фактическая доставка'
+};
 
 async function loadMeta(){
   try {
@@ -265,15 +282,28 @@ async function loadMeta(){
     const sel = document.getElementById('date_field');
     sel.innerHTML = '';
     (meta.date_field_options || ['creationDate']).forEach(v=>{
-      const o=document.createElement('option'); o.value=v; o.textContent=v; sel.appendChild(o);
+      const o=document.createElement('option'); o.value=v; o.textContent=DATE_FIELD_LABELS[v] || v; sel.appendChild(o);
     });
     sel.value = meta.date_field_default || 'creationDate';
     document.getElementById('tz').value = meta.timezone || 'Asia/Almaty';
     document.getElementById('bd_start').value = meta.business_day_start || '20:00';
+    document.getElementById('store_until').value = meta.store_accept_until || '17:00';
   } catch(_){}
   const today = new Date(); const iso = d=>d.toISOString().slice(0,10);
   document.getElementById('start').value = iso(today);
   document.getElementById('end').value   = iso(today);
+}
+
+function uiModeHint(){
+  const use_bd = document.getElementById('use_bd')?.checked;
+  const bd = document.getElementById('bd_start').value || '20:00';
+  const cutoff = document.getElementById('store_until').value || '17:00';
+  const mode = document.getElementById('assign_mode').value;
+  const el = document.getElementById('bdInfo');
+  if(mode==='smart') el.textContent = `Умный режим: приём до ${cutoff}; доставленные — бизнес-день ${bd}`;
+  else if(mode==='business') el.textContent = `Бизнес-день: ${bd} → ${bd}`;
+  else el.textContent = 'Режим: по выбранному полю даты';
+  if(!use_bd) el.textContent += ' · День магазина: выключен';
 }
 
 async function run(e){
@@ -288,8 +318,10 @@ async function run(e){
     const exc    = document.getElementById('exclude_states').checked ? 'CANCELED' : '';
     const use_bd = document.getElementById('use_bd')?.checked ? '1' : '0';
     const bd_start = document.getElementById('bd_start')?.value || '';
+    const assign_mode = document.getElementById('assign_mode').value || 'smart';
+    const store_until = document.getElementById('store_until').value || '17:00';
 
-    const p = new URLSearchParams({ start, end, tz, date_field, use_bd });
+    const p = new URLSearchParams({ start, end, tz, date_field, use_bd, assign_mode, store_accept_until: store_until });
     if(states) p.set('states', states); if(exc) p.set('exclude_states', exc);
     if(bd_start) p.set('business_day_start', bd_start);
 
@@ -300,7 +332,7 @@ async function run(e){
     document.getElementById('kpiAmount').textContent = `${fmt(data.total_amount||0)} ${window.APP_CURRENCY}`;
     document.getElementById('periodLabel').textContent = `${data.range?.start||start} → ${data.range?.end||end}`;
     document.getElementById('periodCutoff').textContent = (use_bd==='1' ? (bd_start || '20:00') : '24:00');
-    document.getElementById('bdInfo').textContent = (use_bd==='1' ? `День магазина: ${bd_start||'20:00'} → ${bd_start||'20:00'}` : 'День магазина: выключен');
+    uiModeHint();
 
     // состояния
     const sb = document.getElementById('statesBox');
@@ -320,9 +352,9 @@ async function run(e){
       citiesChart = new Chart(ctx,{type:'bar',data:{labels,datasets:[{label:'Заказы',data:counts}]},options:{responsive:true,plugins:{legend:{display:false}}}});
     }
 
-    await loadIds();          // строит карты: __ordersByPeriod и __orderToSkus + рендер «Номера заказов (для сверки)»
-    await loadProfitFIFO();   // KPI FIFO + график + таблицы (использует __ordersByPeriod)
-    renderOrderSkuMatrix();   // вывод матрицы «№ заказа → SKU»
+    await loadIds();          // карты + «Номера заказов»
+    await loadProfitFIFO();   // FIFO KPI
+    renderOrderSkuMatrix();   // матрица
     await checkProfitStatus(data);
 
     setNote('Данные обновлены', true);
@@ -388,7 +420,13 @@ async function loadIds(){
   const exc    = document.getElementById('exclude_states').checked ? 'CANCELED' : '';
   const use_bd = document.getElementById('use_bd')?.checked ? '1' : '0';
   const bd_start = document.getElementById('bd_start')?.value || '';
-  const params = new URLSearchParams({ start,end,tz,date_field,order:'asc',grouped:'1',limit:'100000',with_items:'1',use_bd,business_day_start:bd_start });
+  const assign_mode = document.getElementById('assign_mode').value || 'smart';
+  const store_until = document.getElementById('store_until').value || '17:00';
+
+  const params = new URLSearchParams({
+    start,end,tz,date_field,order:'asc',grouped:'1',limit:'100000',with_items:'1',use_bd,
+    business_day_start:bd_start, assign_mode, store_accept_until: store_until
+  });
   if(states) params.set('states', states); if(exc) params.set('exclude_states', exc);
 
   let data={groups:[],items:[],currency:'KZT'};
@@ -631,13 +669,11 @@ async function loadProfitFIFO(){
   const group_by=document.getElementById('profitGroup')?.value||'day';
 
   try{
-    // summary + график
     const p=new URLSearchParams({date_from:df,date_to:dt,group_by,use_bd,bd_start});
     const sum=await fetchProfitJSON('/profit/summary?'+p.toString());
     const cur=sum.currency||window.APP_CURRENCY||'KZT';
     setFifoKPIs(sum.total,cur); drawProfitChart(sum.rows||[], cur);
 
-    // таблица периодов (+ номера)
     const tb=document.querySelector('#tbl-profit tbody'); tb.innerHTML='';
     for(const r of (sum.rows||[])){
       const tr=document.createElement('tr');
@@ -648,7 +684,6 @@ async function loadProfitFIFO(){
       tb.appendChild(tr);
     }
 
-    // топ sku (кликабельно)
     const top = await fetchProfitJSON('/profit/by-sku?'+new URLSearchParams({date_from:df,date_to:dt,limit:50}).toString());
     const tbSku=document.querySelector('#tbl-profit-sku tbody'); tbSku.innerHTML='';
     for(const row of (top.rows||[])){
@@ -711,6 +746,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('btnSkuSearch')?.addEventListener('click', ()=>showOrdersForSKU((document.getElementById('skuSearch')?.value||'').trim()));
     document.getElementById('btnSkuClear')?.addEventListener('click', ()=>{ document.getElementById('skuSearch').value=''; document.getElementById('skuOrders').innerHTML=''; document.getElementById('skuOrdersInfo').textContent=''; });
 
+    ['use_bd','bd_start','assign_mode','store_until'].forEach(id=>{
+      const el=document.getElementById(id); if(el) el.addEventListener('change', uiModeHint);
+    });
+
+    uiModeHint();
     await pingProfitDb();
     await run(); // initial
   }catch(e){ setNote('Ошибка инициализации: ' + (e?.message||e), false); }
