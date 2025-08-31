@@ -55,13 +55,19 @@
     .order-table{width:100%;border-collapse:collapse;margin:6px 0 12px}
     .order-table th,.order-table td{padding:6px 8px;border-bottom:1px solid var(--line);font-size:13px}
 
-    .note{margin:8px 0 12px;padding:10px 12px;border-radius:10px;display:none}
+    /* ─── уведомление/прогресс: читаемый, липкий, не мигает ─── */
+    .note{margin:8px 0 12px;padding:10px 12px;border-radius:10px;display:none;position:relative}
     .note.ok,.note.progress{display:block;background:color-mix(in oklab, var(--accent) 14%, transparent);border:1px solid color-mix(in oklab, var(--accent) 48%, transparent);color:var(--fg)}
     .note.err{display:block;background:color-mix(in oklab, var(--danger) 14%, transparent);border:1px solid color-mix(in oklab, var(--danger) 48%, transparent);color:var(--fg)}
     .note .small{font-size:12px;color:var(--muted)}
+    .note.progress{position:sticky; top:8px; z-index:6000; box-shadow:0 8px 24px rgba(0,0,0,.15)}
 
-    .progress {height:10px;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:rgba(255,255,255,.04);margin-top:6px}
-    .progress .bar{height:100%;width:0%;background:var(--accent);transition:width .2s}
+    .progress {height:12px;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:rgba(255,255,255,.06);margin-top:6px}
+    .progress .bar{height:100%;width:0%;background:var(--accent);transition:width .2s cubic-bezier(.4,0,.2,1)}
+
+    /* верхний тонкий индикатор */
+    #topLoader{position:sticky; top:0; left:0; right:0; height:3px; z-index:7000; background:transparent}
+    #topLoader .bar{height:100%; width:0%; background:var(--accent); transition:width .2s cubic-bezier(.4,0,.2,1)}
 
     .ids-summary{margin:8px 0}
     .ids-actions{display:flex;gap:8px;margin:8px 0;flex-wrap:wrap}
@@ -75,6 +81,18 @@
     .slider:before{position:absolute;content:"";height:16px;width:16px;left:2px;top:2px;background:white;border-radius:50%;transition:.2s}
     .switch input:checked + .slider{background:var(--accent)}
     .switch input:checked + .slider:before{transform:translateX(20px)}
+    body,.note{-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+
+    /* ─── multiselect статусов ─── */
+    .status-control{position:relative;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+    .chips{display:flex;gap:6px;flex-wrap:wrap}
+    .chips .chip{cursor:default}
+    .chips .chip .x{cursor:pointer;opacity:.8;margin-left:6px}
+    .status-menu{position:absolute;top:110%;left:0;z-index:5000;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:8px 10px;width:280px;box-shadow:0 12px 30px rgba(0,0,0,.22);display:none}
+    .status-menu.open{display:block}
+    .status-grid{max-height:260px;overflow:auto;margin:6px 0;display:grid;grid-template-columns:1fr;gap:2px}
+    .status-grid label{display:flex;align-items:center;gap:8px;padding:4px 6px}
+    .menu-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:6px}
   </style>
 </head>
 <body data-theme="light">
@@ -94,6 +112,9 @@
     </aside>
 
     <main class="content">
+      <!-- верхний тонкий индикатор -->
+      <div id="topLoader"><div class="bar"></div></div>
+
       <h1 style="margin:0 0 12px">Аналитика заказов Kaspi</h1>
 
       <!-- ФИЛЬТРЫ -->
@@ -106,7 +127,23 @@
         </div>
 
         <div class="row" style="margin-top:8px">
-          <label>Статусы (включить)</label><input type="text" id="states" placeholder="через запятую, напр. NEW,DELIVERED" style="min-width:320px">
+          <div class="status-control">
+            <label>Статусы (включить)</label>
+            <input type="text" id="states" placeholder="через запятую, напр. NEW,DELIVERED" style="min-width:320px" />
+            <button class="btn secondary" id="btnStates" type="button">Выбрать</button>
+            <div id="statusChips" class="chips"></div>
+
+            <div id="statusMenu" class="status-menu">
+              <div style="font-weight:600">Выберите статусы</div>
+              <div class="status-grid" id="statusGrid"></div>
+              <div class="menu-actions">
+                <button class="btn secondary" type="button" id="btnStatusesAll">Все</button>
+                <button class="btn secondary" type="button" id="btnStatusesClear">Очистить</button>
+                <button class="btn" type="button" id="btnStatusesApply">Готово</button>
+              </div>
+            </div>
+          </div>
+
           <label class="chk"><input type="checkbox" id="exclude_states" checked> Исключить CANCELED</label>
         </div>
 
@@ -120,6 +157,15 @@
             <option value="raw">По выбранному полю даты (без сдвигов)</option>
           </select>
           <label>Приём до</label><input type="time" id="store_until" value="17:00" step="60" title="Заказы после этого времени и без комплектации идут на завтра">
+          <label>Обогащение</label>
+          <select id="enrich_scope" title="Глубина обогащения SKU" style="width:180px">
+            <option value="none">Не обогащать</option>
+            <option value="last_day">За последний день</option>
+            <option value="last_week" selected>За последнюю неделю</option>
+            <option value="last_month">За последний месяц</option>
+            <option value="all">За весь период</option>
+          </select>
+
           <span id="bdInfo" class="muted"></span>
           <button type="submit" class="btn" id="btn-run" style="margin-left:auto">Показать</button>
         </div>
@@ -238,31 +284,46 @@ function setBusy(on){
   }
 }
 
-function setNote(msg, mode='ok'){ // 'ok' | 'err' | 'progress'
+/* прогресс — липкая плашка + верхняя полоска + троттлинг */
+function setTopLoader(p){
+  const bar = document.querySelector('#topLoader .bar');
+  if(bar) bar.style.width = (p>0 ? `${Math.min(100, Math.max(2, Math.round(p*100)))}%` : '0%');
+}
+
+function setNote(msg, mode='ok'){
   const el = document.getElementById('note');
   el.className = 'note ' + (mode==='progress' ? 'progress' : mode);
   if(mode==='progress'){
     el.innerHTML = `
-      <div><b>${msg}</b></div>
+      <div style="font-weight:600">${msg}</div>
       <div class="small" id="jobText">Подготовка…</div>
       <div class="progress"><div class="bar" id="jobBar" style="width:0%"></div></div>
       <div class="row" style="margin-top:6px">
         <button class="btn secondary" id="btnCancelJob" type="button">Отменить</button>
       </div>`;
+    setTopLoader(0.04);
   }else{
     el.textContent = msg;
+    setTopLoader(0);
   }
   el.style.display = 'block';
 }
 
+let _lastUpdTs = 0;
 function updateProgress(phase, done, total, pct, msg){
+  const now = performance.now();
+  if(now - _lastUpdTs < 120) return; // до ~8 FPS
+  _lastUpdTs = now;
+
   const t = document.getElementById('jobText');
   const b = document.getElementById('jobBar');
-  if(t) t.textContent = `${phase==='scan'?'Выгружаем номера заказов':'Обогащаем SKU'} — ${done}/${Math.max(1,total)} · ${Math.round(pct*100)}%` + (msg?` · ${msg}`:'');
-  if(b) b.style.width = `${Math.round(pct*100)}%`;
+  const txt = `${phase==='scan'?'Выгружаем номера заказов':'Обогащаем SKU'} — ${done}/${Math.max(1,total)} · ${Math.round(pct*100)}%` + (msg?` · ${msg}`:'');
+  if(t) t.textContent = txt;
+  if(b) b.style.width = `${Math.max(1, Math.round(pct*100))}%`;
+  setTopLoader(pct);
 }
 
-function hideNote(){ const el=document.getElementById('note'); el.style.display='none'; el.textContent=''; el.className='note'; }
+function hideNote(){ const el=document.getElementById('note'); el.style.display='none'; el.textContent=''; el.className='note'; setTopLoader(0); }
 window.addEventListener('error', e => setNote(e?.error?.message || e.message || 'Ошибка', 'err'));
 window.addEventListener('unhandledrejection', e => setNote(e?.reason?.message || String(e.reason) || 'Ошибка', 'err'));
 
@@ -285,6 +346,57 @@ window.APP_CURRENCY='KZT';
 window.__ordersByPeriod={};
 window.__orderToSkus={};
 let CURRENT_JOB_ID=null;
+
+/* multiselect статусов */
+const STATUS_OPTIONS = [
+  'NEW','APPROVED_BY_BANK','ACCEPTED_BY_MERCHANT','READY_FOR_SHIPMENT',
+  'KASPI_DELIVERY','DELIVERED','ARCHIVE','ARCHIVED','RETURNED','CANCELED'
+];
+window.STATUS_SELECTED = new Set();
+
+function renderStatusGrid(){
+  const g=document.getElementById('statusGrid'); g.innerHTML='';
+  STATUS_OPTIONS.forEach(s=>{
+    const id='st_'+s;
+    const lab=document.createElement('label');
+    lab.innerHTML=`<input type="checkbox" id="${id}" value="${s}"> <span>${s}</span>`;
+    lab.querySelector('input').checked = window.STATUS_SELECTED.has(s);
+    lab.querySelector('input').addEventListener('change', (e)=>{
+      if(e.target.checked) window.STATUS_SELECTED.add(s); else window.STATUS_SELECTED.delete(s);
+      renderStatusChips(); syncStatesInput();
+    });
+    g.appendChild(lab);
+  });
+}
+function renderStatusChips(){
+  const box=document.getElementById('statusChips'); box.innerHTML='';
+  if(window.STATUS_SELECTED.size===0){ box.innerHTML='<span class="muted">ничего не выбрано</span>'; return; }
+  [...window.STATUS_SELECTED].forEach(s=>{
+    const c=document.createElement('span'); c.className='chip'; c.innerHTML=`${s}<span class="x" title="убрать">×</span>`;
+    c.querySelector('.x').onclick=()=>{ window.STATUS_SELECTED.delete(s); renderStatusChips(); renderStatusGrid(); syncStatesInput(); };
+    box.appendChild(c);
+  });
+}
+function syncStatesInput(){
+  const inp=document.getElementById('states');
+  const fromSet=[...window.STATUS_SELECTED];
+  const manual = (inp.value||'').trim();
+  const merged = new Set();
+  if(manual){ manual.split(/[\s,;]+/).filter(Boolean).forEach(x=>merged.add(x.trim())); }
+  fromSet.forEach(x=>merged.add(x));
+  inp.value = [...merged].filter(Boolean).join(',');
+}
+
+function openStatusMenu(){
+  const m=document.getElementById('statusMenu');
+  m.classList.add('open'); renderStatusGrid();
+  const close=(ev)=>{
+    if(!m.contains(ev.target) && !document.getElementById('btnStates').contains(ev.target)){
+      m.classList.remove('open'); document.removeEventListener('click', close, true);
+    }
+  };
+  setTimeout(()=>document.addEventListener('click', close, true),0);
+}
 
 const DATE_FIELD_LABELS = {
   creationDate: 'Создание заказа',
@@ -309,6 +421,8 @@ async function loadMeta(){
   const today = new Date(); const iso = d=>d.toISOString().slice(0,10);
   document.getElementById('start').value = iso(today);
   document.getElementById('end').value   = iso(today);
+
+  renderStatusChips(); // начальное
 }
 
 function uiModeHint(){
@@ -440,10 +554,11 @@ function buildParams(){
   const bd_start = document.getElementById('bd_start')?.value || '';
   const assign_mode = document.getElementById('assign_mode').value || 'smart';
   const store_until = document.getElementById('store_until').value || '17:00';
+  const enrich_scope = document.getElementById('enrich_scope').value || 'last_week';
 
   const p = new URLSearchParams({
     start,end,tz,date_field,order:'asc',grouped:'1',limit:'100000',with_items:'1',
-    use_bd,business_day_start:bd_start,assign_mode,store_accept_until:store_until,items_mode:'all',enrich_scope:'last_week'
+    use_bd,business_day_start:bd_start,assign_mode,store_accept_until:store_until,items_mode:'all',enrich_scope
   });
   if(states) p.set('states', states); if(exc) p.set('exclude_states', exc);
   return p;
@@ -460,7 +575,6 @@ async function runIdsJob(){
   setBusy(true);
 
   const params = buildParams();
-  // для очень коротких периодов быстро пробежимся — back также справится мгновенно
   const res = await fetch(`/orders/ids.async?${params.toString()}`, {method:'POST'});
   if(!res.ok){ const txt = await res.text(); setNote(txt || res.statusText, 'err'); setBusy(false); return; }
   const { job_id } = await res.json();
@@ -491,7 +605,6 @@ async function runIdsJob(){
 
     if(st.status==='done'){
       done=true;
-      // забираем результат
       const rr = await fetch(`/jobs/${job_id}/result`);
       const data = await rr.json();
       CURRENT_JOB_ID=null;
@@ -558,7 +671,6 @@ async function renderIdsResult(data){
   btnExpand.onclick=()=>detailsList.forEach(d=>d.open=true);
   btnCollapse.onclick=()=>detailsList.forEach(d=>d.open=false);
 
-  // финишная зелёная плашка
   setNote('Данные обновлены', 'ok');
 }
 </script>
@@ -806,6 +918,21 @@ async function showOrdersForSKU(sku){
 document.addEventListener('DOMContentLoaded', async () => {
   try{
     await loadMeta();
+
+    // multiselect UI
+    document.getElementById('btnStates')?.addEventListener('click', openStatusMenu);
+    document.getElementById('btnStatusesAll')?.addEventListener('click', ()=>{
+      STATUS_OPTIONS.forEach(s=>window.STATUS_SELECTED.add(s));
+      renderStatusGrid(); renderStatusChips(); syncStatesInput();
+    });
+    document.getElementById('btnStatusesClear')?.addEventListener('click', ()=>{
+      window.STATUS_SELECTED.clear(); renderStatusGrid(); renderStatusChips(); syncStatesInput();
+    });
+    document.getElementById('btnStatusesApply')?.addEventListener('click', ()=>{
+      document.getElementById('statusMenu').classList.remove('open');
+      syncStatesInput();
+    });
+
     document.getElementById('f')?.addEventListener('submit', run);
     document.getElementById('themeToggle')?.addEventListener('change', (e)=>{ document.body.setAttribute('data-theme', e.target.checked ? 'dark' : 'light'); });
     document.getElementById('profitGroup')?.addEventListener('change', loadProfitFIFO);
