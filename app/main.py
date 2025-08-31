@@ -17,22 +17,22 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from cachetools import TTLCache
 from httpx import HTTPStatusError, RequestError
+
+# Роутеры доменных модулей
 from app.api.bridge_v2 import router as bridge_v2_router
 from app.api.profit_fifo import get_profit_fifo_router
-# FIFO/Bridge
 
-
-# Роутер и ХЕЛПЕРЫ ИМПОРТИРУЕМ ИЗ debug_sku.PY
+# Роутер и ХЕЛПЕРЫ из debug_sku.py (для корректного извлечения позиций)
 from app.debug_sku import (
     get_debug_router,
     _index_included,
     _extract_entry,
-    title_candidates,
+    title_candidates as _title_candidates_from_attrs,
     _rel_id,
-    sku_candidates,
+    sku_candidates as _sku_candidates_from_attrs,
 )
 
-# KaspiClient
+# KaspiClient (для итерации заказов по диапазону)
 try:
     from app.kaspi_client import KaspiClient  # type: ignore
 except Exception:
@@ -62,14 +62,17 @@ KASPI_BASE_URL = os.getenv("KASPI_BASE_URL", "https://kaspi.kz/shop/api/v2").rst
 CURRENCY = os.getenv("CURRENCY", "KZT")
 
 AMOUNT_FIELDS = [s.strip() for s in os.getenv("AMOUNT_FIELDS", "totalPrice").split(",") if s.strip()]
-AMOUNT_DIVISOR = float(os.getenv("AMOUNT_DIVISOR", "1"))
+AMOUNT_DIVISOR = float(os.getenv("AMOUNT_DIVISOR", "1") or 1)
 
 DATE_FIELD_DEFAULT = os.getenv("DATE_FIELD_DEFAULT", "creationDate")
-DATE_FIELD_OPTIONS = [s.strip() for s in os.getenv("DATE_FIELD_OPTIONS", "creationDate,plannedShipmentDate,shipmentDate,deliveryDate").split(",") if s.strip()]
+DATE_FIELD_OPTIONS = [s.strip() for s in os.getenv(
+    "DATE_FIELD_OPTIONS",
+    "creationDate,plannedShipmentDate,shipmentDate,deliveryDate"
+).split(",") if s.strip()]
 CITY_KEYS = [s.strip() for s in os.getenv("CITY_KEYS", "city,deliveryAddress.city").split(",") if s.strip()]
 
-CHUNK_DAYS = int(os.getenv("CHUNK_DAYS", "7"))
-CACHE_TTL = int(os.getenv("CACHE_TTL", "300"))
+CHUNK_DAYS = int(os.getenv("CHUNK_DAYS", "7") or 7)
+CACHE_TTL = int(os.getenv("CACHE_TTL", "300") or 300)
 
 SHOP_NAME = os.getenv("SHOP_NAME", "LeoXpress")
 PARTNER_ID = os.getenv("PARTNER_ID", "")
@@ -101,14 +104,20 @@ if origins:
         allow_credentials=False,
     )
 
+# Клиент к Kaspi API
 client = KaspiClient(token=KASPI_TOKEN, base_url=KASPI_BASE_URL) if KASPI_TOKEN else None
+
+# Кэш ответов
 orders_cache = TTLCache(maxsize=128, ttl=CACHE_TTL)
 
+# Статический UI
+app.mount("/ui", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static"), html=True), name="static")
+
+# Подключаем доменные роутеры
 app.include_router(get_products_router(client), prefix="/products")
 app.include_router(get_profit_fifo_router(),   prefix="/profit")
-app.include_router(bridge_v2_router,           prefix="/profit") 
+app.include_router(bridge_v2_router,           prefix="/profit")
 app.include_router(get_debug_router())
-
 
 # -------------------- Utils --------------------
 def tzinfo_of(name: str) -> pytz.BaseTzInfo:
@@ -147,8 +156,7 @@ def dict_get_path(d: dict, path: str):
     return cur
 
 def norm_state(s: str) -> str:
-    s = (s or "").strip()
-    return s.upper()
+    return (s or "").strip().upper()
 
 def parse_states_csv(s: Optional[str]) -> Optional[set[str]]:
     if not s:
@@ -247,130 +255,111 @@ def _kaspi_headers() -> Dict[str, str]:
 def _async_client():
     return httpx.AsyncClient(base_url=KASPI_BASE_URL, timeout=HTTPX_TIMEOUT, limits=HTTPX_LIMITS)
 
-# -------------------- Enrichment: SKU + Title --------------------
-async def _first_item_details(order_id: str, return_candidates: bool = False) -> Optional[Dict[str, object]]:
+# -------------------- Вытягивание позиций (ВСЕ SKU) --------------------
+async def _all_items_details(order_id: str, return_candidates: bool = True) -> List[Dict[str, object]]:
     """
-    Возвращает:
-      {"sku": "...", "title": "..."}  + опц. {"title_candidates": {...}, "sku_candidates": {...}}
-    Стратегии:
-      S2: /orderentries?filter[order.id]=...   (часто стабильнее/дешевле)
-      S1: /orders/{id}/entries?include=product,merchantProduct,masterProduct
+    Возвращает список позиций заказа, каждая позиция:
+    {
+      "sku": "...",
+      "qty": 1,
+      "unit_price": 6900,
+      "title": "...",
+      "sku_candidates": {...},       # если return_candidates=True
+      "title_candidates": {...},     # если return_candidates=True
+      "raw_entry_id": "..."          # id из orderentries
+    }
+    Использует те же эвристики, что и debug_sku.py.
     """
-    headers = _kaspi_headers()
+    items: List[Dict[str, object]] = []
     async with _async_client() as cli:
-        # S2
-        try:
-            r = await cli.get("/orderentries", params={"filter[order.id]": order_id, "page[size]": "200"}, headers=headers)
-            j = r.json()
-            data = (j.get("data", []) if isinstance(j, dict) else []) or []
-            if data:
-                entry = data[0]
-                ex = _extract_entry(entry, {})
-                if ex:
-                    attrs_e = entry.get("attributes", {}) or {}
-                    titles = title_candidates(attrs_e)
+        r = await cli.get(
+            f"/orders/{order_id}/entries",
+            params={"page[size]": "200", "include": "product,merchantProduct,masterProduct"},
+            headers=_kaspi_headers(),
+        )
+        r.raise_for_status()
+        j = r.json()
+        data = j.get("data", []) or []
+        included = j.get("included", []) or []
+        idx = _index_included(included)
 
-                    # --- выбираем "лучшее" название ---
-                    best = None
-                    for key in ("offer.name", "title", "name", "productName", "shortName"):
-                        v = titles.get(key)
+        for entry in data:
+            attrs = entry.get("attributes", {}) or {}
+            ex = _extract_entry(entry, idx)
+            if not ex:
+                continue
+
+            # --- кандидаты Title по attrs ---
+            titles = _title_candidates_from_attrs(attrs)
+
+            # добавим заголовки из include
+            for rel_key in ("product", "merchantProduct", "masterProduct"):
+                t, rel_id = _rel_id(entry, rel_key)
+                if t and rel_id:
+                    ref = (idx.get((str(t), str(rel_id))) or {})
+                    ref_attrs = ref.get("attributes", {}) or {}
+                    for k in ("title", "name", "productName", "shortName"):
+                        v = ref_attrs.get(k)
                         if isinstance(v, str) and v.strip():
-                            best = v.strip()
-                            break
+                            titles[f"{rel_key}.{k}"] = v.strip()
 
-                    # --- кандидаты SKU: базовые + offer.code ---
-                    cand = sku_candidates(attrs_e)
-                    off = attrs_e.get("offer") or {}
-                    if isinstance(off, dict) and off.get("code"):
-                        cand["offer.code"] = str(off["code"])
+            # --- кандидаты SKU по attrs + offer.code + codes из include ---
+            sku_cands = _sku_candidates_from_attrs(attrs)
+            offer = attrs.get("offer") or {}
+            if isinstance(offer, dict) and offer.get("code"):
+                sku_cands["offer.code"] = str(offer["code"])
+            for rel_key in ("product", "merchantProduct", "masterProduct"):
+                t, rel_id = _rel_id(entry, rel_key)
+                if t and rel_id:
+                    ref = (idx.get((str(t), str(rel_id))) or {})
+                    ref_attrs = ref.get("attributes", {}) or {}
+                    if "code" in ref_attrs and ref_attrs["code"]:
+                        sku_cands[f"{rel_key}.code"] = str(ref_attrs["code"])
 
-                    # --- SKU приоритет: offer.code → merchantProduct.code → product.code → code → sku → extracted ---
-                    sku_val = None
-                    for k in ("offer.code", "merchantProduct.code", "product.code", "code", "sku"):
-                        vv = cand.get(k)
-                        if isinstance(vv, str) and vv.strip():
-                            sku_val = vv.strip()
-                            break
-                    if not sku_val:
-                        sku_val = str(ex.get("sku", ""))
+            # --- лучший title ---
+            best_title = None
+            for key in ("offer.name", "product.title", "merchantProduct.title", "title", "name", "productName"):
+                v = titles.get(key)
+                if isinstance(v, str) and v.strip():
+                    best_title = v.strip()
+                    break
 
-                    out = {"sku": sku_val, "title": (best or "")}
-                    if return_candidates:
-                        cand["extracted"] = str(ex.get("sku", ""))
-                        out["sku_candidates"] = cand
-                        out["title_candidates"] = titles
-                    return out
-        except Exception:
-            pass
+            # --- приоритет SKU ---
+            best_sku = None
+            for k in ("offer.code", "merchantProduct.code", "product.code", "code", "sku"):
+                vv = sku_cands.get(k)
+                if isinstance(vv, str) and vv.strip():
+                    best_sku = vv.strip()
+                    break
+            if not best_sku:
+                best_sku = str(ex.get("sku", ""))
 
-        # S1
-        try:
-            r = await cli.get(
-                f"/orders/{order_id}/entries",
-                params={"page[size]": "200", "include": "product,merchantProduct,masterProduct"},
-                headers=headers,
-            )
-            j = r.json()
-            included = _index_included(j.get("included", []) if isinstance(j, dict) else [])
-            data = (j.get("data", []) if isinstance(j, dict) else []) or []
-            if data:
-                entry = data[0]
-                ex = _extract_entry(entry, included)
-                if ex:
-                    attrs_e = entry.get("attributes", {}) or {}
-                    titles = title_candidates(attrs_e)
+            row = {
+                "sku": best_sku,
+                "qty": int(ex.get("qty") or 1),
+                "unit_price": float(ex.get("unit_price") or 0),
+                "title": best_title,
+                "raw_entry_id": entry.get("id"),
+            }
+            if return_candidates:
+                sku_cands["extracted"] = str(ex.get("sku", ""))
+                row["sku_candidates"] = sku_cands
+                row["title_candidates"] = titles
+            items.append(row)
 
-                    # добавим заголовки из include
-                    for rel_key in ("product", "merchantProduct", "masterProduct"):
-                        t, rel_id = _rel_id(entry, rel_key)
-                        if t and rel_id:
-                            ref = (included.get((str(t), str(rel_id))) or {})
-                            ref_attrs = ref.get("attributes", {}) or {}
-                            for k in ("title", "name", "productName", "shortName"):
-                                v = ref_attrs.get(k)
-                                if isinstance(v, str) and v.strip():
-                                    titles[f"{rel_key}.{k}"] = v.strip()
+    return items
 
-                    # --- название ---
-                    best = None
-                    for key in ("offer.name", "product.title", "product.productName", "title", "name"):
-                        v = titles.get(key)
-                        if isinstance(v, str) and v.strip():
-                            best = v.strip()
-                            break
-
-                    # --- кандидаты SKU: базовые + offer.code + codes из include ---
-                    cand = sku_candidates(attrs_e)
-                    off = attrs_e.get("offer") or {}
-                    if isinstance(off, dict) and off.get("code"):
-                        cand["offer.code"] = str(off["code"])
-                    for rel_key in ("product", "merchantProduct", "masterProduct"):
-                        t, rel_id = _rel_id(entry, rel_key)
-                        if t and rel_id:
-                            ref = (included.get((str(t), str(rel_id))) or {})
-                            ref_attrs = ref.get("attributes", {}) or {}
-                            if "code" in ref_attrs and ref_attrs["code"]:
-                                cand[f"{rel_key}.code"] = str(ref_attrs["code"])
-
-                    # --- SKU приоритет ---
-                    sku_val = None
-                    for k in ("offer.code", "merchantProduct.code", "product.code", "code", "sku"):
-                        vv = cand.get(k)
-                        if isinstance(vv, str) and vv.strip():
-                            sku_val = vv.strip()
-                            break
-                    if not sku_val:
-                        sku_val = str(ex.get("sku", ""))
-
-                    out = {"sku": sku_val, "title": (best or "")}
-                    if return_candidates:
-                        cand["extracted"] = str(ex.get("sku", ""))
-                        out["sku_candidates"] = cand
-                        out["title_candidates"] = titles
-                    return out
-        except Exception:
-            pass
-    return None
+# -------------------- (совместимость) первая позиция --------------------
+async def _first_item_details(order_id: str, return_candidates: bool = False) -> Optional[Dict[str, object]]:
+    items = await _all_items_details(order_id, return_candidates=return_candidates)
+    if not items:
+        return None
+    first = items[0]
+    out = {"sku": first.get("sku"), "title": first.get("title")}
+    if return_candidates:
+        out["sku_candidates"] = first.get("sku_candidates", {})
+        out["title_candidates"] = first.get("title_candidates", {})
+    return out
 
 # -------------------- Models --------------------
 class DayPoint(BaseModel):
@@ -550,16 +539,23 @@ async def analytics(start: str = Query(...), end: str = Query(...), tz: str = Qu
     }
 
 @app.get("/orders/ids")
-async def list_ids(start: str = Query(...), end: str = Query(...), tz: str = Query(DEFAULT_TZ),
-                   date_field: str = Query(DATE_FIELD_DEFAULT),
-                   states: Optional[str] = Query(None), exclude_states: Optional[str] = Query(None),
-                   use_bd: Optional[bool] = Query(None), business_day_start: Optional[str] = Query(None),
-                   limit: int = Query(1000),
-                   order: str = Query("asc", pattern="^(asc|desc)$"),
-                   grouped: int = Query(0),
-                   with_items: int = Query(1, description="1=подтянуть sku+title первой позиции"),
-                   enrich_scope: str = Query("last_day", pattern="^(none|last_day|all)$"),
-                   return_candidates: int = Query(0, description="1=вернуть title_candidates/sku_candidates для 1-й позиции")):
+async def list_ids(
+    start: str = Query(...),
+    end: str = Query(...),
+    tz: str = Query(DEFAULT_TZ),
+    date_field: str = Query(DATE_FIELD_DEFAULT),
+    states: Optional[str] = Query(None),
+    exclude_states: Optional[str] = Query(None),
+    use_bd: Optional[bool] = Query(None),
+    business_day_start: Optional[str] = Query(None),
+    limit: int = Query(1000),
+    order: str = Query("asc", pattern="^(asc|desc)$"),
+    grouped: int = Query(0),
+    with_items: int = Query(1, description="0=без обогащения; 1=обогащение позициями"),
+    enrich_scope: str = Query("last_day", pattern="^(none|last_day|all)$"),
+    items_mode: str = Query("all", pattern="^(first|all)$"),   # NEW: режим позиций
+    return_candidates: int = Query(0, description="1=вернуть title_candidates/sku_candidates"),
+):
     tzinfo = tzinfo_of(tz)
     global _EFF_USE_BD, _EFF_BDS
     eff_use_bd = USE_BUSINESS_DAY if use_bd is None else bool(use_bd)
@@ -622,6 +618,7 @@ async def list_ids(start: str = Query(...), end: str = Query(...), tz: str = Que
     period_total_amount = round(sum(float(it.get("amount", 0) or 0) for it in out), 2)
     period_total_count = len(out)
 
+    # Группировки по дням (как было)
     groups: List[Dict[str, object]] = []
     if grouped:
         cur_day: Optional[str] = None
@@ -645,28 +642,38 @@ async def list_ids(start: str = Query(...), end: str = Query(...), tz: str = Que
                 "total_amount": round(sum(float(x.get("amount", 0) or 0) for x in bucket), 2),
             })
 
-    # --- ОБОГАЩЕНИЕ SKU/TITLE (щадя API) ---
+    # --- ОБОГАЩЕНИЕ (SKU/TITLE) ---
     if with_items and out and enrich_scope != "none":
         if enrich_scope == "all":
             targets = out[: (limit or len(out))]
         else:  # last_day
-            targets = [it for it in out if str(it["date"])[:10] == enrich_day]
+            last_day = enrich_day
+            targets = [it for it in out if str(it["date"])[:10] == last_day]
 
         sem = asyncio.Semaphore(6)  # умеренная параллельность
         async def enrich(it):
             async with sem:
-                extra = await _first_item_details(
-                    str(it["id"]),
-                    return_candidates=bool(return_candidates),
-                )
-                if extra:
-                    it["sku"] = extra.get("sku")
-                    it["title"] = extra.get("title")
-                    if return_candidates:
-                        it["first_item"] = {
-                            "title_candidates": extra.get("title_candidates") or {},
-                            "sku_candidates": extra.get("sku_candidates") or {},
-                        }
+                if items_mode == "all":
+                    items = await _all_items_details(
+                        str(it["id"]), return_candidates=bool(return_candidates)
+                    )
+                    it["items"] = items
+                    if items:
+                        # поля совместимости
+                        it["sku"] = items[0].get("sku")
+                        it["title"] = items[0].get("title")
+                else:  # first
+                    extra = await _first_item_details(
+                        str(it["id"]), return_candidates=bool(return_candidates)
+                    )
+                    if extra:
+                        it["sku"] = extra.get("sku")
+                        it["title"] = extra.get("title")
+                        if return_candidates:
+                            it["first_item"] = {
+                                "title_candidates": extra.get("title_candidates") or {},
+                                "sku_candidates": extra.get("sku_candidates") or {},
+                            }
         await asyncio.gather(*(enrich(it) for it in targets))
 
     if limit and limit > 0:
@@ -681,21 +688,27 @@ async def list_ids(start: str = Query(...), end: str = Query(...), tz: str = Que
     }
 
 @app.get("/orders/ids.csv", response_class=PlainTextResponse)
-async def list_ids_csv(start: str = Query(...), end: str = Query(...), tz: str = Query(DEFAULT_TZ),
-                       date_field: str = Query(DATE_FIELD_DEFAULT),
-                       states: Optional[str] = Query(None), exclude_states: Optional[str] = Query(None),
-                       use_bd: Optional[bool] = Query(None), business_day_start: Optional[str] = Query(None),
-                       order: str = Query("asc", pattern="^(asc|desc)$")):
-    data = await list_ids(start=start, end=end, tz=tz, date_field=date_field,
-                          states=states, exclude_states=exclude_states,
-                          use_bd=use_bd, business_day_start=business_day_start,
-                          limit=100000, order=order, grouped=0, with_items=0, enrich_scope="none")
+async def list_ids_csv(
+    start: str = Query(...),
+    end: str = Query(...),
+    tz: str = Query(DEFAULT_TZ),
+    date_field: str = Query(DATE_FIELD_DEFAULT),
+    states: Optional[str] = Query(None),
+    exclude_states: Optional[str] = Query(None),
+    use_bd: Optional[bool] = Query(None),
+    business_day_start: Optional[str] = Query(None),
+    order: str = Query("asc", pattern="^(asc|desc)$"),
+):
+    data = await list_ids(
+        start=start, end=end, tz=tz, date_field=date_field,
+        states=states, exclude_states=exclude_states,
+        use_bd=use_bd, business_day_start=business_day_start,
+        limit=100000, order=order, grouped=0,
+        with_items=0, enrich_scope="none"
+    )
     csv = "\n".join([str(it["number"]) for it in data["items"]])
     return csv
 
 @app.get("/", include_in_schema=False)
 async def root():
     return RedirectResponse(url="/ui/")
-
-# UI static
-app.mount("/ui", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static"), html=True), name="static")
