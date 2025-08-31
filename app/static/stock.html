@@ -79,7 +79,7 @@
       <div class="row" style="align-items:baseline; margin-bottom:6px">
         <h1 style="margin:0">Мой склад</h1>
         <div class="spacer"></div>
-        <span id="woBadge" class="chip" title="Списаний за сегодня (бизнес-день)">
+        <span id="woBadge" class="chip" title="Списаний за сегодня (календарный день)">
           <span class="dot on"></span>
           <span>Списаний сегодня: <b id="woCount">0</b> (шт: <b id="woQty">0</b>)</span>
         </span>
@@ -230,7 +230,7 @@ async function importFile(file){
   const fd = new FormData(); fd.append('file', file);
   try{
     const data = await fetchJSON('/products/manual-upload', {method:'POST', body:fd});
-    setNote(`Файл загружен: ${file.name}. Позиции: ${data.count||0}. Вставлено: ${data.inserted||0}, обновлено: ${data.updated||0}`, true);
+    setNote(\`Файл загружен: \${file.name}. Позиции: \${data.count||0}. Вставлено: \${data.inserted||0}, обновлено: \${data.updated||0}\`, true);
     renderProducts(data.items||[]);
   }catch(e){ setNote('Импорт не удался: ' + e.message); }
 }
@@ -287,7 +287,7 @@ async function openDetail(row){
   function addRow(data={}){
     const tr = document.createElement('tr');
     const codeCell = (data && data.batch_code) ? data.batch_code : '<span class="muted">— генерируется</span>';
-    const delBtn = (data && data.id) ? `<button class="btn-link btnDel" data-id="${data.id}">Удалить</button>` : '';
+    const delBtn = (data && data.id) ? \`<button class="btn-link btnDel" data-id="\${data.id}">Удалить</button>\` : '';
     const sold = data.qty_sold ?? data.sold ?? null;
     const left = data.left ?? (typeof sold === 'number' && typeof data.qty === 'number' ? (data.qty - sold) : null);
     tr.innerHTML = `
@@ -366,100 +366,23 @@ function tableToRows(){
   });
 }
 
-// === Авто-синк продаж → леджер → списания ===
-let _syncBusy = false;
-
-async function getStoreHours(){
+// ——— Пересчёт qty_sold по леджеру (новый products.py) ———
+async function recountSold(){
   try{
-    const j = await fetchJSON('/api/settings/store-hours');
-    return {
-      use_bd: 1,
-      bd_start: (j?.business_day_start || '20:00'),
-      tz: (j?.timezone || 'Asia/Almaty')
-    };
-  }catch(_){
-    return { use_bd: 1, bd_start:'20:00', tz:'Asia/Almaty' };
-  }
-}
-
-async function autoSyncWriteoffs(){
-  if(_syncBusy) return;
-  _syncBusy = true;
-  qs('#btnLoadDb')?.setAttribute('disabled','');
-  try{
-    setNote('Автосинхронизация списаний…');
-    const { bd_start, tz } = await getStoreHours();
-
-    // Используем только дату — сервер сам применяет бизнес-день
-    const day = new Date().toISOString().slice(0,10);
-
-    // 1) Заказы за бизнес-день
-    const p = new URLSearchParams({
-      start: day,
-      end: day,
-      tz,
-      date_field: 'creationDate',
-      states: 'KASPI_DELIVERY',
-      exclude_states: 'CANCELED',
-      use_bd: '1',
-      business_day_start: bd_start,
-      order: 'desc',
-      grouped: '0',
-      limit: '100000',
-      with_items: '1'
-    });
-    const data = await fetchJSON('/orders/ids?' + p.toString());
-    const rows = data.items || [];
-
-    // 2) Собираем → upsert bulk
-    const byId = new Map();
-    for (const r of rows) {
-      const oid = String(r.id || r.number || r.orderId || ''); if (!oid) continue;
-      if (!byId.has(oid)) byId.set(oid, { id: oid, date: r.date || r.creationDate || (day + 'T00:00:00'), customer: null, items: [] });
-      const sku = String(r.sku || r.code || r.vendorCode || r.barcode || ''); if (!sku) continue;
-      const unit_price = Number(r.amount || r.price || 0);
-      const pkg = byId.get(oid);
-      const ex = pkg.items.find(it => it.sku === sku);
-      if (ex) { ex.qty += 1; ex.unit_price = unit_price || ex.unit_price; }
-      else { pkg.items.push({ sku, qty: 1, unit_price }); }
-    }
-    const orders = [...byId.values()];
-
-    if (!orders.length) {
-      await updateWriteoffsChip();
-      setNote('Автосинхронизация: нет продаж за бизнес-день.', true);
-      return;
-    }
-
-    await fetchJSON('/profit/orders/upsert-bulk', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ orders })
-    });
-
-    // 3) Пересобрать леджер
-    const q2 = new URLSearchParams({ date_from: day, date_to: day });
-    await fetchJSON('/profit/rebuild-ledger?' + q2.toString(), { method:'POST' });
-
-    // 4) Пересчитать qty_sold по партиям
-    await fetchJSON('/products/batches/recount-sold', { method:'POST' });
-
+    setNote('Пересчитываю продажи по леджеру…');
+    await fetchJSON('/products/batches/recount-sold', {method:'POST'});
     await updateWriteoffsChip();
     await loadDB();
-    setNote('Автосинхронизация списаний выполнена.', true);
+    setNote('Пересчёт завершён.', true);
   }catch(e){
-    setNote('Автосинхронизация не удалась: ' + (e?.message || e), false);
-  } finally {
-    _syncBusy = false;
-    qs('#btnLoadDb')?.removeAttribute('disabled');
+    setNote('Пересчёт не удался: ' + e.message);
   }
 }
 
-// === Бейдж списаний ===
+// === Бейдж списаний (за сегодня, без use_bd/tz) ===
 async function updateWriteoffsChip(){
   try{
-    const { bd_start, tz } = await getStoreHours();
-    const p = new URLSearchParams({ use_bd:'1', bd_start, tz });
-    const j = await fetchJSON('/products/db/writeoffs/header?'+p.toString());
+    const j = await fetchJSON('/products/db/writeoffs/header');
     qs('#woCount').textContent = (j?.count ?? 0);
     qs('#woQty').textContent = (j?.total_qty ?? 0);
   }catch(_){}
@@ -528,7 +451,7 @@ document.addEventListener('DOMContentLoaded', async ()=>{
       const res = await fetchJSON('/products/db/bulk-upsert', {
         method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(rows)
       });
-      setNote(`Сохранено в БД: вставлено ${res.inserted||0}, обновлено ${res.updated||0}`, true);
+      setNote(\`Сохранено в БД: вставлено \${res.inserted||0}, обновлено \${res.updated||0}\`, true);
       await loadDB();
       await updateWriteoffsChip();
     }catch(e){ setNote('Сохранение в БД не удалось: ' + e.message); }
@@ -542,9 +465,10 @@ document.addEventListener('DOMContentLoaded', async ()=>{
   };
 
   // запуск
-  await autoSyncWriteoffs();
   await loadDB();
   await updateWriteoffsChip();
+  // Автозапуск пересчёта qty_sold (попросит API-Key при 401)
+  await recountSold();
 });
 </script>
 
@@ -569,7 +493,7 @@ document.addEventListener('DOMContentLoaded', async ()=>{
   window.fetch = function(input, init) {
     try {
       let urlStr = typeof input === "string" ? input : (input && input.url) || "";
-      if (urlStr.startsWith("/products/") || urlStr.startsWith("/profit/")) {
+      if (urlStr.startsWith("/products/")) {
         init = init || {};
         const k = window.KASPI_API_KEY || "";
 
