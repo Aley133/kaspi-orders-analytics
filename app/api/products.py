@@ -1,5 +1,6 @@
 # app/api/products.py
 from __future__ import annotations
+
 from typing import Callable, Optional, List, Dict, Any, Tuple
 from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Body, Depends, Request
 from fastapi.responses import Response, FileResponse
@@ -8,10 +9,10 @@ import secrets
 import io
 import os, shutil
 import sqlite3
-import re
 from xml.etree import ElementTree as ET
 from contextlib import contextmanager
-from datetime import datetime, timedelta, time as dt_time
+from datetime import datetime, timedelta
+from importlib import import_module
 
 # ──────────────────────────────────────────────────────────────────────────────
 # API-ключ (для write-операций)
@@ -29,25 +30,41 @@ def require_api_key(req: Request) -> bool:
 # Optional deps (Excel)
 # ──────────────────────────────────────────────────────────────────────────────
 try:
-    import openpyxl
+    import openpyxl  # type: ignore
     _OPENPYXL_AVAILABLE = True
 except Exception:
     _OPENPYXL_AVAILABLE = False
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Optional imports from kaspi_client
+# Optional imports: normalize_row / ProductStock (могут жить в bridge_v2)
 # ──────────────────────────────────────────────────────────────────────────────
-try:
-    from app.kaspi_client import ProductStock, normalize_row  # type: ignore
-except Exception:
+ProductStock = None  # type: ignore[assignment]
+normalize_row = None  # type: ignore[assignment]
+
+# сначала пробуем взять из bridge_v2
+for _mod in ("app.api.bridge_v2", "app.bridge_v2", "bridge_v2"):
     try:
-        from ..kaspi_client import ProductStock, normalize_row  # type: ignore
+        m = import_module(_mod)
+        if normalize_row is None and hasattr(m, "normalize_row"):
+            normalize_row = getattr(m, "normalize_row")
+        if ProductStock is None and hasattr(m, "ProductStock"):
+            ProductStock = getattr(m, "ProductStock")
+        break
     except Exception:
+        continue
+
+# если нет — прежние варианты
+if normalize_row is None or ProductStock is None:
+    for _mod in ("app.kaspi_client", "kaspi_client", "app.api.kaspi_client", "app/ kaspi_client"):
         try:
-            from kaspi_client import ProductStock, normalize_row  # type: ignore
+            m = import_module(_mod)  # type: ignore[arg-type]
+            if normalize_row is None and hasattr(m, "normalize_row"):
+                normalize_row = getattr(m, "normalize_row")
+            if ProductStock is None and hasattr(m, "ProductStock"):
+                ProductStock = getattr(m, "ProductStock")
+            break
         except Exception:
-            ProductStock = None
-            normalize_row = None
+            continue
 
 # ──────────────────────────────────────────────────────────────────────────────
 # DB backend switch (PG via SQLAlchemy / fallback SQLite)
@@ -86,7 +103,6 @@ if _USE_PG:
 
 @contextmanager
 def _db():
-    # Явный commit/rollback для SQLite; в PG используем transactional begin()
     if _USE_PG:
         with _engine.begin() as conn:
             yield conn
@@ -119,28 +135,6 @@ def _gen_batch_code_sqlite(conn: sqlite3.Connection) -> str:
         code = "".join(secrets.choice(alphabet) for _ in range(6))
         if not conn.execute("SELECT 1 FROM batches WHERE batch_code=?", (code,)).fetchone():
             return code
-
-def _table_exists(c, name: str) -> bool:
-    if _USE_PG:
-        r = c.execute(_q(
-            "SELECT 1 FROM information_schema.tables WHERE table_name=:t"
-        ), {"t": name}).first()
-        return bool(r)
-    else:
-        r = c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone()
-        return bool(r)
-
-def _has_column(c, table: str, col: str) -> bool:
-    if _USE_PG:
-        r = c.execute(_q("""
-            SELECT 1 FROM information_schema.columns
-             WHERE table_name=:t AND column_name=:c
-        """), {"t": table, "c": col}).first()
-        return bool(r)
-    else:
-        rows = c.execute(f"PRAGMA table_info({table})").fetchall()
-        cols = {row["name"] for row in rows}
-        return col in cols
 
 def _lower_cols(c, table: str) -> set[str]:
     if _USE_PG:
@@ -193,7 +187,6 @@ def _ensure_schema():
                 tax_percent DOUBLE PRECISION DEFAULT 0.0
             );
             """))
-            # лог списаний (+ order_id)
             c.execute(_q("""
             CREATE TABLE IF NOT EXISTS writeoffs(
                 id SERIAL PRIMARY KEY,
@@ -209,7 +202,6 @@ def _ensure_schema():
             c.execute(_q("CREATE INDEX IF NOT EXISTS idx_writeoffs_sku ON writeoffs(sku)"))
             c.execute(_q("CREATE INDEX IF NOT EXISTS idx_writeoffs_order ON writeoffs(order_id)"))
 
-            # Таблица идемпотентности списаний по заказам
             c.execute(_q("""
             CREATE TABLE IF NOT EXISTS order_writeoffs(
                 id SERIAL PRIMARY KEY,
@@ -224,7 +216,6 @@ def _ensure_schema():
             c.execute(_q("CREATE INDEX IF NOT EXISTS idx_ordwo_order ON order_writeoffs(order_id)"))
             c.execute(_q("CREATE INDEX IF NOT EXISTS idx_ordwo_sku   ON order_writeoffs(sku)"))
 
-            # миграции «на лету»
             c.execute(_q("""
             DO $$
             BEGIN
@@ -245,7 +236,6 @@ def _ensure_schema():
             """))
             c.execute(_q("CREATE INDEX IF NOT EXISTS idx_batches_sku  ON batches(sku)"))
             c.execute(_q("CREATE INDEX IF NOT EXISTS idx_batches_date ON batches(date)"))
-            # batch_code для старых строк
             c.execute(_q("""
             UPDATE batches
                SET batch_code = CONCAT(
@@ -324,7 +314,6 @@ def _ensure_schema():
             if "qty_sold" not in cols:
                 c.execute("ALTER TABLE batches ADD COLUMN qty_sold INTEGER DEFAULT 0")
 
-            # writeoffs.order_id для старых БД
             wcols = {r["name"] for r in c.execute("PRAGMA table_info(writeoffs)")}
             if "order_id" not in wcols:
                 c.execute("ALTER TABLE writeoffs ADD COLUMN order_id TEXT")
@@ -337,7 +326,6 @@ def _ensure_schema():
             c.execute("CREATE INDEX IF NOT EXISTS idx_ordwo_order ON order_writeoffs(order_id)")
             c.execute("CREATE INDEX IF NOT EXISTS idx_ordwo_sku   ON order_writeoffs(sku)")
 
-            # проставить batch_code где пусто
             for r in c.execute("SELECT id FROM batches WHERE (batch_code IS NULL OR batch_code='')").fetchall():
                 c.execute("UPDATE batches SET batch_code=? WHERE id=?", (_gen_batch_code_sqlite(c), r["id"]))
 
@@ -465,14 +453,12 @@ def _recompute_all_products_qty():
                        ) b
                  WHERE p.sku = b.sku
             """))
-            # нули для тех, у кого нет партий
             c.execute(_q("""
                 UPDATE products p
                    SET quantity = 0, updated_at = NOW()
                  WHERE NOT EXISTS (SELECT 1 FROM batches b WHERE b.sku = p.sku)
             """))
         else:
-            # проще: обнулим и накатим суммой
             c.execute("UPDATE products SET quantity=0, updated_at=datetime('now')")
             rows = c.execute("""
                 SELECT sku, SUM(qty-COALESCE(qty_sold,0)) AS left
@@ -544,15 +530,56 @@ def _upsert_products(items: List[Dict[str, Any]]) -> Tuple[int,int]:
     return inserted, updated
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Kaspi client helpers (optional)
+# Kaspi client helpers (bridge_v2-aware)
 # ──────────────────────────────────────────────────────────────────────────────
-try:
-    from app.kaspi_client import KaspiClient  # type: ignore
-except Exception:
+KaspiClient = None  # type: ignore[assignment]
+
+# сначала пробуем взять класс KaspiClient из bridge_v2 (чтобы сигнатуры совпали)
+for _mod in ("app.api.bridge_v2", "app.bridge_v2", "bridge_v2"):
     try:
-        from ..kaspi_client import KaspiClient  # type: ignore
+        m = import_module(_mod)
+        if hasattr(m, "KaspiClient"):
+            KaspiClient = getattr(m, "KaspiClient")
+            break
     except Exception:
-        from kaspi_client import KaspiClient  # type: ignore
+        continue
+
+# если класса нет в bridge_v2 — фолбэк на прежние места
+if KaspiClient is None:
+    for _mod in ("app.kaspi_client", "kaspi_client", "app.api.kaspi_client"):
+        try:
+            m = import_module(_mod)
+            if hasattr(m, "KaspiClient"):
+                KaspiClient = getattr(m, "KaspiClient")
+                break
+        except Exception:
+            continue
+
+def _resolve_client_from_bridge() -> Optional["KaspiClient"]:
+    """
+    Пытаемся достать готовый инстанс клиента из app/api/bridge_v2.py:
+    - get_kaspi_client() / build_kaspi_client() / get_client()
+    - глобальный объект kaspi_client / KASPI_CLIENT / client
+    """
+    for mod_name in ("app.api.bridge_v2", "app.bridge_v2", "bridge_v2"):
+        try:
+            m = import_module(mod_name)
+        except Exception:
+            continue
+        for attr in ("get_kaspi_client", "build_kaspi_client", "get_client"):
+            fn = getattr(m, attr, None)
+            if callable(fn):
+                try:
+                    client = fn()  # type: ignore[misc]
+                    if client:
+                        return client
+                except Exception:
+                    pass
+        for attr in ("kaspi_client", "KASPI_CLIENT", "client"):
+            client = getattr(m, attr, None)
+            if client:
+                return client
+    return None
 
 def _pick(attrs: Dict[str, Any], *keys: str) -> str:
     for k in keys:
@@ -588,7 +615,7 @@ def _find_iter_fn(client: Any) -> Optional[Callable]:
             return getattr(client, name)
     return None
 
-def _collect_products(client: KaspiClient, active_only: Optional[bool]) -> Tuple[List[Dict[str, Any]], int, Optional[str]]:
+def _collect_products(client: Any, active_only: Optional[bool]) -> Tuple[List[Dict[str, Any]], int, Optional[str]]:
     iter_fn = _find_iter_fn(client)
     if iter_fn is None:
         raise HTTPException(
@@ -644,9 +671,13 @@ def _collect_products(client: KaspiClient, active_only: Optional[bool]) -> Tuple
 
     if not items:
         try:
-            for it in client.iter_products_from_orders(days=60):
-                add_row(it)
-            note = "Каталог по API недоступен, показаны товары, собранные из последних заказов (60 дней)."
+            # Если у клиента есть "iter_products_from_orders"
+            if hasattr(client, "iter_products_from_orders"):
+                for it in client.iter_products_from_orders(days=60):
+                    add_row(it)
+                note = "Каталог по API недоступен, показаны товары, собранные из последних заказов (60 дней)."
+            else:
+                note = "Каталог по API недоступен."
         except Exception:
             note = "Каталог по API недоступен."
             items, total = [], 0
@@ -693,7 +724,6 @@ class OrderWriteoffBulkIn(BaseModel):
 def _find_ledger_table(c) -> tuple[Optional[str], Optional[str], Optional[str]]:
     preferred = ["fifo_ledger", "profit_fifo_ledger", "ledger_fifo"]
     candidates = list(preferred)
-    # дополнительно — любые таблицы, где в названии есть ledger
     if _USE_PG:
         rows = c.execute(_q("""
           SELECT table_name FROM information_schema.tables
@@ -782,12 +812,6 @@ def _ts_from_ms(ms: Optional[int]) -> Optional[str]:
         return None
 
 def _fifo_writeoff(sku: str, qty: int, note: Optional[str], order_id: Optional[str] = None, ts_override_ms: Optional[int] = None) -> Dict[str, Any]:
-    """
-    Базовый FIFO-списание по SKU.
-    - qty>0
-    - Если ts_override_ms задан → writeoffs.ts выставляется в это время.
-    - order_id пишется в writeoffs.order_id (для связки с заказом).
-    """
     if qty <= 0:
         raise HTTPException(status_code=400, detail="qty должен быть > 0")
 
@@ -810,16 +834,13 @@ def _fifo_writeoff(sku: str, qty: int, note: Optional[str], order_id: Optional[s
             if take <= 0:
                 continue
 
-            # Обновление batches
             if _USE_PG:
                 c.execute(_q("UPDATE batches SET qty_sold = COALESCE(qty_sold,0) + :t WHERE id=:bid"),
                           {"t": int(take), "bid": int(r["id"])})
             else:
                 c.execute("UPDATE batches SET qty_sold = COALESCE(qty_sold,0) + ? WHERE id=?", (int(take), int(r["id"])))
 
-            # Лог списаний (+ order_id, + опциональный ts)
             if ts_override_ms is not None:
-                # Явное значение ts
                 if _USE_PG:
                     c.execute(_q("""
                         INSERT INTO writeoffs(ts, order_id, sku, qty, note, batch_id)
@@ -834,7 +855,6 @@ def _fifo_writeoff(sku: str, qty: int, note: Optional[str], order_id: Optional[s
                         c.execute("INSERT INTO writeoffs(order_id, sku, qty, note, batch_id) VALUES(?,?,?,?,?)",
                                   (order_id, sku, int(take), note, int(r["id"])))
             else:
-                # По умолчанию — CURRENT_TIMESTAMP
                 if _USE_PG:
                     c.execute(_q("INSERT INTO writeoffs(order_id, sku, qty, note, batch_id) VALUES(:oid,:sku,:q,:note,:bid)"),
                               {"oid": order_id, "sku": sku, "q": int(take), "note": note, "bid": int(r["id"])})
@@ -860,11 +880,6 @@ def _fifo_writeoff(sku: str, qty: int, note: Optional[str], order_id: Optional[s
     }
 
 def _idempotent_order_writeoff(order_id: str, sku: str, qty: int, note: Optional[str], ts_ms: Optional[int]) -> Dict[str, Any]:
-    """
-    Идемпотентность по (order_id, sku).
-    - Если запись уже есть и qty_new <= qty_existing → skip.
-    - Если qty_new > qty_existing → списываем дельту и обновляем запись.
-    """
     if not order_id or not sku:
         raise HTTPException(status_code=400, detail="order_id и sku обязательны")
     if qty <= 0:
@@ -872,7 +887,6 @@ def _idempotent_order_writeoff(order_id: str, sku: str, qty: int, note: Optional
 
     _ensure_schema()
     with _db() as c:
-        # Текущая запись
         if _USE_PG:
             row = c.execute(_q("""
                 SELECT qty FROM order_writeoffs WHERE order_id=:oid AND sku=:sku
@@ -886,11 +900,9 @@ def _idempotent_order_writeoff(order_id: str, sku: str, qty: int, note: Optional
             return {"ok": True, "skipped": True, "reason": "already_applied", "applied_qty": existed_qty}
 
         delta = qty - existed_qty
-        # Выполняем FIFO-списание только на дельту
         order_note = f"order={order_id}" + (f" {note}" if note else "")
         res = _fifo_writeoff(sku, delta, order_note, order_id=order_id, ts_override_ms=ts_ms)
 
-        # Апдейт/вставка идемпотентной записи
         if _USE_PG:
             c.execute(_q("""
                 INSERT INTO order_writeoffs(order_id, sku, qty, ts, note)
@@ -932,7 +944,14 @@ def _idempotent_order_writeoff(order_id: str, sku: str, qty: int, note: Optional
 # ──────────────────────────────────────────────────────────────────────────────
 # Router
 # ──────────────────────────────────────────────────────────────────────────────
-def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
+def get_products_router(client: Optional["KaspiClient"] = None) -> APIRouter:
+    """
+    Если client не передан — пытаемся автоматически получить его из app/api/bridge_v2.py.
+    Это обеспечивает «связь» с bridge_v2.
+    """
+    if client is None:
+        client = _resolve_client_from_bridge()  # type: ignore[assignment]
+
     router = APIRouter(tags=["products"])
 
     # Ping
@@ -957,8 +976,8 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
         page_size: int = Query(500, ge=1, le=2000),
     ):
         if client is None:
-            raise HTTPException(status_code=500, detail="KASPI_TOKEN is not set")
-        items, total, note = _collect_products(client, active_only=bool(active))
+            raise HTTPException(status_code=500, detail="KASPI_TOKEN/KaspiClient не настроен (см. bridge_v2).")
+        items, _total, note = _collect_products(client, active_only=bool(active))
         if q:
             ql = q.strip().lower()
             items = [r for r in items if ql in (r["name"] or "").lower() or ql in (r["code"] or "").lower()]
@@ -970,10 +989,10 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
     @router.get("/export.csv")
     async def export_products_csv(active: int = Query(1)):
         if client is None:
-            raise HTTPException(status_code=500, detail="KASPI_TOKEN is not set")
+            raise HTTPException(status_code=500, detail="KASPI_TOKEN/KaspiClient не настроен (см. bridge_v2).")
         items, _, _ = _collect_products(client, active_only=bool(active))
 
-        def esc(s: str) -> str:
+        def esc(s: Any) -> str:
             s = "" if s is None else str(s)
             if any(c in s for c in [",", '"', "\n"]):
                 s = '"' + s.replace('"', '""') + '"'
@@ -985,12 +1004,11 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
                 ",".join(
                     esc(x)
                     for x in [
-                        r["id"], r["code"], r["name"], r["price"], r["qty"],
-                        1 if r["active"] else 0 if r["active"] is False else "",
-                        r["brand"], r["category"], r["barcode"],
+                        r.get("id",""), r.get("code",""), r.get("name",""), r.get("price",0), r.get("qty",0),
+                        1 if r.get("active") else 0 if r.get("active") is False else "",
+                        r.get("brand",""), r.get("category",""), r.get("barcode",""),
                     ]
-                )
-                + "\n"
+                ) + "\n"
                 for r in items
             ]
         )
@@ -1042,7 +1060,7 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
                 ",".join(
                     esc(x)
                     for x in [
-                        r["sku"], r.get("name",""), r.get("brand",""), r.get("category",""),
+                        r.get("sku",""), r.get("name",""), r.get("brand",""), r.get("category",""),
                         r.get("price",0), r.get("quantity",0), r.get("active",0), r.get("barcode","")
                     ]
                 ) + "\n"
@@ -1085,8 +1103,10 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
                 if strip(el.tag) == "availability":
                     sc = el.get("stockCount")
                     if sc:
-                        try: qty = int(float(sc))
-                        except Exception: qty = 0
+                        try:
+                            qty = int(float(sc))
+                        except Exception:
+                            qty = 0
                     av = (el.get("available") or "").strip().lower()
                     if av in ("yes", "true", "1"): active = True
                     elif av in ("no", "false", "0"): active = False
@@ -1096,8 +1116,10 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
                 if strip(el.tag) == "cityprice":
                     txt = (el.text or "").strip()
                     if txt:
-                        try: price = float(txt.replace(" ", "").replace(",", "."))
-                        except Exception: price = 0.0
+                        try:
+                            price = float(txt.replace(" ", "").replace(",", "."))
+                        except Exception:
+                            price = 0.0
                     break
             rows.append({
                 "id": code, "code": code, "name": name or code,
@@ -1110,10 +1132,10 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
             raise HTTPException(status_code=500, detail="openpyxl не установлен на сервере.")
         try:
             data = file.file.read()
-            wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+            wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)  # type: ignore
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Не удалось открыть Excel: {e}")
-        ws = wb.active
+        ws = wb.active  # type: ignore[attr-defined]
         headers = [str(c.value or '').strip() for c in ws[1]]
         rows: List[Dict[str, Any]] = []
         for row in ws.iter_rows(min_row=2, values_only=True):
@@ -1137,7 +1159,7 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
         for r in raw_rows:
             if normalize_row:
                 try:
-                    d = normalize_row(r).to_dict()
+                    d = normalize_row(r).to_dict()  # type: ignore[operator]
                 except Exception:
                     d = dict(r)
             else:
@@ -1206,7 +1228,7 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
                 last_rows = c.execute(_q(
                     "SELECT sku, date, unit_cost, commission_pct FROM batches ORDER BY date"
                 )).all()
-                last = {}
+                last: Dict[str, Tuple[Any, Any]] = {}
                 for r in last_rows:
                     m = r._mapping
                     last[m["sku"]] = (m["unit_cost"], m["commission_pct"])
@@ -1216,7 +1238,7 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
                 left_by_sku = {r._mapping["sku"]: int(r._mapping["left"] or 0) for r in left_rows}
             else:
                 bc = {r["sku"]: r["cnt"] for r in c.execute("SELECT sku, COUNT(*) AS cnt FROM batches GROUP BY sku")}
-                last = {}
+                last: Dict[str, Tuple[Any, Any]] = {}
                 for r in c.execute("SELECT sku, date, unit_cost, commission_pct FROM batches ORDER BY date"):
                     last[r["sku"]] = (r["unit_cost"], r["commission_pct"])
                 left_by_sku = {r["sku"]: int(r["left"] or 0) for r in c.execute(
@@ -1443,11 +1465,11 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
                 rows = _rows_to_dicts(rows)
             else:
                 base = "SELECT id, sku, date, qty, qty_sold, (qty-COALESCE(qty_sold,0)) AS left, unit_cost, commission_pct, batch_code, note FROM batches"
-                params: List[Any] = []
+                params2: List[Any] = []
                 if q:
-                    base += " WHERE sku LIKE ?"; params.append(f"%{q}%")
+                    base += " WHERE sku LIKE ?"; params2.append(f"%{q}%")
                 base += " ORDER BY sku, date, id"
-                rows = [dict(r) for r in c.execute(base, params).fetchall()]
+                rows = [dict(r) for r in c.execute(base, params2).fetchall()]
         for r in rows:
             r["qty"] = int(r.get("qty") or 0)
             r["qty_sold"] = int(r.get("qty_sold") or 0)
@@ -1459,7 +1481,6 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
     @router.post("/batches/recount-sold")
     async def batches_recount_sold(_: bool = Depends(require_api_key)):
         changed = _recount_qty_sold_from_ledger()
-        # после протяжки из леджера пересчитаем products.quantity по всем SKU
         _recompute_all_products_qty()
         return {"ok": True, "updated_batches": int(changed)}
 
@@ -1471,7 +1492,6 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
         res = _fifo_writeoff(payload.sku.strip(), int(payload.qty), payload.note)
         return {"ok": True, **res}
 
-    # Бейдж списаний: пытаемся считать по «ledger», если нет — по writeoffs
     @router.get("/db/writeoffs/header")
     async def writeoffs_header(
         all_time: int = Query(0, description="1 — без фильтра по дате (сумма за всё время)"),
@@ -1480,7 +1500,6 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
         with _db() as c:
             table, _bk, qty_col = _find_ledger_table(c)
             if table:
-                # Без фильтра по дате — сумма по всему леджеру
                 if all_time:
                     if _USE_PG:
                         row = c.execute(_q(f"""
@@ -1587,14 +1606,14 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
                     base += " AND sku = :sku"
                     params["sku"] = sku
                 row = c.execute(_q(base), params).first()
-                cnt = int(row.cnt or 0)
-                total = int(row.total or 0)
+                cnt = int(row.cnt or 0)  # type: ignore[attr-defined]
+                total = int(row.total or 0)  # type: ignore[attr-defined]
             else:
                 base = "SELECT COUNT(*) AS cnt, COALESCE(SUM(qty),0) AS total FROM writeoffs WHERE ts >= ? AND ts < ?"
-                params: List[Any] = [start_dt.strftime("%Y-%m-%d %H:%M:%S"), end_dt.strftime("%Y-%m-%d %H:%M:%S")]
+                params2: List[Any] = [start_dt.strftime("%Y-%m-%d %H:%M:%S"), end_dt.strftime("%Y-%m-%d %H:%M:%S")]
                 if sku:
-                    base += " AND sku = ?"; params.append(sku)
-                r = c.execute(base, params).fetchone()
+                    base += " AND sku = ?"; params2.append(sku)
+                r = c.execute(base, params2).fetchone()
                 cnt = int(r["cnt"] or 0)
                 total = int(r["total"] or 0)
         return {"count": cnt, "total_qty": total, "start": start_dt.isoformat(), "end": end_dt.isoformat(), "sku": sku}
