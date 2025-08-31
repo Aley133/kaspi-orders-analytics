@@ -40,8 +40,11 @@
     .nowrap{white-space:nowrap}.clickable{cursor:pointer;text-decoration:underline}
     .codes-cell{max-width:520px;white-space:normal;word-break:break-word}
 
-    /* компактная таблица "№ заказа → SKU" внутри блока Top SKU */
+    /* компактный блок «№ заказа → SKU» (новый групповой) */
     .order-sku-shell{border-top:1px solid var(--line);padding-top:8px;margin-top:8px}
+    .order-sep td{border-bottom:2px dashed var(--line); height:6px; padding:0}
+    .order-code-cell{font-weight:600; white-space:nowrap}
+    .right{ text-align:right }
   </style>
 </head>
 <body data-theme="light">
@@ -90,7 +93,7 @@
         <div class="kpi-item"><div class="kpi-label">Оборот</div><div class="kpi-value" id="kpiAmount">0</div></div>
       </section>
 
-      <!-- ======== FIFO ======== -->
+      <!-- ======== FIFO (переписанный блок) ======== -->
       <section class="shell">
         <div class="row" style="justify-content:space-between;align-items:center;">
           <h2 style="margin:0">Прибыль (FIFO)</h2>
@@ -132,18 +135,27 @@
           </div>
 
           <div style="flex:1; min-width:320px">
-            <h3 style="margin:0 0 6px">Топ SKU по прибыли <span class="muted">(кликните SKU — покажем номера заказов)</span></h3>
+            <h3 style="margin:0 0 6px">Топ SKU по прибыли <span class="muted">(кликните SKU — найдем заказы)</span></h3>
             <table id="tbl-profit-sku" class="table">
               <thead><tr><th>SKU</th><th>Выручка</th><th>Комиссия</th><th>Себестоимость</th><th>Прибыль</th></tr></thead>
               <tbody></tbody>
             </table>
 
-            <!-- ОДНА компактная таблица "№ заказа → SKU" прямо под Top SKU -->
-            <div id="orderSkuInline" class="order-sku-shell" style="display:none;">
-              <table id="tbl-order-sku" class="table" style="margin:0">
-                <thead><tr><th>№ заказа</th><th>SKU</th></tr></thead>
+            <!-- НОВОЕ: группированная таблица «№ заказа → SKU с метриками» -->
+            <div id="orderSkuGroupedShell" class="order-sku-shell" style="display:none;">
+              <h4 style="margin:8px 0 6px">Номер заказа → SKU (за период)</h4>
+              <table id="tbl-order-sku-grouped" class="table" style="margin:0">
+                <thead><tr>
+                  <th style="width:1%">№ заказа</th>
+                  <th>SKU</th>
+                  <th class="right">Выручка</th>
+                  <th class="right">Комиссия</th>
+                  <th class="right">Себестоимость</th>
+                  <th class="right">Прибыль</th>
+                </tr></thead>
                 <tbody></tbody>
               </table>
+              <div class="muted" id="orderSkuHint" style="margin-top:6px"></div>
             </div>
           </div>
         </div>
@@ -289,9 +301,6 @@ async function run(e){
       if((entries||[]).length===0){ sb.innerHTML = '<div class="muted">Нет данных</div>'; }
     }
 
-    // Таблица дней
-    tableFill('tbl-days', (data.days||[]).map(d=>[d.x, d.count, `${fmt(d.amount)} ${window.APP_CURRENCY}`]));
-
     // Топ города
     const labels = (data.cities||[]).map(c=>c.city);
     const counts = (data.cities||[]).map(c=>c.count);
@@ -309,115 +318,13 @@ async function run(e){
       }
     }
 
-    await loadIds();          // карта «номера по дню» для таблицы периодов
-    await loadProfitFIFO();   // KPI + график + таблицы
+    // Обновляем FIFO-блок (сам тянет всё нужное внутри)
+    await loadProfitFIFO();
     await checkProfitStatus(data);
     setNote('Данные обновлены', true);
   }catch(err){
     setNote('Ошибка загрузки: ' + (err?.message || err), false);
   }finally{ setBusy(false); }
-}
-</script>
-
-<script>
-/* ─────────── Номера заказов (список и карта для периодов) ─────────── */
-function buildOrderItemsTable(group, currency){
-  const table = document.createElement('table'); table.className = 'order-table';
-  table.innerHTML = `
-    <thead><tr>
-      <th class="nowrap">№ заказа</th><th>SKU</th><th>Название</th><th class="nowrap">Qty</th>
-      <th class="nowrap">Сумма строки</th><th class="nowrap">Состояние</th><th class="nowrap">Время</th>
-    </tr></thead><tbody></tbody>`;
-  const tbody = table.querySelector('tbody');
-
-  for(const o of (group.items || [])){
-    const lines = (o.items && o.items.length)
-      ? o.items.map(li => ({ sku: li.sku||'', title: li.title||'', qty: Number(li.qty||1), sum: Number(li.unit_price||0) }))
-      : [{ sku: o.sku||'', title: o.title||o.name||'', qty: 1, sum: Number(o.amount||0) }];
-
-    for(const li of lines){
-      const tr = document.createElement('tr');
-      const tds = [ String(o.number||''), String(li.sku||''), String(li.title||''), String(li.qty||1),
-                    `${fmt(li.sum||0)} ${window.APP_CURRENCY||'KZT'}`, String(o.state||''), (String(o.date||'').slice(0,16).replace('T',' ')||'') ];
-      for(const v of tds){ const td = document.createElement('td'); td.textContent = v; tr.appendChild(td); }
-      tbody.appendChild(tr);
-    }
-  }
-  return table;
-}
-
-async function loadIds(){
-  const start = document.getElementById('start').value;
-  const end = document.getElementById('end').value;
-  const tz = document.getElementById('tz').value || 'Asia/Almaty';
-  const date_field = document.getElementById('date_field').value;
-  const states = document.getElementById('states').value;
-  const exc = document.getElementById('exclude_states').checked ? 'CANCELED' : '';
-  const use_bd = document.getElementById('use_bd')?.checked ? '1' : '0';
-  const bd_start = document.getElementById('bd_start')?.value || '';
-  const order = 'asc';
-
-  const params = new URLSearchParams({ start, end, tz, date_field, order, grouped:'1', limit:'100000', with_items:'1', use_bd, business_day_start:bd_start });
-  if(states) params.set('states', states); if(exc) params.set('exclude_states', exc);
-
-  let data = {groups:[], items:[], currency:'KZT'};
-  try{ data = await fetchJSON(`/orders/ids?${params.toString()}`, {}, {retries:1}); }
-  catch(e){ setNote('Не удалось получить номера заказов: ' + e.message); }
-
-  // карта номеров по дню → для таблицы периодов
-  window.__ordersByPeriod = {};
-  for(const g of (data.groups||[])){
-    const nums = (g.items||[]).map(it=>it.number).filter(Boolean);
-    window.__ordersByPeriod[g.day] = Array.from(new Set(nums));
-  }
-
-  // Плоский список (служебно)
-  const flat = new URLSearchParams(params); flat.set('grouped','0'); flat.set('with_items','0');
-  try{
-    const flatData = await fetchJSON(`/orders/ids?${flat.toString()}`, {}, {retries:1});
-    window.__lastOrderIds = (flatData.items||[]).map(x => ({ id: x.id, date: x.date }));
-  }catch(_){ window.__lastOrderIds = []; }
-
-  // Рендер групп (как было)
-  const container = document.getElementById('ids'); if(!container) return;
-  container.innerHTML = '';
-
-  const currency = data.currency || window.APP_CURRENCY || 'KZT';
-  const totalCount = (typeof data.period_total_count === 'number') ? data.period_total_count : (data.items||[]).length;
-  const totalAmount = (typeof data.period_total_amount === 'number') ? data.period_total_amount : (data.items||[]).reduce((a,it)=>a+(Number(it.amount)||0),0);
-
-  const summary = document.createElement('div'); summary.className = 'ids-summary';
-  summary.innerHTML = `<span>Итого за период:</span> <b>${fmt(totalCount)}</b><span>шт.</span> · <b>${fmt(totalAmount)}</b> <span>${currency}</span>`;
-  container.appendChild(summary);
-
-  const bar = document.createElement('div'); bar.className='ids-actions';
-  const btnCopy = document.createElement('button'); btnCopy.className='btn'; btnCopy.textContent='Скопировать номера';
-  btnCopy.onclick = () => { try{
-      const all = (data.items||[]).map(it=>it.number).join('\n');
-      if(navigator.clipboard?.writeText){ navigator.clipboard.writeText(all); setNote('Скопировано', true); }
-      else { throw new Error('clipboard недоступен'); }
-    }catch(_){ setNote('Не удалось скопировать', false); } };
-  const btnCsv = document.createElement('a'); btnCsv.className='btn'; btnCsv.textContent='Скачать CSV';
-  const csvParams = new URLSearchParams(params); csvParams.delete('grouped'); csvParams.set('limit','100000');
-  btnCsv.href = `/orders/ids.csv?${csvParams.toString()}`; btnCsv.setAttribute('download','ids.csv');
-  const btnExpand = document.createElement('button'); btnExpand.className='btn'; btnExpand.textContent='Раскрыть всё';
-  const btnCollapse = document.createElement('button'); btnCollapse.className='btn'; btnCollapse.textContent='Свернуть всё';
-  bar.appendChild(btnCopy); bar.appendChild(btnCsv); bar.appendChild(btnExpand); bar.appendChild(btnCollapse);
-  container.appendChild(bar);
-
-  const wrapper = document.createElement('div'); wrapper.className='ids-groups'; container.appendChild(wrapper);
-
-  const detailsList = [];
-  for(const group of (data.groups || [])){
-    const det = document.createElement('details'); det.open = true;
-    const dayTotal = (typeof group.total_amount === 'number') ? group.total_amount : group.items.reduce((acc, it) => acc + (Number(it.amount) || 0), 0);
-    const sum = document.createElement('summary'); sum.textContent = `${group.day} — ${group.items.length} шт. · ${fmt(dayTotal)} ${currency}`;
-    det.appendChild(sum);
-    det.appendChild(buildOrderItemsTable(group, currency));
-    detailsList.push(det); wrapper.appendChild(det);
-  }
-  btnExpand.onclick = ()=> detailsList.forEach(d=>d.open=true);
-  btnCollapse.onclick = ()=> detailsList.forEach(d=>d.open=false);
 }
 </script>
 
@@ -507,7 +414,7 @@ async function pingProfitDb(){
 </script>
 
 <script>
-/* ─────────── FIFO: sync/rebuild ─────────── */
+/* ─────────── FIFO: sync/rebuild (как было) ─────────── */
 async function syncProfit(){
   const start = document.getElementById('start').value;
   const end   = document.getElementById('end').value;
@@ -550,7 +457,6 @@ async function syncProfit(){
 
     setNote(`Синхронизация FIFO: заказов=${upRes.orders_inserted+upRes.orders_updated}, позиций=${upRes.items_inserted}, списаний=${rbRes.recomputed}`, true);
 
-    await loadIds();        // обновить карту
     await loadProfitFIFO();
     await checkProfitStatus();
   }catch(e){ setNote('Синхронизация не удалась: ' + (e.message || e)); }
@@ -566,7 +472,7 @@ async function rebuildFifo(){
     const p = new URLSearchParams({ date_from: df, date_to: dt });
     const res = await fetchProfitJSON('/profit/rebuild-ledger?' + p.toString(), { method:'POST' });
     setNote(`FIFO перестроен. Добавлено списаний: ${res?.recomputed||0}`, true);
-    await loadIds(); await loadProfitFIFO(); await checkProfitStatus();
+    await loadProfitFIFO(); await checkProfitStatus();
   }catch(e){ setNote('Перестроение FIFO не удалось: ' + e.message, false); }
   finally{ setBusy(false); }
 }
@@ -577,18 +483,134 @@ async function syncAndRebuild(){ await syncProfit(); if(BUSY) return; setBusy(tr
     const p = new URLSearchParams({ date_from: df, date_to: dt });
     const res = await fetchProfitJSON('/profit/rebuild-ledger?' + p.toString(), { method:'POST' });
     setNote(`Синхр.+пересчёт выполнены. Списаний: ${res?.recomputed||0}`, true);
-    await loadIds(); await loadProfitFIFO(); await checkProfitStatus();
+    await loadProfitFIFO(); await checkProfitStatus();
   }catch(e){ setNote('Пересчёт не удался: ' + e.message, false); }
   finally{ setBusy(false); }
 }
 </script>
 
 <script>
-/* ─────────── FIFO: статус + KPI + Топ SKU + Заказы по SKU ─────────── */
+/* ─────────── FIFO: статус + KPI + Топ SKU + Группировка «№ → SKU» ─────────── */
 function setSyncChip(state, text){
   const el = document.getElementById('profitSyncChip'); if(!el) return;
   const dot = el.querySelector('.dot'); if(dot) dot.className = 'dot ' + (state==='ok' ? 'on' : state==='warn' ? 'warn' : state==='err' ? 'err' : '');
   const span = el.querySelector('span:last-child'); if(span) span.textContent = text; el.title = text;
+}
+
+function toLocalDay(isoUtc){
+  try{
+    const tz = document.getElementById('tz')?.value || 'Asia/Almaty';
+    const d = new Date(isoUtc);
+    const parts = new Intl.DateTimeFormat('ru-RU', { timeZone: tz, year:'numeric', month:'2-digit', day:'2-digit' }).formatToParts(d);
+    const g = k => parts.find(p=>p.type===k)?.value || '';
+    return `${g('year')}-${g('month')}-${g('day')}`;
+  }catch(_){ return (isoUtc||'').slice(0,10); }
+}
+
+async function fetchOrdersByCode(df, dt){
+  const p = new URLSearchParams({ date_from: df, date_to: dt, state: 'KASPI_DELIVERY', limit_orders: 100000, order: 'asc' });
+  // ⚠️ эндпоинт из bridge_v2
+  const data = await fetchProfitJSON('/profit/bridge/by-orders?' + p.toString());
+  return data?.orders || [];
+}
+
+async function fetchSkuAggregates(df, dt){
+  const p = new URLSearchParams({ date_from: df, date_to: dt, limit: 100000 });
+  const top = await fetchProfitJSON('/profit/by-sku?' + p.toString());
+  const map = new Map();
+  for(const r of (top.rows||[])) map.set(r.sku, { revenue: Number(r.revenue||0), commission: Number(r.commission||0), cost: Number(r.cost||0), profit: Number(r.profit||0) });
+  return { map, currency: top.currency || window.APP_CURRENCY || 'KZT' };
+}
+
+function renderPeriodsTable(rows, cur, orders){
+  const tb = document.querySelector('#tbl-profit tbody'); tb.innerHTML = '';
+  // карта период → уникальные номера заказов (локальная дата по Asia/Almaty)
+  const perNums = {};
+  for(const o of (orders||[])){
+    const day = toLocalDay(o.date);
+    if(!perNums[day]) perNums[day] = new Set();
+    if(o.order_code) perNums[day].add(String(o.order_code));
+  }
+  for(const r of (rows||[])){
+    const tr = document.createElement('tr');
+    const cells = [ r.period, `${fmt(r.revenue)} ${cur}`, `${fmt(r.commission)} ${cur}`, `${fmt(r.cost)} ${cur}`, `${fmt(r.profit)} ${cur}` ];
+    for(const c of cells){ const td = document.createElement('td'); td.textContent = c; tr.appendChild(td); }
+    const tdCodes = document.createElement('td');
+    const nums = perNums[r.period] ? Array.from(perNums[r.period]).sort((a,b)=>String(a).localeCompare(String(b))) : [];
+    tdCodes.textContent = nums.length ? nums.join(', ') : '—'; tdCodes.className='codes-cell';
+    tr.appendChild(tdCodes);
+    tb.appendChild(tr);
+  }
+}
+
+function renderTopSkuTable(topRows, cur){
+  const tbSku = document.querySelector('#tbl-profit-sku tbody'); tbSku.innerHTML = '';
+  for(const row of (topRows||[])){
+    const tr = document.createElement('tr');
+    const skuTd = document.createElement('td');
+    skuTd.textContent = row.sku;
+    skuTd.className = 'clickable';
+    skuTd.title = 'Показать заказы этого SKU';
+    skuTd.addEventListener('click', ()=>showOrdersForSKU(row.sku));
+    tr.appendChild(skuTd);
+
+    for(const val of [row.revenue,row.commission,row.cost,row.profit]){
+      const td = document.createElement('td'); td.textContent = `${fmt(val)} ${cur}`; td.className='right'; tr.appendChild(td);
+    }
+    tbSku.appendChild(tr);
+  }
+}
+
+function renderOrderSkuGrouped(orders, skuAggMap, cur){
+  const shell = document.getElementById('orderSkuGroupedShell');
+  const tb = document.querySelector('#tbl-order-sku-grouped tbody');
+  tb.innerHTML = '';
+
+  // посчитаем суммарную выручку по каждому SKU по строкам заказов (для пропорционального распределения комиссии/себестоимости)
+  const skuLineRevenue = new Map();
+  for(const o of orders){
+    for(const it of (o.items||[])){
+      const r = Number(it.total_price||0);
+      if(!skuLineRevenue.has(it.sku)) skuLineRevenue.set(it.sku, 0);
+      skuLineRevenue.set(it.sku, skuLineRevenue.get(it.sku)+r);
+    }
+  }
+
+  let rowsCount = 0;
+  for(const o of orders){
+    const items = o.items||[];
+    items.forEach((it, idx) => {
+      const tr = document.createElement('tr');
+      if(idx===0){ const td = document.createElement('td'); td.textContent = o.order_code || '—'; td.className='order-code-cell'; tr.appendChild(td); }
+      else { const td = document.createElement('td'); td.textContent=''; tr.appendChild(td); }
+
+      // SKU с кликом
+      const tdSku = document.createElement('td');
+      const a = document.createElement('a'); a.href='javascript:void(0)'; a.textContent = it.sku || ''; a.className='clickable'; a.addEventListener('click', ()=>showOrdersForSKU(it.sku));
+      tdSku.appendChild(a); tr.appendChild(tdSku);
+
+      const lineRevenue = Number(it.total_price||0);
+      const agg = skuAggMap.get(it.sku) || { revenue:0, commission:0, cost:0, profit:0 };
+      const totalSkuRevenue = skuLineRevenue.get(it.sku) || agg.revenue || lineRevenue || 1;
+      const ratio = totalSkuRevenue>0 ? (lineRevenue/totalSkuRevenue) : 1;
+      const lineCommission = ratio * Number(agg.commission||0);
+      const lineCost       = ratio * Number(agg.cost||0);
+      const lineProfit     = lineRevenue - lineCommission - lineCost;
+
+      for(const val of [lineRevenue, lineCommission, lineCost, lineProfit]){
+        const td = document.createElement('td'); td.textContent = `${fmt(val)} ${cur}`; td.className='right'; tr.appendChild(td);
+      }
+      tb.appendChild(tr);
+      rowsCount++;
+    });
+    // разделитель между заказами
+    const sep = document.createElement('tr'); sep.className='order-sep';
+    const td = document.createElement('td'); td.colSpan = 6; sep.appendChild(td); tb.appendChild(sep);
+  }
+
+  const hint = document.getElementById('orderSkuHint');
+  if(hint){ hint.textContent = 'Комиссия/себестоимость распределяются пропорционально выручке по SKU за период. Если SKU встречается один раз — цифры совпадают с итогами по SKU.'; }
+  shell.style.display = rowsCount ? 'block' : 'none';
 }
 
 async function checkProfitStatus(analyticsData){
@@ -619,115 +641,37 @@ async function loadProfitFIFO(){
   const group_by = document.getElementById('profitGroup')?.value || 'day';
 
   try{
-    // summary
+    // 1) summary
     const p = new URLSearchParams({ date_from: df, date_to: dt, group_by, use_bd, bd_start });
     const sum = await fetchProfitJSON('/profit/summary?' + p.toString());
     const cur = sum.currency || window.APP_CURRENCY || 'KZT';
     setFifoKPIs(sum.total, cur);
     drawProfitChart(sum.rows||[], cur);
 
-    // Таблица периодов + Номера заказа (по дню)
-    const tb = document.querySelector('#tbl-profit tbody'); tb.innerHTML = '';
-    for(const r of (sum.rows||[])){
-      const tr = document.createElement('tr');
-      const numbers = (window.__ordersByPeriod && window.__ordersByPeriod[r.period]) ? window.__ordersByPeriod[r.period] : [];
-      const numsText = numbers.length ? numbers.join(', ') : '—';
-      const cells = [ r.period, `${fmt(r.revenue)} ${cur}`, `${fmt(r.commission)} ${cur}`, `${fmt(r.cost)} ${cur}`, `${fmt(r.profit)} ${cur}` ];
-      for(const c of cells){ const td = document.createElement('td'); td.textContent = c; tr.appendChild(td); }
-      const tdCodes = document.createElement('td'); tdCodes.textContent = numsText; tdCodes.className='codes-cell'; tr.appendChild(tdCodes);
-      tb.appendChild(tr);
-    }
-
-    // Топ SKU — обычная таблица + сразу строим "№ → SKU" под ней
+    // 2) Top SKU
     const s = new URLSearchParams({ date_from: df, date_to: dt, limit: 50 });
     const top = await fetchProfitJSON('/profit/by-sku?' + s.toString());
-    const tbSku = document.querySelector('#tbl-profit-sku tbody'); tbSku.innerHTML = '';
-    for(const row of (top.rows||[])){
-      const tr = document.createElement('tr');
-      const skuTd = document.createElement('td');
-      skuTd.textContent = row.sku;
-      skuTd.className = 'clickable';
-      skuTd.title = 'Показать номера заказов этого SKU';
-      skuTd.addEventListener('click', ()=>showOrdersForSKU(row.sku)); // клики ведут в подробную таблицу снизу
-      tr.appendChild(skuTd);
+    renderTopSkuTable(top.rows||[], cur);
 
-      for(const val of [row.revenue,row.commission,row.cost,row.profit]){
-        const td = document.createElement('td'); td.textContent = `${fmt(val)} ${cur}`; tr.appendChild(td);
-      }
-      tbSku.appendChild(tr);
-    }
+    // 3) Заказы → товары (из bridge_v2) + распределение комиссий/себестоимости
+    const orders = await fetchOrdersByCode(df, dt);
+    const { map: skuAggMap } = await fetchSkuAggregates(df, dt);
 
-    // ⬇️ строим и показываем "№ заказа → SKU" для всех SKU из топа
-    await buildOrderSkuMapForTopSkus(top.rows || [], df, dt);
+    // 3a) Таблица периодов + номера заказов
+    renderPeriodsTable(sum.rows||[], cur, orders);
+
+    // 3b) Группированная таблица «№ заказа → SKU с метриками»
+    renderOrderSkuGrouped(orders, skuAggMap, cur);
   }catch(e){
     console.warn('FIFO:', e);
     setFifoKPIs({revenue:0,commission:0,cost:0,profit:0}, window.APP_CURRENCY||'KZT');
     drawProfitChart([], window.APP_CURRENCY||'KZT');
     tableFill('tbl-profit', []); tableFill('tbl-profit-sku', []);
-    renderOrderSkuInline([]); // скрыть таблицу №→SKU
+    document.getElementById('orderSkuGroupedShell').style.display='none';
   }
 }
 
-/* ——— Таблица "№ заказа → SKU" прямо под Top SKU ——— */
-function renderOrderSkuInline(orderSkuSeq){
-  const shell = document.getElementById('orderSkuInline');
-  const tb = document.querySelector('#tbl-order-sku tbody');
-  if(!shell || !tb) return;
-  tb.innerHTML = '';
-  for(const row of orderSkuSeq){
-    const tr = document.createElement('tr');
-
-    const tdOrder = document.createElement('td');
-    tdOrder.textContent = row.order || '—';
-    tr.appendChild(tdOrder);
-
-    const tdSkus = document.createElement('td');
-    if (row.skus && row.skus.length) {
-      row.skus.forEach((sku, i) => {
-        const a = document.createElement('a');
-        a.href = 'javascript:void(0)';
-        a.className = 'clickable';
-        a.textContent = sku;
-        a.addEventListener('click', ()=>showOrdersForSKU(sku));
-        tdSkus.appendChild(a);
-        if (i < row.skus.length - 1) tdSkus.appendChild(document.createTextNode('  '));
-      });
-    } else {
-      tdSkus.textContent = '—';
-    }
-    tr.appendChild(tdSkus);
-
-    tb.appendChild(tr);
-  }
-  shell.style.display = orderSkuSeq.length ? 'block' : 'none';
-}
-
-async function buildOrderSkuMapForTopSkus(topRows, dateFrom, dateTo){
-  const map = new Map(); // order_code -> Set(SKU)
-  for(const row of (topRows||[])){
-    const sku = row.sku;
-    if(!sku) continue;
-    try{
-      const p = new URLSearchParams({ sku, date_from: dateFrom, date_to: dateTo, limit: 100000 });
-      const data = await fetchProfitJSON('/profit/bridge/list?' + p.toString());
-      const items = data.items || data.rows || [];
-      const codes = Array.from(new Set(items.map(x=> x.order_code || x.order_id ).filter(Boolean)));
-      for(const code of codes){
-        if(!map.has(code)) map.set(code, new Set());
-        map.get(code).add(sku);
-      }
-    }catch(e){
-      console.warn('order->sku map error for', sku, e);
-    }
-  }
-  const seq = Array.from(map.entries())
-    .sort((a,b)=> String(a[0]).localeCompare(String(b[0])))
-    .map(([order, skusSet]) => ({ order, skus: Array.from(skusSet) }));
-
-  renderOrderSkuInline(seq);
-}
-
-/* «Заказы по SKU» (подробная таблица внизу) */
+/* «Заказы по SKU» (подробная таблица внизу; как и было) */
 async function showOrdersForSKU(sku){
   if(!sku){ setNote('Укажите SKU', false); return; }
   const df = document.getElementById('start').value;
