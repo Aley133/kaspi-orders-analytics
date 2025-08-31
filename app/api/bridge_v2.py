@@ -18,6 +18,9 @@ KASPI_FALLBACK_ENABLED = (os.getenv("KASPI_FALLBACK_ENABLED", "0").lower() in ("
 KASPI_TOKEN   = os.getenv("KASPI_TOKEN", "").strip()
 KASPI_BASEURL = (os.getenv("KASPI_BASE_URL") or "https://kaspi.kz/shop/api/v2").rstrip("/")
 
+# имя таблицы FIFO-ledger (можно переопределить через env)
+FIFO_LEDGER_TABLE = (os.getenv("FIFO_LEDGER_TABLE") or "fifo_ledger").strip()
+
 HTTPX_TIMEOUT = httpx.Timeout(connect=10.0, read=40.0, write=15.0, pool=40.0)
 HTTPX_LIMITS  = httpx.Limits(max_connections=30, max_keepalive_connections=10)
 
@@ -587,4 +590,153 @@ def bridge_by_orders(
         "driver": _driver_name(),
         "fallback_used": _FALLBACK_USED,
         "note": "Стоимость/комиссия считаются в FIFO; здесь — связь №заказа → SKU.",
+    }
+
+# ─────────────────────────────────────────────────────────────────────
+# НОВОЕ: «Привязка № заказа → SKU» + маржинальность (FIFO)
+# ─────────────────────────────────────────────────────────────────────
+@router.get("/bridge/by-orders-margins")
+def bridge_by_orders_margins(
+    date_from: str = Query(..., description="YYYY-MM-DD"),
+    date_to:   str = Query(..., description="YYYY-MM-DD"),
+    state: Optional[str] = Query(None, description="фильтр по состоянию (например KASPI_DELIVERY)"),
+    order: Literal["asc", "desc"] = Query("asc"),
+):
+    """
+    Возвращает заказы с позициями и маржой по каждой позиции.
+    Источник позиций: bridge_sales. Маржа — из FIFO-ledger (таблица FIFO_LEDGER_TABLE),
+    суммируется по ключу (order_code, sku) внутри периода.
+    Поля items: sku, title, qty, unit_price, total_price, commission, cost, profit
+    Поля totals: revenue, commission, cost, profit, count_items, count_lines
+    """
+    _init_bridge_sales()
+    ms_from = _to_ms(date_from)
+    ms_to   = _to_ms(date_to)
+    if ms_from is None or ms_to is None:
+        raise HTTPException(400, "date_from/date_to должны быть YYYY-MM-DD")
+    ms_to = ms_to + 24*3600*1000 - 1  # включительно
+
+    where = ["bs.date_utc_ms BETWEEN :ms_from AND :ms_to"]
+    params: Dict[str, Any] = {"ms_from": ms_from, "ms_to": ms_to}
+    if state:
+        where.append("bs.state = :state")
+        params["state"] = state
+
+    with _get_conn() as c:
+        cur = c.cursor()
+        if _driver_name() == "sqlite":
+            # проверим наличие ledger
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (FIFO_LEDGER_TABLE,))
+            ledger_exists = cur.fetchone() is not None
+
+            # агрегаты ledger по (order_code, sku) за период
+            ledger_sql = f"""
+                SELECT order_code, sku,
+                       SUM(COALESCE(commission,0)) AS commission,
+                       SUM(COALESCE(cost,0))       AS cost,
+                       SUM(COALESCE(revenue,0))    AS revenue,
+                       SUM(COALESCE(profit,0))     AS profit
+                FROM {FIFO_LEDGER_TABLE}
+                WHERE date_utc_ms BETWEEN :ms_from AND :ms_to
+                GROUP BY order_code, sku
+            """ if ledger_exists else "SELECT NULL AS order_code, NULL AS sku, 0 AS commission, 0 AS cost, 0 AS revenue, 0 AS profit"
+
+            sql = f"""
+            SELECT
+              bs.order_id, bs.order_code, bs.date_utc_ms, bs.state,
+              bs.sku, bs.title, bs.qty, bs.unit_price, bs.total_price,
+              COALESCE(l.commission, 0.0) AS commission,
+              COALESCE(l.cost, 0.0)       AS cost,
+              COALESCE(l.revenue, 0.0)    AS rev_from_ledger,
+              COALESCE(l.profit, 0.0)     AS profit
+            FROM bridge_sales bs
+            LEFT JOIN ({ledger_sql}) l
+              ON l.order_code = bs.order_code AND l.sku = bs.sku
+            WHERE {" AND ".join(where)}
+            ORDER BY bs.date_utc_ms {"ASC" if order=="asc" else "DESC"}, bs.order_id, bs.line_index
+            """
+            cur.execute(sql, params)
+            rows = [dict(r) for r in cur.fetchall()]
+        else:
+            # postgres: проверим наличие ledger
+            cur.execute("SELECT to_regclass(%s)", (FIFO_LEDGER_TABLE,))
+            ledger_exists = cur.fetchone()[0] is not None
+
+            ledger_sql = f"""
+                SELECT order_code, sku,
+                       SUM(COALESCE(commission,0)) AS commission,
+                       SUM(COALESCE(cost,0))       AS cost,
+                       SUM(COALESCE(revenue,0))    AS revenue,
+                       SUM(COALESCE(profit,0))     AS profit
+                FROM {FIFO_LEDGER_TABLE}
+                WHERE date_utc_ms BETWEEN %(ms_from)s AND %(ms_to)s
+                GROUP BY order_code, sku
+            """ if ledger_exists else "SELECT NULL::text order_code, NULL::text sku, 0::double precision commission, 0::double precision cost, 0::double precision revenue, 0::double precision profit"
+
+            sql = f"""
+            WITH L AS ({ledger_sql})
+            SELECT
+              bs.order_id, bs.order_code, bs.date_utc_ms, bs.state,
+              bs.sku, bs.title, bs.qty, bs.unit_price, bs.total_price,
+              COALESCE(l.commission, 0.0) AS commission,
+              COALESCE(l.cost, 0.0)       AS cost,
+              COALESCE(l.revenue, 0.0)    AS rev_from_ledger,
+              COALESCE(l.profit, 0.0)     AS profit
+            FROM bridge_sales bs
+            LEFT JOIN L l
+              ON l.order_code = bs.order_code AND l.sku = bs.sku
+            WHERE {" AND ".join([w.replace(':', '%(')+')' for w in where])}
+            ORDER BY bs.date_utc_ms {"ASC" if order=="asc" else "DESC"}, bs.order_id, bs.line_index
+            """
+            cur.execute(sql, params)
+            rows = [dict(zip([d[0] for d in cur.description], r)) for r in cur.fetchall()]
+
+    # группируем по номеру заказа и суммируем totals
+    grouped: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        code = r.get("order_code") or ""
+        if code not in grouped:
+            grouped[code] = {
+                "order_code": code,
+                "order_id": r.get("order_id"),
+                "date": datetime.utcfromtimestamp((r.get("date_utc_ms") or 0)/1000).isoformat(timespec="seconds"),
+                "state": r.get("state"),
+                "items": [],
+                "totals": {"revenue": 0.0, "commission": 0.0, "cost": 0.0, "profit": 0.0, "count_items": 0, "count_lines": 0},
+            }
+
+        revenue   = float(r.get("total_price") or 0.0)  # фактическая выручка по строке продажи
+        commission= float(r.get("commission") or 0.0)
+        cost      = float(r.get("cost") or 0.0)
+        # если ledger не хранит revenue — считаем прибыль как выручка-commission-cost
+        profit    = float(r.get("profit")) if r.get("rev_from_ledger") not in (None, 0, 0.0) else (revenue - commission - cost)
+
+        grouped[code]["items"].append({
+            "sku": r.get("sku"),
+            "title": r.get("title"),
+            "qty": int(r.get("qty") or 1),
+            "unit_price": float(r.get("unit_price") or 0.0),
+            "total_price": revenue,
+            "commission": commission,
+            "cost": cost,
+            "profit": profit,
+        })
+
+        t = grouped[code]["totals"]
+        t["revenue"]    += revenue
+        t["commission"] += commission
+        t["cost"]       += cost
+        t["profit"]     += profit
+        t["count_items"]+= int(r.get("qty") or 1)
+        t["count_lines"]+= 1
+
+    orders = list(grouped.values())
+    return {
+        "date_from": date_from,
+        "date_to": date_to,
+        "count_orders": len(orders),
+        "orders": orders,
+        "driver": _driver_name(),
+        "fallback_used": _FALLBACK_USED,
+        "note": "Привязка заказ → SKU с маржой по FIFO",
     }
