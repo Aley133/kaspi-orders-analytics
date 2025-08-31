@@ -14,14 +14,14 @@
     .dot.warn{background:#f59e0b}
     .dot.err{background:#ef4444}
     .table{width:100%;border-collapse:collapse}
-    .table th,.table td{border-bottom:1px solid var(--line);padding:8px 10px;text-align:left}
+    .table th,.table td{border-bottom:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top}
     .note{margin:8px 0 12px;padding:8px 10px;border-radius:8px;display:none}
     .note.ok{display:block;background:#ecfdf5;color:#065f46;border:1px solid #a7f3d0}
     .note.err{display:block;background:#fef2f2;color:#991b1b;border:1px solid #fecaca}
     .muted{color:#6b7280}
     .btn[disabled]{opacity:.6;pointer-events:none}
     .ids-summary{margin:8px 0}
-    .ids-actions{display:flex;gap:8px;margin:8px 0}
+    .ids-actions{display:flex;gap:8px;margin:8px 0;flex-wrap:wrap}
     .ids-groups details{margin:8px 0}
     .pill{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:4px 8px;margin:2px 4px 0 0;background:var(--card)}
     .kpi{display:flex;gap:12px;flex-wrap:wrap}
@@ -45,6 +45,10 @@
     .slider:before{position:absolute;content:"";height:16px;width:16px;left:2px;top:2px;background:white;border-radius:50%;transition:.2s}
     .switch input:checked + .slider{background:#10b981}
     .switch input:checked + .slider:before{transform:translateX(20px)}
+    .order-table { width:100%; border-collapse:collapse; margin:6px 0 12px; }
+    .order-table th, .order-table td { padding:6px 8px; border-bottom:1px solid var(--line); font-size:13px; }
+    .order-head { font-weight:600; margin:6px 0 2px; }
+    .nowrap { white-space: nowrap; }
   </style>
 </head>
 <body data-theme="light">
@@ -183,14 +187,6 @@
       </section>
 
       <section class="shell">
-        <h2>Таблица: Дни</h2>
-        <table id="tbl-days" class="table">
-          <thead><tr><th>Дата</th><th>Кол-во</th><th>Оборот</th></tr></thead>
-          <tbody></tbody>
-        </table>
-      </section>
-
-      <section class="shell">
         <h2>Номера заказов (для сверки)</h2>
         <div id="ids"></div>
       </section>
@@ -261,7 +257,7 @@ function setBusy(on){
   }
 }
 
-/* глобальная ловля непойманных ошибок, чтобы не молчало */
+/* глобальная ловля непойманных ошибок */
 window.addEventListener('error', (e)=>{ try{ setNote(e?.error?.message || e.message || 'Ошибка', false); }catch(_){} });
 window.addEventListener('unhandledrejection', (e)=>{ try{ setNote(e?.reason?.message || String(e.reason) || 'Ошибка', false); }catch(_){} });
 </script>
@@ -285,9 +281,7 @@ async function loadMeta(){
     }
     const tz = document.getElementById('tz'); if(tz) tz.value = meta.timezone || 'Asia/Almaty';
     const bd = document.getElementById('bd_start'); if(bd) bd.value = meta.business_day_start || '20:00';
-  } catch(e){
-    // тихо игнорируем — будут дефолты ниже
-  }
+  } catch(e){/* дефолты ниже */}
   const today = new Date(); const iso = d=>d.toISOString().slice(0,10);
   const s = document.getElementById('start'); if(s) s.value = iso(today);
   const e = document.getElementById('end'); if(e) e.value = iso(today);
@@ -345,7 +339,7 @@ async function run(e){
     // Таблица дней
     tableFill('tbl-days', (data.days||[]).map(d=>[d.x, d.count, `${fmt(d.amount)} ${window.APP_CURRENCY}`]));
 
-    // Топ города (без ошибок, даже если Chart.js не прогрузился)
+    // Топ города (Chart.js опционально)
     const labels = (data.cities||[]).map(c=>c.city);
     const counts = (data.cities||[]).map(c=>c.count);
     const holder = document.getElementById('chart-cities');
@@ -382,6 +376,60 @@ async function run(e){
 
 <script>
 /* ───────────────────────── БЛОК ID/СПИСКИ ───────────────────────── */
+function buildOrderItemsTable(group, currency){
+  // Таблица позиций всех заказов группы
+  const table = document.createElement('table');
+  table.className = 'order-table';
+  const thead = document.createElement('thead');
+  thead.innerHTML = `
+    <tr>
+      <th class="nowrap">№ заказа</th>
+      <th>SKU</th>
+      <th>Название</th>
+      <th class="nowrap">Qty</th>
+      <th class="nowrap">Сумма строки</th>
+      <th class="nowrap">Состояние</th>
+      <th class="nowrap">Время</th>
+    </tr>`;
+  table.appendChild(thead);
+  const tbody = document.createElement('tbody');
+
+  for(const o of (group.items || [])){
+    const lines = (o.items && o.items.length)
+      ? o.items.map(li => ({
+          sku: li.sku || '',
+          title: li.title || '',
+          qty: Number(li.qty || 1),
+          sum: Number(li.unit_price || 0) // unit_price у нас — сумма строки из entries
+        }))
+      : [{
+          sku: o.sku || '',
+          title: o.title || o.name || '',
+          qty: 1,
+          sum: Number(o.amount || 0)
+        }];
+
+    for(const li of lines){
+      const tr = document.createElement('tr');
+      const tds = [
+        String(o.number || ''),
+        String(li.sku || ''),
+        String(li.title || ''),
+        String(li.qty || 1),
+        `${fmt(li.sum || 0)} ${currency}`,
+        String(o.state || ''),
+        (String(o.date||'').slice(0,16).replace('T',' ') || '')
+      ];
+      for(const v of tds){
+        const td = document.createElement('td'); td.textContent = v; tr.appendChild(td);
+      }
+      tbody.appendChild(tr);
+    }
+  }
+  table.appendChild(tbody);
+  return table;
+}
+
 async function loadIds(){
   const start = document.getElementById('start').value;
   const end = document.getElementById('end').value;
@@ -399,9 +447,8 @@ async function loadIds(){
   if(exc) params.set('exclude_states', exc);
   params.set('use_bd', use_bd); if(bd_start) params.set('business_day_start', bd_start);
   params.set('order', order); params.set('grouped', '1'); params.set('limit', '100000');
-  params.set('with_items','1'); // явно просим SKU/Title
+  params.set('with_items','1'); // теперь сервер вернёт все позиции заказов
 
-  // сгруппированный список для отображения
   let data = {groups:[], items:[], currency:'KZT'};
   try{
     data = await fetchJSON(`/orders/ids?${params.toString()}`, {}, {retries:1});
@@ -410,7 +457,7 @@ async function loadIds(){
   }
   const currency = data.currency || window.APP_CURRENCY || 'KZT';
 
-  // ПЛОСКИЙ список (id+date) — для внутренней логики
+  // Плоский список для внутренней логики (id/date)
   const flat = new URLSearchParams(params);
   flat.set('grouped','0'); flat.set('with_items','0');
   try{
@@ -463,15 +510,11 @@ async function loadIds(){
     const dayTotal = (typeof group.total_amount === 'number') ? group.total_amount : group.items.reduce((acc, it) => acc + (Number(it.amount) || 0), 0);
 
     const sum = document.createElement('summary');
-    sum.textContent = `${group.day}  —  ${group.items.length} шт. · ${fmt(dayTotal)} ${currency}`;
+    sum.textContent = `${group.day} — ${group.items.length} шт. · ${fmt(dayTotal)} ${currency}`;
     det.appendChild(sum);
 
-    const pre = document.createElement('pre');
-    pre.style.whiteSpace='pre-wrap';
-    pre.textContent = '№\tSKU\tНазвание\tСостояние\tДата\tСумма\n' + (group.items||[])
-      .map(it=>`${it.number}\t${it.sku||''}\t${(it.title||it.name||'')}\t${it.state}\t${(it.date||'').slice(0,16).replace('T',' ')}\t${it.amount}`)
-      .join('\n');
-    det.appendChild(pre);
+    // Таблица позиций всех заказов этого дня
+    det.appendChild(buildOrderItemsTable(group, currency));
 
     detailsList.push(det);
     wrapper.appendChild(det);
@@ -483,7 +526,7 @@ async function loadIds(){
 </script>
 
 <script>
-/* ───────────────────────── Блок FIFO: ключ/инъекции ───────────────────────── */
+/* ───────────────────────── БЛОК FIFO: ключ/инъекции ───────────────────────── */
 /* Ключ и автоподстановка X-API-Key/?api_key только для /profit/* */
 (() => {
   const KEY = "KASPI_API_KEY";
@@ -595,25 +638,6 @@ async function pingProfitDb(){
     document.getElementById('profitDbInfo').textContent = '';
   }
 }
-
-function buildSyncParams(){
-  const start = document.getElementById('start').value;
-  const end   = document.getElementById('end').value;
-  const tz = document.getElementById('tz').value || 'Asia/Almaty';
-  const date_field = document.getElementById('date_field').value;
-  const states = document.getElementById('states').value;
-  const exc = document.getElementById('exclude_states').checked ? 'CANCELED' : '';
-  const use_bd = document.getElementById('use_bd')?.checked ? '1' : '0';
-  const bd_start = document.getElementById('bd_start')?.value || '20:00';
-
-  const p = new URLSearchParams({ start, end, tz, date_field, use_bd, business_day_start: bd_start });
-  if(states) p.set('states', states);
-  if(exc) p.set('exclude_states', exc);
-  return p;
-}
-
-/* Чанкователь */
-function chunk(arr, n=400){ const out=[]; for(let i=0;i<arr.length;i+=n) out.push(arr.slice(i,i+n)); return out; }
 </script>
 
 <script>
@@ -630,26 +654,33 @@ async function syncProfit(){
   const bd_start = document.getElementById('bd_start')?.value || '20:00';
 
   try{
-    // 1) тянем только KASPI_DELIVERY + сразу со SKU
+    // 1) тянем KASPI_DELIVERY + обязательно со всеми позициями
     const qs = new URLSearchParams({
       start, end, tz, date_field,
       states:'KASPI_DELIVERY', exclude_states:'CANCELED',
       use_bd, business_day_start: bd_start,
-      order:'asc', grouped:'0', limit:'100000', with_items:'1'
+      order:'asc', grouped:'0', limit:'100000', with_items:'1', items_mode:'all'
     });
     const ids = await (await fetch('/orders/ids?' + qs.toString())).json();
 
     const orders = (ids.items||[])
-      .filter(x => x.sku && x.state === 'KASPI_DELIVERY')
-      .map(x => ({
-        id: x.id,
-        date: x.date,
-        customer: null,
-        items: [{ sku:String(x.sku), qty:1, unit_price:Number(x.amount||0) }]
-      }));
+      .filter(x => x.state === 'KASPI_DELIVERY')
+      .map(x => {
+        const lines = Array.isArray(x.items) && x.items.length
+          ? x.items
+              .filter(li => li && li.sku)
+              .map(li => ({
+                sku: String(li.sku),
+                qty: Number(li.qty || 1),
+                unit_price: Number(li.unit_price || 0) // сумма строки
+              }))
+          : (x.sku ? [{ sku:String(x.sku), qty:1, unit_price:Number(x.amount||0) }] : []);
+        return { id: x.id, date: x.date, customer: null, items: lines };
+      })
+      .filter(o => o.items.length);
 
     if(orders.length === 0){
-      setNote('Нет заказов KASPI_DELIVERY со SKU в выбранном периоде'); 
+      setNote('Нет заказов KASPI_DELIVERY с позициями в выбранном периоде'); 
       return;
     }
 
