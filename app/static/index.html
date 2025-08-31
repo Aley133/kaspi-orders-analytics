@@ -35,11 +35,10 @@
     .slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:#d1d5db;border-radius:999px;transition:.2s}
     .slider:before{position:absolute;content:"";height:16px;width:16px;left:2px;top:2px;background:white;border-radius:50%;transition:.2s}
     .switch input:checked + .slider{background:#10b981}.switch input:checked + .slider:before{transform:translateX(20px)}
-    .order-table{width:100%;border-collapse:collapse;margin:6px 0 12px}
-    .order-table th,.order-table td{padding:6px 8px;border-bottom:1px solid var(--line);font-size:13px}
-    .nowrap{white-space:nowrap}.clickable{cursor:pointer;text-decoration:underline}
+    .nowrap{white-space:nowrap}
+    .clickable{cursor:pointer;text-decoration:underline}
     .codes-cell{max-width:520px;white-space:normal;word-break:break-word}
-    /* аккуратная «одна табличка» № заказа → SKU */
+    /* «одна таблица» № заказа → SKU */
     .order-sku-shell{border:1px solid var(--line);border-radius:12px;padding:0;margin:16px 0}
     .order-sku-shell table{margin:0}
     .order-sku-shell thead th{background:var(--card);font-weight:600}
@@ -141,7 +140,7 @@
           </div>
         </div>
 
-        <!-- Заказы по SKU -->
+        <!-- Вкладка "Заказы по SKU" -->
         <div class="shell" style="margin-top:12px">
           <div class="row" style="justify-content:space-between;align-items:center">
             <h3 style="margin:0">Заказы по SKU</h3>
@@ -168,11 +167,19 @@
       </section>
 
       <section class="shell">
+        <h2>Таблица: Дни</h2>
+        <table id="tbl-days" class="table">
+          <thead><tr><th>Дата</th><th>Кол-во</th><th>Оборот</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </section>
+
+      <section class="shell">
         <h2>Номера заказов (для сверки)</h2>
         <div id="ids"></div>
       </section>
 
-      <!-- ОДНА таблица «№ заказа → SKU» (без заголовка) -->
+      <!-- ОДНА аккуратная таблица «№ заказа → SKU» -->
       <section class="order-sku-shell" id="orderSkuShell" style="display:none">
         <table id="tbl-order-sku" class="table">
           <thead><tr><th>№ заказа</th><th>SKU</th></tr></thead>
@@ -214,8 +221,7 @@ function setBusy(on){
   BUSY = !!on;
   for(const id of ['btnProfitSync','btnProfitRebuild','btnProfitSyncRebuild','btn-run','btnSkuSearch']){
     const b = document.getElementById(id);
-    if(b){ b.disabled = on; b.textContent = b.dataset.label || (b.dataset.label = b.textContent);
-      b.textContent = on ? (b.dataset.work || (b.dataset.work = '⏳ '+b.textContent)) : b.dataset.label; }
+    if(b){ b.disabled = on; b.textContent = b.dataset.label || (b.dataset.label = b.textContent); b.textContent = on ? (b.dataset.work || (b.dataset.work = '⏳ '+b.textContent)) : b.dataset.label; }
   }
 }
 window.addEventListener('error', (e)=>{ try{ setNote(e?.error?.message || e.message || 'Ошибка', false); }catch(_){} });
@@ -310,7 +316,7 @@ async function run(e){
       }
     }
 
-    await loadIds();          // формируем карту номеров и номер→SKU
+    await loadIds();          // карта номеров + таблица №→SKU
     await loadProfitFIFO();   // KPI + график + таблицы
     await checkProfitStatus(data);
     setNote('Данные обновлены', true);
@@ -321,32 +327,7 @@ async function run(e){
 </script>
 
 <script>
-/* ─────────── Номера заказов (список + карта для периодов и таблица №→SKU) ─────────── */
-function buildOrderItemsTable(group, currency){
-  const table = document.createElement('table'); table.className = 'order-table';
-  table.innerHTML = `
-    <thead><tr>
-      <th class="nowrap">№ заказа</th><th>SKU</th><th>Название</th><th class="nowrap">Qty</th>
-      <th class="nowrap">Сумма строки</th><th class="nowrap">Состояние</th><th class="nowrap">Время</th>
-    </tr></thead><tbody></tbody>`;
-  const tbody = table.querySelector('tbody');
-
-  for(const o of (group.items || [])){
-    const lines = (o.items && o.items.length)
-      ? o.items.map(li => ({ sku: li.sku||'', title: li.title||'', qty: Number(li.qty||1), sum: Number(li.unit_price||0) }))
-      : [{ sku: o.sku||'', title: o.title||o.name||'', qty: 1, sum: Number(o.amount||0) }];
-
-    for(const li of lines){
-      const tr = document.createElement('tr');
-      const tds = [ String(o.number||''), String(li.sku||''), String(li.title||''), String(li.qty||1),
-                    `${fmt(li.sum||0)} ${currency}`, String(o.state||''), (String(o.date||'').slice(0,16).replace('T',' ')||'') ];
-      for(const v of tds){ const td = document.createElement('td'); td.textContent = v; tr.appendChild(td); }
-      tbody.appendChild(tr);
-    }
-  }
-  return table;
-}
-
+/* ─────────── Номера заказов + таблица «№ → SKU» ─────────── */
 function renderOrderSkuTable(orderSkuSeq){
   const shell = document.getElementById('orderSkuShell');
   const tb = document.querySelector('#tbl-order-sku tbody');
@@ -363,11 +344,8 @@ function renderOrderSkuTable(orderSkuSeq){
         tdRight.appendChild(a);
         if(i < row.skus.length-1) tdRight.appendChild(document.createTextNode('  '));
       });
-    }else{
-      tdRight.textContent = '—';
-    }
-    tr.appendChild(tdRight);
-    tb.appendChild(tr);
+    }else{ tdRight.textContent = '—'; }
+    tr.appendChild(tdRight); tb.appendChild(tr);
   }
   shell.style.display = orderSkuSeq.length ? 'block' : 'none';
 }
@@ -390,7 +368,7 @@ async function loadIds(){
   try{ data = await fetchJSON(`/orders/ids?${params.toString()}`, {}, {retries:1}); }
   catch(e){ setNote('Не удалось получить номера заказов: ' + e.message); }
 
-  // карта номеров по дню → для «Таблица периодов»
+  // карта номеров по дню → для таблицы периодов
   window.__ordersByPeriod = {};
   // последовательность (для красивого рендера) и карта номер→массив SKU
   const orderSeq = [];
@@ -399,7 +377,6 @@ async function loadIds(){
   for(const g of (data.groups||[])){
     const nums = (g.items||[]).map(it=>it.number).filter(Boolean);
     window.__ordersByPeriod[g.day] = Array.from(new Set(nums));
-
     for(const o of (g.items||[])){
       const set = new Set(orderSkuMap.get(o.number) || []);
       if (Array.isArray(o.items) && o.items.length){
@@ -417,7 +394,7 @@ async function loadIds(){
     window.__lastOrderIds = (flatData.items||[]).map(x => ({ id: x.id, date: x.date }));
   }catch(_){ window.__lastOrderIds = []; }
 
-  // Рендер группы внизу (как раньше)
+  // Рендер групп (как раньше)
   const container = document.getElementById('ids'); if(!container) return;
   container.innerHTML = '';
 
@@ -445,20 +422,40 @@ async function loadIds(){
   container.appendChild(bar);
 
   const wrapper = document.createElement('div'); wrapper.className='ids-groups'; container.appendChild(wrapper);
-
   const detailsList = [];
   for(const group of (data.groups || [])){
     const det = document.createElement('details'); det.open = true;
     const dayTotal = (typeof group.total_amount === 'number') ? group.total_amount : group.items.reduce((acc, it) => acc + (Number(it.amount) || 0), 0);
     const sum = document.createElement('summary'); sum.textContent = `${group.day} — ${group.items.length} шт. · ${fmt(dayTotal)} ${currency}`;
     det.appendChild(sum);
-    det.appendChild(buildOrderItemsTable(group, currency));
+
+    const table = document.createElement('table'); table.className = 'table';
+    table.innerHTML = `<thead><tr>
+      <th class="nowrap">№ заказа</th><th>SKU</th><th>Название</th><th class="nowrap">Qty</th>
+      <th class="nowrap">Сумма строки</th><th class="nowrap">Состояние</th><th class="nowrap">Время</th>
+    </tr></thead><tbody></tbody>`;
+    const tbody = table.querySelector('tbody');
+
+    for(const o of (group.items || [])){
+      const lines = (o.items && o.items.length)
+        ? o.items.map(li => ({ sku: li.sku||'', title: li.title||'', qty: Number(li.qty||1), sum: Number(li.unit_price||0) }))
+        : [{ sku: o.sku||'', title: o.title||o.name||'', qty: 1, sum: Number(o.amount||0) }];
+
+      for(const li of lines){
+        const tr = document.createElement('tr');
+        const tds = [ String(o.number||''), String(li.sku||''), String(li.title||''), String(li.qty||1),
+                      `${fmt(li.sum||0)} ${currency}`, String(o.state||''), (String(o.date||'').slice(0,16).replace('T',' ')||'') ];
+        for(const v of tds){ const td = document.createElement('td'); td.textContent = v; tr.appendChild(td); }
+        tbody.appendChild(tr);
+      }
+    }
+    det.appendChild(table);
     detailsList.push(det); wrapper.appendChild(det);
   }
   btnExpand.onclick = ()=> detailsList.forEach(d=>d.open=true);
   btnCollapse.onclick = ()=> detailsList.forEach(d=>d.open=false);
 
-  // ОДНА красивая таблица «№ заказа → SKU»
+  // ОДНА таблица «№ заказа → SKU»
   const uniqueSeq = Array.from(new Set(orderSeq));
   const orderSkuSeq = uniqueSeq.map(n => ({ order: n, skus: (orderSkuMap.get(n)||[]) }));
   renderOrderSkuTable(orderSkuSeq);
@@ -530,10 +527,11 @@ function drawProfitChart(rows, cur){
   if(!(rows||[]).length){ if(empty) empty.style.display='block'; if(holder) holder.style.display='none'; return; }
   if(empty) empty.style.display='none'; if(holder) holder.style.display='block';
   try{
-    profitChart = new Chart(ctx, { type:'bar',
+    profitChart = new Chart(ctx, {
+      type:'bar',
       data:{ labels:(rows||[]).map(r=>r.period), datasets:[{ label:'Прибыль', data:(rows||[]).map(r=>Number(r.profit||0)) }] },
-      options:{ responsive:true, plugins:{ legend:{ display:false }, tooltip:{ callbacks:{ label:(ctx)=>`Прибыль: ${fmt(ctx.parsed.y)} ${cur}` } } },
-        scales:{ x:{ ticks:{ maxRotation:0 } }, y:{ beginAtZero:true } } });
+      options:{ responsive:true, plugins:{ legend:{ display:false }, tooltip:{ callbacks:{ label:(ctx)=>`Прибыль: ${fmt(ctx.parsed.y)} ${cur}` } } }, scales:{ x:{ ticks:{ maxRotation:0 } }, y:{ beginAtZero:true } } }
+    });
   }catch(_){ if(empty) empty.style.display='block'; if(holder) holder.style.display='none'; }
 }
 async function pingProfitDb(){
@@ -556,6 +554,7 @@ async function syncProfit(){
   const bd_start = document.getElementById('bd_start')?.value || '20:00';
 
   try{
+    // берём все позиции
     const qs = new URLSearchParams({
       start, end, tz, date_field,
       states:'KASPI_DELIVERY', exclude_states:'CANCELED',
@@ -602,7 +601,9 @@ async function rebuildFifo(){
     const p = new URLSearchParams({ date_from: df, date_to: dt });
     const res = await fetchProfitJSON('/profit/rebuild-ledger?' + p.toString(), { method:'POST' });
     setNote(`FIFO перестроен. Добавлено списаний: ${res?.recomputed||0}`, true);
-    await loadIds(); await loadProfitFIFO(); await checkProfitStatus();
+    await loadIds();
+    await loadProfitFIFO();
+    await checkProfitStatus();
   }catch(e){ setNote('Перестроение FIFO не удалось: ' + e.message, false); }
   finally{ setBusy(false); }
 }
@@ -662,7 +663,7 @@ async function loadProfitFIFO(){
     setFifoKPIs(sum.total, cur);
     drawProfitChart(sum.rows||[], cur);
 
-    // таблица периодов + «Номера заказа»
+    // таблица периодов + Номера заказа
     const tb = document.querySelector('#tbl-profit tbody'); tb.innerHTML = '';
     for(const r of (sum.rows||[])){
       const tr = document.createElement('tr');
@@ -729,20 +730,7 @@ async function showOrdersForSKU(sku){
   finally{ setBusy(false); }
 }
 </script>
-<script>
-async function pingProfitDb(){
-  try{
-    const r = await fetch('/profit/db/ping');
-    const info = await r.json();
-    const driver = info?.driver || (info?.db_path?.startsWith('postgres') ? 'pg' : 'sqlite');
-    const el = document.getElementById('profitDbInfo');
-    if (el) el.textContent = `FIFO DB: ${driver}${info?.fallback_enabled ? ' · fallback:on' : ''}`;
-  }catch(_){
-    const el = document.getElementById('profitDbInfo');
-    if (el) el.textContent = '';
-  }
-}
-</script>
+
 <script>
 /* ─────────── BOOT ─────────── */
 document.addEventListener('DOMContentLoaded', async () => {
@@ -757,10 +745,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('btnSkuSearch')?.addEventListener('click', ()=>showOrdersForSKU((document.getElementById('skuSearch')?.value||'').trim()));
     document.getElementById('btnSkuClear')?.addEventListener('click', ()=>{ document.getElementById('skuSearch').value=''; document.getElementById('skuOrders').innerHTML=''; document.getElementById('skuOrdersInfo').textContent=''; });
 
-    if (typeof pingProfitDb === 'function') {
-      try { await pingProfitDb(); } catch(_) {}
-    }
-    await run(); // обязательно оставить!
+    await pingProfitDb();
     await run(); // initial
   }catch(e){ setNote('Ошибка инициализации: ' + (e?.message||e), false); }
 });
