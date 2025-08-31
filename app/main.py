@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import os
 import re
-from datetime import datetime, timedelta, time
+import random
+from datetime import datetime, timedelta, time, date
 from typing import Optional, Dict, List, Iterable, Tuple
 
 import asyncio
@@ -81,6 +82,9 @@ PARTNER_ID = os.getenv("PARTNER_ID", "")
 BUSINESS_DAY_START = os.getenv("BUSINESS_DAY_START", "20:00")  # HH:MM
 USE_BUSINESS_DAY = os.getenv("USE_BUSINESS_DAY", "true").lower() in ("1", "true", "yes", "on")
 
+# Параллельность обогащения SKU
+ENRICH_CONCURRENCY = int(os.getenv("ENRICH_CONCURRENCY", "8") or 8)
+
 def _bd_delta(hhmm: str) -> timedelta:
     try:
         hh, mm = hhmm.split(":")
@@ -108,7 +112,7 @@ if origins:
 client = KaspiClient(token=KASPI_TOKEN, base_url=KASPI_BASE_URL) if KASPI_TOKEN else None
 
 # Кэш ответов
-orders_cache = TTLCache(maxsize=128, ttl=CACHE_TTL)
+orders_cache = TTLCache(maxsize=256, ttl=CACHE_TTL)  # ↑ немного увеличил maxsize
 
 # Статический UI
 app.mount("/ui", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static"), html=True), name="static")
@@ -163,6 +167,7 @@ def parse_states_csv(s: Optional[str]) -> Optional[set[str]]:
         return None
     return {norm_state(x) for x in re.split(r"[\s,;]+", s) if x.strip()}
 
+# Подсказки для извлечения города
 _CITY_KEY_HINTS = {"city", "cityname", "town", "locality", "settlement"}
 
 def _normalize_city(s: str) -> str:
@@ -238,7 +243,7 @@ def _guess_number(attrs: dict, fallback_id: str) -> str:
             return v.strip()
     return str(fallback_id)
 
-# -------------------- HTTPX как в debug_sku --------------------
+# -------------------- HTTPX и ретраи --------------------
 HTTPX_TIMEOUT = httpx.Timeout(connect=10.0, read=70.0, write=15.0, pool=60.0)
 HTTPX_LIMITS = httpx.Limits(max_connections=20, max_keepalive_connections=10)
 
@@ -255,6 +260,22 @@ def _kaspi_headers() -> Dict[str, str]:
 def _async_client():
     return httpx.AsyncClient(base_url=KASPI_BASE_URL, timeout=HTTPX_TIMEOUT, limits=HTTPX_LIMITS)
 
+async def _get_json_with_retries(cli: httpx.AsyncClient, url: str, *, params: Dict[str, str], headers: Dict[str, str], attempts: int = 5):
+    for i in range(attempts):
+        try:
+            r = await cli.get(url, params=params, headers=headers)
+            # «Капризные» статусы → ретрай
+            if r.status_code in (429, 500, 502, 503, 504):
+                raise HTTPStatusError(f"Retryable status: {r.status_code}", request=r.request, response=r)
+            r.raise_for_status()
+            return r.json()
+        except (HTTPStatusError, RequestError) as e:
+            if i == attempts - 1:
+                raise
+            # экспоненциальная пауза + джиттер
+            backoff = min(0.5 * (2 ** i), 8.0) + random.uniform(0.0, 0.2)
+            await asyncio.sleep(backoff)
+
 # -------------------- Вытягивание позиций (ВСЕ SKU) --------------------
 async def _all_items_details(order_id: str, return_candidates: bool = True) -> List[Dict[str, object]]:
     """
@@ -268,17 +289,21 @@ async def _all_items_details(order_id: str, return_candidates: bool = True) -> L
       "title_candidates": {...},     # если return_candidates=True
       "raw_entry_id": "..."          # id из orderentries
     }
-    Использует те же эвристики, что и debug_sku.py.
+    Использует те же эвристики, что и debug_sku.py. Имеет кэш на TTLCache.
     """
+    cache_key = f"entries:{order_id}"
+    cached = orders_cache.get(cache_key)
+    if cached is not None:
+        # Возвращаем копию, чтобы не словить внешних мутаций
+        return [dict(x) for x in cached]
+
     items: List[Dict[str, object]] = []
     async with _async_client() as cli:
-        r = await cli.get(
-            f"/orders/{order_id}/entries",
+        j = await _get_json_with_retries(
+            cli, f"/orders/{order_id}/entries",
             params={"page[size]": "200", "include": "product,merchantProduct,masterProduct"},
             headers=_kaspi_headers(),
         )
-        r.raise_for_status()
-        j = r.json()
         data = j.get("data", []) or []
         included = j.get("included", []) or []
         idx = _index_included(included)
@@ -347,6 +372,8 @@ async def _all_items_details(order_id: str, return_candidates: bool = True) -> L
                 row["title_candidates"] = titles
             items.append(row)
 
+    # Кэшируем список позиций
+    orders_cache[cache_key] = [dict(x) for x in items]
     return items
 
 # -------------------- (совместимость) первая позиция --------------------
@@ -383,6 +410,17 @@ class AnalyticsResponse(BaseModel):
     cities: List[CityCount] = []
     state_breakdown: Dict[str, int] = {}
 
+# -------------------- Вспомогательное расширение состояний --------------------
+_ARCHIVE_ALIASES = {"ARCHIVE", "ARCHIVED"}
+
+def _expand_with_archive(states_inc: Optional[set[str]]) -> Optional[set[str]]:
+    """Если явно просят KASPI_DELIVERY — добавим архивные алиасы, как просили."""
+    if not states_inc:
+        return states_inc
+    if "KASPI_DELIVERY" in states_inc:
+        return set(states_inc) | _ARCHIVE_ALIASES
+    return states_inc
+
 # -------------------- Endpoints --------------------
 @app.get("/meta")
 async def meta():
@@ -417,13 +455,16 @@ def _collect_range(start_dt: datetime, end_dt: datetime, tz: str, date_field: st
     if client is None:
         raise HTTPException(status_code=500, detail="KASPI_TOKEN is not set")
 
+    # Расширим включенные состояния "архивом", если просят KASPI_DELIVERY
+    states_inc = _expand_with_archive(states_inc)
+
     for s, e in iter_chunks(start_dt, end_dt, CHUNK_DAYS):
         try:
             try_field = date_field
             while True:
                 try:
                     for order in client.iter_orders(start=s, end=e, filter_field=try_field):
-                        oid = order.get("id")
+                        oid = str(order.get("id"))
                         if oid in seen_ids:
                             continue
                         attrs = order.get("attributes", {}) or {}
@@ -552,8 +593,8 @@ async def list_ids(
     order: str = Query("asc", pattern="^(asc|desc)$"),
     grouped: int = Query(0),
     with_items: int = Query(1, description="0=без обогащения; 1=обогащение позициями"),
-    enrich_scope: str = Query("last_day", pattern="^(none|last_day|all)$"),
-    items_mode: str = Query("all", pattern="^(first|all)$"),   # NEW: режим позиций
+    enrich_scope: str = Query("last_day", pattern="^(none|last_day|last_week|all)$"),
+    items_mode: str = Query("all", pattern="^(first|all)$"),
     return_candidates: int = Query(0, description="1=вернуть title_candidates/sku_candidates"),
 ):
     tzinfo = tzinfo_of(tz)
@@ -573,7 +614,11 @@ async def list_ids(
 
     inc = parse_states_csv(states)
     exc = parse_states_csv(exclude_states) or set()
+    # Расширим включенные состояния «архивом», если указан KASPI_DELIVERY
+    inc = _expand_with_archive(inc)
+
     out: List[Dict[str, object]] = []
+    seen_ids: set[str] = set()
 
     if client is None:
         raise HTTPException(status_code=500, detail="KASPI_TOKEN is not set")
@@ -584,6 +629,10 @@ async def list_ids(
             while True:
                 try:
                     for order in client.iter_orders(start=s, end=e, filter_field=try_field):
+                        oid = str(order.get("id"))
+                        if oid in seen_ids:
+                            continue
+
                         attrs = order.get("attributes", {}) or {}
                         st = norm_state(str(attrs.get("state", "")))
                         if inc and st not in inc:
@@ -597,13 +646,14 @@ async def list_ids(
                         dtt = datetime.fromtimestamp(ms / 1000.0, tz=pytz.UTC).astimezone(tzinfo)
 
                         out.append({
-                            "id": order.get("id"),
-                            "number": _guess_number(attrs, order.get("id")),
+                            "id": oid,
+                            "number": _guess_number(attrs, oid),
                             "state": st,
                             "date": dtt.isoformat(),
                             "amount": round(extract_amount(attrs), 2),
                             "city": extract_city(attrs),
                         })
+                        seen_ids.add(oid)
                     break
                 except HTTPStatusError as ee:
                     if ee.response.status_code in (400, 422) and try_field != "creationDate":
@@ -646,26 +696,28 @@ async def list_ids(
     if with_items and out and enrich_scope != "none":
         if enrich_scope == "all":
             targets = out[: (limit or len(out))]
-        else:  # last_day
+        elif enrich_scope == "last_week":
+            # корзина дат за последнюю неделю по "магазинному" дню
             last_day = enrich_day
-            targets = [it for it in out if str(it["date"])[:10] == last_day]
+            y, m, d = map(int, last_day.split("-"))
+            last_dt = date(y, m, d)
+            week = { (last_dt - timedelta(days=i)).isoformat() for i in range(7) }
+            targets = [it for it in out if str(it["date"])[:10] in week]
+        else:  # last_day
+            targets = [it for it in out if str(it["date"])[:10] == enrich_day]
 
-        sem = asyncio.Semaphore(6)  # умеренная параллельность
+        sem = asyncio.Semaphore(max(1, ENRICH_CONCURRENCY))
         async def enrich(it):
             async with sem:
                 if items_mode == "all":
-                    items = await _all_items_details(
-                        str(it["id"]), return_candidates=bool(return_candidates)
-                    )
+                    items = await _all_items_details(str(it["id"]), return_candidates=bool(return_candidates))
                     it["items"] = items
                     if items:
                         # поля совместимости
                         it["sku"] = items[0].get("sku")
                         it["title"] = items[0].get("title")
                 else:  # first
-                    extra = await _first_item_details(
-                        str(it["id"]), return_candidates=bool(return_candidates)
-                    )
+                    extra = await _first_item_details(str(it["id"]), return_candidates=bool(return_candidates))
                     if extra:
                         it["sku"] = extra.get("sku")
                         it["title"] = extra.get("title")
@@ -674,6 +726,7 @@ async def list_ids(
                                 "title_candidates": extra.get("title_candidates") or {},
                                 "sku_candidates": extra.get("sku_candidates") or {},
                             }
+
         await asyncio.gather(*(enrich(it) for it in targets))
 
     if limit and limit > 0:
