@@ -11,7 +11,7 @@
 
     *{box-sizing:border-box}
     html,body{height:100%}
-    body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Helvetica Neue","Noto Sans",Arial,"Apple Color Emoji","Segoe UI Emoji"}
+    body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Helvetica Neue","Noto Sans",Arial}
     a{color:inherit}
     .muted{color:var(--muted)}
     .layout{display:flex;min-height:100vh}
@@ -63,6 +63,11 @@
     .ids-actions{display:flex;gap:8px;margin:8px 0;flex-wrap:wrap}
     .ids-groups details{margin:8px 0}
     .pill{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:4px 8px;margin:2px 4px 0 0;background:var(--card)}
+
+    /* Быстрые периоды */
+    .segment{display:inline-flex;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+    .segment button{border:0;background:var(--card);color:var(--fg);padding:4px 10px;cursor:pointer}
+    .segment button.active{background:var(--accent);color:white}
   </style>
 </head>
 <body data-theme="light">
@@ -93,6 +98,14 @@
           <label>Конец</label><input type="date" id="end" required>
           <label>Часовой пояс</label><input type="text" id="tz" value="Asia/Almaty" style="width:140px">
           <label>Поле даты</label><select id="date_field" style="width:220px"></select>
+          <div style="margin-left:auto" class="row">
+            <span class="muted">Период:</span>
+            <div class="segment" id="quickRange">
+              <button type="button" id="rngDay">День</button>
+              <button type="button" id="rngWeek">Неделя</button>
+              <button type="button" id="rngMonth">Месяц</button>
+            </div>
+          </div>
         </div>
 
         <div class="row" style="margin-top:8px">
@@ -230,7 +243,6 @@ function updateProgress(phase, done, total, pct, msg){
   if(b) b.style.width = `${Math.max(1, Math.round(pct*100))}%`;
   setTopLoader(pct);
 }
-function hideNote(){ const el=document.getElementById('note'); el.style.display='none'; el.textContent=''; el.className='note'; setTopLoader(0); }
 window.addEventListener('error', e => setNote(e?.error?.message || e.message || 'Ошибка', 'err'));
 window.addEventListener('unhandledrejection', e => setNote(e?.reason?.message || String(e.reason) || 'Ошибка', 'err'));
 
@@ -243,6 +255,21 @@ function fmtMs(ms){
     const g = k => parts.find(p=>p.type===k)?.value || '';
     return `${g('year')}-${g('month')}-${g('day')} ${g('hour')}:${g('minute')}`;
   }catch(_){ return new Date(Number(ms)).toISOString().slice(0,16).replace('T',' '); }
+}
+
+/* qty×цена → сумма строки, единый нормализатор */
+function firstNonEmpty(arr){
+  for(const v of arr){ if(v!==undefined && v!==null && String(v).trim()!=='') return v; }
+  return undefined;
+}
+function deriveLine(raw){
+  const qty = Math.max(1, Number(firstNonEmpty([raw.qty, raw.quantity, 1])) || 1);
+  let unit = num(firstNonEmpty([raw.unit_price, raw.unitPrice, raw.price, raw.unit]));
+  let total = num(firstNonEmpty([raw.total_price, raw.total, raw.sum, raw.amount]));
+  if(!total && unit) total = unit * qty;
+  if(!unit && total) unit = qty>0 ? (total/qty) : total;
+  if(!unit && !total){ unit = num(firstNonEmpty([raw.price, raw.unit_price])); total = unit * qty; }
+  return { qty, unit, total };
 }
 </script>
 
@@ -288,7 +315,6 @@ function fmtMs(ms){
     });
   });
 })();
-
 async function fetchBridgeJSON(url, opts, _retry){
   const r=await fetch(url, opts||{});
   if(r.status===401||r.status===403){
@@ -337,9 +363,7 @@ async function loadMeta(){
     document.getElementById('bd_start').value = meta.business_day_start || '20:00';
     document.getElementById('store_until').value = meta.store_accept_until || '17:00';
   } catch(_){}
-  const today = new Date(); const iso = d=>d.toISOString().slice(0,10);
-  document.getElementById('start').value = iso(today);
-  document.getElementById('end').value   = iso(today);
+  setQuickRange('day'); // по умолчанию «сегодня»
   renderStatusChips();
 }
 
@@ -383,6 +407,7 @@ async function run(e){
     document.getElementById('periodLabel').textContent = `${data.range?.start||start} → ${data.range?.end||end}`;
     document.getElementById('periodCutoff').textContent = (use_bd==='1' ? (bd_start || '20:00') : '24:00');
     uiModeHint();
+    updateQuickRangeActive(); // подсветка сегмента
 
     // состояния
     const sb = document.getElementById('statesBox');
@@ -402,7 +427,7 @@ async function run(e){
       citiesChart = new Chart(ctx,{type:'bar',data:{labels,datasets:[{label:'Заказы',data:counts}]},options:{responsive:true,plugins:{legend:{display:false}}}});
     }
 
-    // ——— Выгрузка номеров (+обогащение), мост и FIFO-таблица ———
+    // → выгружаем ids, сингкуем мост и рисуем FIFO ровно по этим кодам
     await runIdsJob();
     await renderBridgeTable();
 
@@ -424,14 +449,15 @@ function buildOrderItemsTable(group, currency){
   const tb = table.querySelector('tbody');
 
   for(const o of (group.items||[])){
-    const lines = (o.items && o.items.length)
-      ? o.items.map(li=>({sku:String(li.sku||''),title:String(li.title||''),qty:Number(li.qty||1),sum:num(li.sum ?? li.total_price ?? li.amount ?? li.unit_price)}))
-      : [{sku:String(o.sku||''),title:String(o.title||o.name||''),qty:1,sum:num(o.amount)}];
+    const baseLines = (o.items && o.items.length)
+      ? o.items
+      : (o.sku ? [{sku:o.sku, title:o.title||o.name, qty:1, amount:o.amount}] : []);
 
-    for(const li of lines){
+    for(const liRaw of baseLines){
+      const {qty,total} = deriveLine(liRaw);
       const tr=document.createElement('tr');
-      [ String(o.number||''), li.sku||'', li.title||'', String(li.qty||1),
-        `${fmt(li.sum||0)} ${currency}`, o.state||'', (String(o.date||'').slice(0,16).replace('T',' ')||'') ]
+      [ String(o.number||''), String(liRaw.sku||''), String(liRaw.title||''), String(qty),
+        `${fmt(total||0)} ${currency}`, String(o.state||''), (String(o.date||'').slice(0,16).replace('T',' ')||'') ]
       .forEach(v=>{ const td=document.createElement('td'); td.textContent=v; tr.appendChild(td); });
       tb.appendChild(tr);
     }
@@ -439,7 +465,7 @@ function buildOrderItemsTable(group, currency){
   return table;
 }
 
-/* → СИНХРОНИЗАЦИЯ МОСТА */
+/* → СИНХРОНИЗАЦИЯ МОСТА (qty×цена корректно) */
 async function syncBridgeFromIdsData(data){
   try{
     const items = [];
@@ -456,22 +482,12 @@ async function syncBridgeFromIdsData(data){
           : (o.sku ? [{ sku:o.sku, qty:1, sum:o.amount, title:o.title||o.name }] : []);
 
         for(const li of (lines||[])){
-          const skuRaw = li.sku ?? li.code ?? '';
-          const sku = String(skuRaw ?? '').trim();
-          const qty = Number(li.qty ?? 1) || 1;
-          const total = num(li.sum ?? li.total_price ?? li.amount ?? li.unit_price, 2);
-          const unit  = qty>0 ? (total/qty) : num(li.unit_price, 2);
+          const {qty,unit,total} = deriveLine(li);
+          const sku = String(firstNonEmpty([li.sku, li.code, ''])||'').trim();
           items.push({
-            id: orderId,
-            code: orderCode,
-            date: date,
-            state: state,
-            sku: sku || null,
-            title: (li.title ?? li.name ?? null),
-            qty: qty,
-            unit_price: unit,
-            total_price: total,
-            line_index: idx++,
+            id: orderId, code: orderCode, date, state,
+            sku: sku || null, title: (li.title ?? li.name ?? null),
+            qty, unit_price: unit, total_price: total, line_index: idx++,
           });
         }
       }
@@ -484,8 +500,6 @@ async function syncBridgeFromIdsData(data){
       body: JSON.stringify(items)
     });
     if(!res.ok) throw new Error(await res.text()||res.statusText);
-    const j = await res.json();
-    console.log('bridge sync:', j);
   }catch(e){
     console.warn('bridge sync failed:', e);
     setNote('Синхронизация моста не удалась: ' + (e.message||e), 'err');
@@ -495,7 +509,7 @@ async function syncBridgeFromIdsData(data){
 /* ——— FIFO таблица по ТОЧНОМУ СПИСКУ заказов из ids ——— */
 async function fetchEnrichedByCodes(codes, order='asc'){
   if(!codes || !codes.length) return {orders:[], stats:{orders:0,lines:0,revenue:0,cost:0,profit:0}};
-  const chunkSize = 150; // чтобы URL не раздувался
+  const chunkSize = 150;
   const parts = [];
   for(let i=0;i<codes.length;i+=chunkSize) parts.push(codes.slice(i,i+chunkSize));
 
@@ -508,7 +522,6 @@ async function fetchEnrichedByCodes(codes, order='asc'){
     stats.revenue += Number(s.revenue||0); stats.cost += Number(s.cost||0); stats.profit += Number(s.profit||0);
     stats.lines  += Number(s.lines||0);
   }
-  // грубая сортировка по дате
   mergedOrders.sort((a,b)=> String(a.date||'').localeCompare(String(b.date||'')));
   stats.orders = mergedOrders.length;
   stats.revenue = Math.round(stats.revenue*100)/100;
@@ -667,14 +680,14 @@ async function runIdsJob(){
       const data = await rr.json();
       CURRENT_JOB_ID=null;
 
-      // хранение списка кодов для точной выборки
+      // список кодов — основа для FIFO
       window.__allOrderCodes = Array.from(new Set((data.items||[]).map(it=>String(it.number||'').trim()).filter(Boolean)));
 
-      // ← обязательно: прокидываем строки в мост
+      // ← прокидываем строки в мост
       await syncBridgeFromIdsData(data);
 
       await renderIdsResult(data);
-      await renderBridgeTable(); // сразу перерисуем FIFO-таблицу после синка
+      await renderBridgeTable(); // сразу перерисуем FIFO
       break;
     }
   }
@@ -726,7 +739,7 @@ async function renderIdsResult(data){
   const detailsList=[];
   for(const group of (data.groups||[])){
     const det=document.createElement('details'); det.open=true;
-    const dayTotal=(typeof group.total_amount==='number')?group.total_amount:group.items.reduce((acc,it)=>acc+(num(it.amount)),0);
+    const dayTotal=(typeof group.total_amount==='number')?group.total_amount:group.items.reduce((acc,it)=>acc+(deriveLine(it).total||0),0);
     const sum=document.createElement('summary'); sum.textContent=`${group.day} — ${group.items.length} шт. · ${fmt(dayTotal)} ${currency}`;
     det.appendChild(sum); det.appendChild(buildOrderItemsTable(group, currency));
     detailsList.push(det); wrapper.appendChild(det);
@@ -755,6 +768,48 @@ async function syncMsCosts(){
   }catch(e){ setNote('MS sync: ' + (e.message||e), 'err'); }
   finally{ setBusy(false); }
 }
+</script>
+
+<script>
+/* ─────────── Быстрые периоды: День / Неделя / Месяц ─────────── */
+function nowInTZ(){
+  const tz=document.getElementById('tz')?.value || 'Asia/Almaty';
+  return new Date(new Date().toLocaleString('en-US',{timeZone:tz}));
+}
+function ymd(d){ const z=n=>String(n).padStart(2,'0'); return `${d.getFullYear()}-${z(d.getMonth()+1)}-${z(d.getDate())}`; }
+function setQuickRange(mode){
+  const d = nowInTZ();
+  let start=d, end=d;
+  if(mode==='day'){
+    // start/end = сегодня
+  }else if(mode==='week'){
+    const w = new Date(d); const day=w.getDay(); const diff=(day===0?6:day-1); // понедельник
+    w.setDate(w.getDate()-diff); start=w; end=d;
+  }else if(mode==='month'){
+    start=new Date(d.getFullYear(), d.getMonth(), 1);
+    end=d;
+  }
+  document.getElementById('start').value = ymd(start);
+  document.getElementById('end').value   = ymd(end);
+  updateQuickRangeActive();
+}
+function updateQuickRangeActive(){
+  const s=document.getElementById('start').value, e=document.getElementById('end').value;
+  const d = nowInTZ(); const today=ymd(d);
+  const w = new Date(d); const diff=(w.getDay()===0?6:w.getDay()-1); w.setDate(w.getDate()-diff);
+  const monday=ymd(w);
+  const mFirst=ymd(new Date(d.getFullYear(), d.getMonth(), 1));
+  const byId=id=>document.getElementById(id)?.classList;
+
+  byId('rngDay')?.toggle('active', s===today && e===today);
+  byId('rngWeek')?.toggle('active', s===monday && e===today);
+  byId('rngMonth')?.toggle('active', s===mFirst && e===today);
+}
+document.addEventListener('DOMContentLoaded', ()=>{
+  document.getElementById('rngDay')?.addEventListener('click', ()=>{ setQuickRange('day'); run(); });
+  document.getElementById('rngWeek')?.addEventListener('click', ()=>{ setQuickRange('week'); run(); });
+  document.getElementById('rngMonth')?.addEventListener('click', ()=>{ setQuickRange('month'); run(); });
+});
 </script>
 
 <script>
