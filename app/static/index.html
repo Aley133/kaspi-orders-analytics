@@ -177,10 +177,13 @@
         <div class="kpi-item"><div class="kpi-label">Оборот</div><div class="kpi-value" id="kpiAmount">0</div></div>
       </section>
 
-      <!-- МАТРИЦА: № заказа → SKU (без FIFO-метрик) -->
+      <!-- FIFO: Заказы и позиции -->
       <section class="shell">
-        <h3 style="margin:0 0 6px">Привязка: № заказа → SKU</h3>
-        <div id="orderSkuMatrix" class="muted">Пусто…</div>
+        <div class="row" style="justify-content:space-between;align-items:center;">
+          <h2 style="margin:0">FIFO: Заказы и позиции</h2>
+          <div id="fifoBridgeInfo" class="muted"></div>
+        </div>
+        <div id="fifoBridgeTable" style="margin-top:8px"></div>
       </section>
 
       <!-- ГОРОДА / ДИАГНОСТИКА -->
@@ -429,9 +432,9 @@ async function run(e){
       citiesChart = new Chart(ctx,{type:'bar',data:{labels,datasets:[{label:'Заказы',data:counts}]},options:{responsive:true,plugins:{legend:{display:false}}}});
     }
 
-    // ——— Выгрузка номеров (+обогащение), мост и матрица ———
+    // ——— Выгрузка номеров (+обогащение), мост и FIFO-таблица ———
     await runIdsJob();
-    await renderOrderSkuMatrix();
+    await renderBridgeTable();
 
     setNote('Данные обновлены', 'ok');
   }catch(err){ setNote('Ошибка загрузки: ' + (err?.message || err), 'err'); }
@@ -519,11 +522,13 @@ async function syncBridgeFromIdsData(data){
   }
 }
 
-async function renderOrderSkuMatrix(){
+/* Новый рендер FIFO-таблицы (№ заказа → позиции, в одном читабельном табличном виде) */
+async function renderBridgeTable(){
   const df=document.getElementById('start').value;
   const dt=document.getElementById('end').value;
   const states = normalizeStatesValue(document.getElementById('states').value) || 'KASPI_DELIVERY';
-  const box=document.getElementById('orderSkuMatrix');
+  const box=document.getElementById('fifoBridgeTable');
+  const info=document.getElementById('fifoBridgeInfo');
   box.innerHTML='Загружаем…'; box.classList.remove('muted');
 
   try{
@@ -533,32 +538,60 @@ async function renderOrderSkuMatrix(){
     const data = await (await fetch(url)).json();
     const cur = window.APP_CURRENCY || 'KZT';
 
-    if(!data.orders?.length){ box.classList.add('muted'); box.textContent='Нет данных'; return; }
+    const orders = data.orders || [];
+    if(!orders.length){ box.classList.add('muted'); box.textContent='Нет данных'; info.textContent=''; return; }
 
     const tbl=document.createElement('table'); tbl.className='table';
     tbl.innerHTML=`<thead>
-      <tr><th style="width:200px">№ заказа</th><th>SKU</th><th>Название</th><th>Qty</th><th>Сумма строки</th></tr>
+      <tr>
+        <th style="width:170px">№ заказа</th>
+        <th style="width:150px">Время</th>
+        <th style="width:160px">Статус</th>
+        <th>SKU</th>
+        <th>Название</th>
+        <th class="nowrap">Qty</th>
+        <th class="nowrap">Сумма строки</th>
+      </tr>
     </thead><tbody></tbody>`;
     const tb=tbl.querySelector('tbody');
 
-    for(const ord of data.orders){
-      for(const it of (ord.items||[])){
+    let totalLines=0, totalRevenue=0;
+    for(const ord of orders){
+      const items = ord.items||[];
+      if(!items.length) continue;
+      totalLines += items.length;
+      let first=true;
+      items.forEach((it, idx)=>{
         const tr=document.createElement('tr');
 
-        const tdNum=document.createElement('td'); tdNum.textContent = ord.order_code || ord.order_id || ''; tr.appendChild(tdNum);
+        if(first){
+          const tdNum=document.createElement('td'); tdNum.textContent = ord.order_code || ord.order_id || ''; tdNum.rowSpan = items.length; tdNum.className='nowrap'; tr.appendChild(tdNum);
+          const tdTime=document.createElement('td'); tdTime.textContent = ord.date || ''; tdTime.rowSpan = items.length; tr.appendChild(tdTime);
+          const tdState=document.createElement('td'); tdState.textContent = ord.state || ''; tdState.rowSpan = items.length; tr.appendChild(tdState);
+          first=false;
+        }
+
         const tdSku=document.createElement('td'); tdSku.textContent = it.sku || ''; tr.appendChild(tdSku);
         const tdTitle=document.createElement('td'); tdTitle.textContent = it.title || ''; tr.appendChild(tdTitle);
-        const tdQty=document.createElement('td'); tdQty.textContent = String(it.qty||1); tr.appendChild(tdQty);
-        const tdSum=document.createElement('td'); tdSum.textContent = `${fmt(it.total_price||0)} ${cur}`; tr.appendChild(tdSum);
+        const tdQty=document.createElement('td'); tdQty.textContent = String(it.qty||1); tdQty.className='nowrap'; tr.appendChild(tdQty);
+        const tdSum=document.createElement('td'); const s=Number(it.total_price||0); totalRevenue += s; tdSum.textContent = `${fmt(s)} ${cur}`; tdSum.className='nowrap'; tr.appendChild(tdSum);
 
         tb.appendChild(tr);
-      }
+      });
+
+      // строка «Итого по заказу»
+      const trTotal=document.createElement('tr'); trTotal.className='muted';
+      const tdSpacer=document.createElement('td'); tdSpacer.colSpan=3; tdSpacer.textContent=''; trTotal.appendChild(tdSpacer);
+      const tdLabel=document.createElement('td'); tdLabel.colSpan=3; tdLabel.textContent='Итого по заказу'; trTotal.appendChild(tdLabel);
+      const tdVal=document.createElement('td'); tdVal.textContent=`${fmt((ord.totals&&ord.totals.revenue)||items.reduce((a,x)=>a+(Number(x.total_price||0)),0))} ${cur}`; tdVal.className='nowrap'; trTotal.appendChild(tdVal);
+      tb.appendChild(trTotal);
     }
 
-    box.innerHTML='';
-    box.appendChild(tbl);
+    info.textContent = `Заказов: ${fmt(orders.length)} · Позиции: ${fmt(totalLines)} · Выручка: ${fmt(totalRevenue)} ${cur}`;
+    box.innerHTML=''; box.appendChild(tbl);
   }catch(e){
     box.className='muted'; box.textContent='Ошибка: ' + (e.message||e);
+    info.textContent='';
   }
 }
 
@@ -631,6 +664,7 @@ async function runIdsJob(){
       await syncBridgeFromIdsData(data);
 
       await renderIdsResult(data);
+      await renderBridgeTable(); // сразу перерисуем FIFO-таблицу после синка
       break;
     }
   }
