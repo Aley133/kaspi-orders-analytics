@@ -138,7 +138,6 @@ app.mount("/ui", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "
 # Подключаем доменные роутеры
 app.include_router(get_products_router(client), prefix="/products")
 app.include_router(get_profit_fifo_router(),   prefix="/profit")
-app.include_router(bridge_v2_router, prefix="/profit") 
 app.include_router(get_debug_router())
 app.include_router(bridge_router) 
 
