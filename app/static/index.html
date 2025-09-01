@@ -6,14 +6,8 @@
   <title>Kaspi Orders Analytics</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <style>
-    :root{
-      --bg:#0b0c0f; --fg:#e5e7eb; --muted:#9ca3af; --line:#2a2f3a; --card:#111318; --accent:#10b981;
-      --danger:#ef4444; --warn:#f59e0b;
-    }
-    [data-theme="light"]{
-      --bg:#f8fafc; --fg:#0f172a; --muted:#64748b; --line:#e2e8f0; --card:#ffffff; --accent:#059669;
-      --danger:#dc2626; --warn:#d97706;
-    }
+    :root{ --bg:#0b0c0f; --fg:#e5e7eb; --muted:#9ca3af; --line:#2a2f3a; --card:#111318; --accent:#10b981; --danger:#ef4444; --warn:#f59e0b; }
+    [data-theme="light"]{ --bg:#f8fafc; --fg:#0f172a; --muted:#64748b; --line:#e2e8f0; --card:#ffffff; --accent:#059669; --danger:#dc2626; --warn:#d97706; }
 
     *{box-sizing:border-box}
     html,body{height:100%}
@@ -50,9 +44,6 @@
     .table th,.table td{border-bottom:1px solid var(--line);padding:8px 10px;vertical-align:top;text-align:left}
     .table thead th{font-size:12px;color:var(--muted);font-weight:600}
     .nowrap{white-space:nowrap}
-    .codes-cell{max-width:520px;white-space:normal;word-break:break-word}
-    .clickable{cursor:pointer;text-decoration:underline}
-
     .order-table{width:100%;border-collapse:collapse;margin:6px 0 12px}
     .order-table th,.order-table td{padding:6px 8px;border-bottom:1px solid var(--line);font-size:13px}
 
@@ -72,25 +63,6 @@
     .ids-actions{display:flex;gap:8px;margin:8px 0;flex-wrap:wrap}
     .ids-groups details{margin:8px 0}
     .pill{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:4px 8px;margin:2px 4px 0 0;background:var(--card)}
-    .matrix-sku a{display:inline-block;margin:2px 8px 2px 0}
-    .theme-switch{display:flex;align-items:center;gap:8px;margin-top:auto}
-    .switch{position:relative;display:inline-block;width:40px;height:20px}
-    .switch input{opacity:0;width:0;height:0}
-    .slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:#d1d5db;border-radius:999px;transition:.2s}
-    .slider:before{position:absolute;content:"";height:16px;width:16px;left:2px;top:2px;background:white;border-radius:50%;transition:.2s}
-    .switch input:checked + .slider{background:var(--accent)}
-    .switch input:checked + .slider:before{transform:translateX(20px)}
-    body,.note{-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
-
-    .status-control{position:relative;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-    .chips{display:flex;gap:6px;flex-wrap:wrap}
-    .chips .chip{cursor:default}
-    .chips .chip .x{cursor:pointer;opacity:.8;margin-left:6px}
-    .status-menu{position:absolute;top:110%;left:0;z-index:5000;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:8px 10px;width:320px;box-shadow:0 12px 30px rgba(0,0,0,.22);display:none}
-    .status-menu.open{display:block}
-    .status-grid{max-height:320px;overflow:auto;margin:6px 0;display:grid;grid-template-columns:1fr;gap:2px}
-    .status-grid label{display:flex;align-items:center;gap:8px;padding:4px 6px}
-    .menu-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:6px}
   </style>
 </head>
 <body data-theme="light">
@@ -181,8 +153,13 @@
       <section class="shell">
         <div class="row" style="justify-content:space-between;align-items:center;">
           <h2 style="margin:0">FIFO: Заказы и позиции</h2>
-          <div id="fifoBridgeInfo" class="muted"></div>
+          <div class="row" style="gap:10px;align-items:center">
+            <span id="profitKeyBadge" class="chip" title="Ключ для защищённых эндпоинтов"><span class="dot"></span><span>ключ не задан</span></span>
+            <button class="btn secondary" id="btnProfitApiKey" type="button">API-Key</button>
+            <button class="btn secondary" id="btnSyncMsCosts" type="button" title="Обновить себестоимость из МойСклад">MS себестоимость</button>
+          </div>
         </div>
+        <div id="fifoBridgeInfo" class="muted" style="margin:6px 0"></div>
         <div id="fifoBridgeTable" style="margin-top:8px"></div>
       </section>
 
@@ -213,7 +190,7 @@ function fmt(n){ return nf.format(Math.round((Number(n) + Number.EPSILON) * 100)
 let BUSY = false;
 function setBusy(on){
   BUSY = !!on;
-  for(const id of ['btn-run']){
+  for(const id of ['btn-run','btnSyncMsCosts']){
     const b = document.getElementById(id);
     if(!b) continue;
     b.disabled = on;
@@ -270,97 +247,91 @@ function fmtMs(ms){
 </script>
 
 <script>
+/* ─────────── API-Key инъекция для /profit/* ─────────── */
+(()=>{
+  const KEY="KASPI_API_KEY";
+  const badge=()=>document.getElementById('profitKeyBadge');
+  function refreshBadge(){
+    const v=localStorage.getItem(KEY)||"";
+    const el=badge(); if(!el) return;
+    const dot=el.querySelector('.dot'); if(dot) dot.className='dot ' + (v?'on':'');
+    const label=el.querySelector('span:last-child'); if(label) label.textContent = v ? 'ключ установлен' : 'ключ не задан';
+  }
+  window.KASPI_API_KEY=localStorage.getItem(KEY)||""; refreshBadge();
+
+  const origFetch=window.fetch.bind(window);
+  window.fetch=function(input,init){
+    try{
+      let urlStr=typeof input==='string'?input:(input&&input.url)||'';
+      if(urlStr.startsWith('/profit/')){
+        init=init||{};
+        const k=window.KASPI_API_KEY||'';
+        let headers=init.headers instanceof Headers?init.headers:new Headers(init.headers||{});
+        if(k) headers.set('X-API-Key', k);
+        init.headers=headers;
+        if(k){
+          const u=new URL(urlStr,location.origin);
+          if(!u.searchParams.has('api_key')) u.searchParams.set('api_key',k);
+          input=(typeof input==='string')?(u.pathname+u.search):new Request(u.toString(),init);
+        }
+      }
+    }catch(_){}
+    return origFetch(input,init);
+  };
+
+  window.setApiKey=function(k){ localStorage.setItem(KEY,k||''); window.KASPI_API_KEY=k||''; refreshBadge(); };
+
+  document.addEventListener('DOMContentLoaded', ()=>{
+    document.getElementById('btnProfitApiKey')?.addEventListener('click', ()=>{
+      const v=prompt('Введите X-API-Key для блока FIFO:', window.KASPI_API_KEY||'');
+      if(v!==null){ setApiKey(v.trim()); alert('Сохранено. Повторите действие, если было 401.'); }
+    });
+  });
+})();
+
+async function fetchBridgeJSON(url, opts, _retry){
+  const r=await fetch(url, opts||{});
+  if(r.status===401||r.status===403){
+    if(!_retry){
+      const v=prompt('Требуется X-API-Key для FIFO:', window.KASPI_API_KEY||'');
+      if(v!==null){ window.setApiKey(v.trim()); return fetchBridgeJSON(url, opts, true); }
+    }
+    throw new Error(await r.text()||'Unauthorized');
+  }
+  if(!r.ok){ const body=await r.text(); throw new Error(body||r.statusText||('HTTP '+r.status)); }
+  const ct=r.headers.get('content-type')||''; return ct.includes('application/json')?r.json():r.text();
+}
+</script>
+
+<script>
 /* ─────────── UI/STATE ─────────── */
 let citiesChart=null;
 window.APP_CURRENCY='KZT';
 window.__ordersByPeriod={};
 window.__orderToSkus={};
+window.__allOrderCodes=[];
 let CURRENT_JOB_ID=null;
 
 /* ─────────── multiselect статусов ─────────── */
-const STATUS_DICT = {
-  NEW: 'Новый',
-  APPROVED_BY_BANK: 'Оплата подтверждена',
-  ACCEPTED_BY_MERCHANT: 'Принят магазином',
-  READY_FOR_SHIPMENT: 'Готов к отгрузке',
-  KASPI_DELIVERY: 'Kaspi Доставка (передан)',
-  DELIVERED: 'Доставлен',
-  ARCHIVE: 'Завершён (архив)',
-  ARCHIVED: 'Архив (история)',
-  RETURNED: 'Возврат',
-  CANCELED: 'Отменён',
-};
+const STATUS_DICT = { NEW:'Новый', APPROVED_BY_BANK:'Оплата подтверждена', ACCEPTED_BY_MERCHANT:'Принят магазином', READY_FOR_SHIPMENT:'Готов к отгрузке', KASPI_DELIVERY:'Kaspi Доставка (передан)', DELIVERED:'Доставлен', ARCHIVE:'Завершён (архив)', ARCHIVED:'Архив (история)', RETURNED:'Возврат', CANCELED:'Отменён' };
 const STATUS_ORDER = ['NEW','APPROVED_BY_BANK','ACCEPTED_BY_MERCHANT','READY_FOR_SHIPMENT','KASPI_DELIVERY','DELIVERED','ARCHIVE','ARCHIVED','RETURNED','CANCELED'];
 const LABEL_TO_CODE = Object.fromEntries(Object.entries(STATUS_DICT).map(([k,v])=>[v.toLowerCase(),k]));
-
 window.STATUS_SELECTED = new Set();
-
 function ruLabel(code){ return STATUS_DICT[code] || code; }
+function renderStatusGrid(){ const g=document.getElementById('statusGrid'); g.innerHTML=''; STATUS_ORDER.forEach(code=>{ const id='st_'+code; const lab=document.createElement('label'); lab.innerHTML=`<input type="checkbox" id="${id}" value="${code}"> <span>${ruLabel(code)}</span>`; lab.querySelector('input').checked = window.STATUS_SELECTED.has(code); lab.querySelector('input').addEventListener('change', (e)=>{ if(e.target.checked) window.STATUS_SELECTED.add(code); else window.STATUS_SELECTED.delete(code); renderStatusChips(); syncStatesInput(); }); g.appendChild(lab); }); }
+function renderStatusChips(){ const box=document.getElementById('statusChips'); box.innerHTML=''; if(window.STATUS_SELECTED.size===0){ box.innerHTML='<span class="muted">ничего не выбрано</span>'; return; } [...window.STATUS_SELECTED].forEach(code=>{ const c=document.createElement('span'); c.className='chip'; c.innerHTML=`${ruLabel(code)}<span class="x" title="убрать">×</span>`; c.querySelector('.x').onclick=()=>{ window.STATUS_SELECTED.delete(code); renderStatusChips(); renderStatusGrid(); syncStatesInput(); }; box.appendChild(c); }); }
+function normalizeStatesValue(val){ if(!val) return ''; const merged = new Set(); val.split(/[\s,;]+/).filter(Boolean).forEach(raw=>{ const t = raw.trim(); const code = LABEL_TO_CODE[t.toLowerCase()] || t.toUpperCase(); merged.add(code); }); return [...merged].join(','); }
+function syncStatesInput(){ const inp=document.getElementById('states'); const manual = normalizeStatesValue((inp.value||'').trim()); const fromSet = [...window.STATUS_SELECTED]; const merged = new Set(); if(manual){ manual.split(',').forEach(x=>merged.add(x)); } fromSet.forEach(x=>merged.add(x)); inp.value = [...merged].filter(Boolean).join(','); }
+function openStatusMenu(){ const m=document.getElementById('statusMenu'); m.classList.add('open'); renderStatusGrid(); const close=(ev)=>{ if(!m.contains(ev.target) && !document.getElementById('btnStates').contains(ev.target)){ m.classList.remove('open'); document.removeEventListener('click', close, true); } }; setTimeout(()=>document.addEventListener('click', close, true),0); }
 
-function renderStatusGrid(){
-  const g=document.getElementById('statusGrid'); g.innerHTML='';
-  STATUS_ORDER.forEach(code=>{
-    const id='st_'+code;
-    const lab=document.createElement('label');
-    lab.innerHTML=`<input type="checkbox" id="${id}" value="${code}"> <span>${ruLabel(code)}</span>`;
-    lab.querySelector('input').checked = window.STATUS_SELECTED.has(code);
-    lab.querySelector('input').addEventListener('change', (e)=>{
-      if(e.target.checked) window.STATUS_SELECTED.add(code); else window.STATUS_SELECTED.delete(code);
-      renderStatusChips(); syncStatesInput();
-    });
-    g.appendChild(lab);
-  });
-}
-function renderStatusChips(){
-  const box=document.getElementById('statusChips'); box.innerHTML='';
-  if(window.STATUS_SELECTED.size===0){ box.innerHTML='<span class="muted">ничего не выбрано</span>'; return; }
-  [...window.STATUS_SELECTED].forEach(code=>{
-    const c=document.createElement('span'); c.className='chip'; c.innerHTML=`${ruLabel(code)}<span class="x" title="убрать">×</span>`;
-    c.querySelector('.x').onclick=()=>{ window.STATUS_SELECTED.delete(code); renderStatusChips(); renderStatusGrid(); syncStatesInput(); };
-    box.appendChild(c);
-  });
-}
-function normalizeStatesValue(val){
-  if(!val) return '';
-  const merged = new Set();
-  val.split(/[\s,;]+/).filter(Boolean).forEach(raw=>{
-    const t = raw.trim();
-    const code = LABEL_TO_CODE[t.toLowerCase()] || t.toUpperCase();
-    merged.add(code);
-  });
-  return [...merged].join(',');
-}
-function syncStatesInput(){
-  const inp=document.getElementById('states');
-  const manual = normalizeStatesValue((inp.value||'').trim());
-  const fromSet = [...window.STATUS_SELECTED];
-  const merged = new Set();
-  if(manual){ manual.split(',').forEach(x=>merged.add(x)); }
-  fromSet.forEach(x=>merged.add(x));
-  inp.value = [...merged].filter(Boolean).join(',');
-}
-function openStatusMenu(){
-  const m=document.getElementById('statusMenu');
-  m.classList.add('open'); renderStatusGrid();
-  const close=(ev)=>{ if(!m.contains(ev.target) && !document.getElementById('btnStates').contains(ev.target)){ m.classList.remove('open'); document.removeEventListener('click', close, true); } };
-  setTimeout(()=>document.addEventListener('click', close, true),0);
-}
-
-const DATE_FIELD_LABELS = {
-  creationDate: 'Создание заказа',
-  plannedShipmentDate: 'План передачи',
-  shipmentDate: 'Фактическая передача',
-  deliveryDate: 'Фактическая доставка'
-};
+const DATE_FIELD_LABELS = { creationDate:'Создание заказа', plannedShipmentDate:'План передачи', shipmentDate:'Фактическая передача', deliveryDate:'Фактическая доставка' };
 
 async function loadMeta(){
   try {
     const meta = await fetch('/meta').then(r=>r.json());
     const sel = document.getElementById('date_field');
     sel.innerHTML = '';
-    (meta.date_field_options || ['creationDate']).forEach(v=>{
-      const o=document.createElement('option'); o.value=v; o.textContent=DATE_FIELD_LABELS[v] || v; sel.appendChild(o);
-    });
+    (meta.date_field_options || ['creationDate']).forEach(v=>{ const o=document.createElement('option'); o.value=v; o.textContent=DATE_FIELD_LABELS[v] || v; sel.appendChild(o); });
     sel.value = meta.date_field_default || 'creationDate';
     document.getElementById('tz').value = meta.timezone || 'Asia/Almaty';
     document.getElementById('bd_start').value = meta.business_day_start || '20:00';
@@ -369,7 +340,6 @@ async function loadMeta(){
   const today = new Date(); const iso = d=>d.toISOString().slice(0,10);
   document.getElementById('start').value = iso(today);
   document.getElementById('end').value   = iso(today);
-
   renderStatusChips();
 }
 
@@ -469,7 +439,7 @@ function buildOrderItemsTable(group, currency){
   return table;
 }
 
-/* → СИНХРОНИЗАЦИЯ МОСТА: из результата ids.async соберём плоские строки и отправим в /profit/bridge/sync-by-ids */
+/* → СИНХРОНИЗАЦИЯ МОСТА */
 async function syncBridgeFromIdsData(data){
   try{
     const items = [];
@@ -522,23 +492,44 @@ async function syncBridgeFromIdsData(data){
   }
 }
 
-/* Новый рендер FIFO-таблицы (№ заказа → позиции, в одном читабельном табличном виде) */
+/* ——— FIFO таблица по ТОЧНОМУ СПИСКУ заказов из ids ——— */
+async function fetchEnrichedByCodes(codes, order='asc'){
+  if(!codes || !codes.length) return {orders:[], stats:{orders:0,lines:0,revenue:0,cost:0,profit:0}};
+  const chunkSize = 150; // чтобы URL не раздувался
+  const parts = [];
+  for(let i=0;i<codes.length;i+=chunkSize) parts.push(codes.slice(i,i+chunkSize));
+
+  let mergedOrders=[], stats={orders:0,lines:0,revenue:0,cost:0,profit:0};
+  for(const chunk of parts){
+    const url = '/profit/bridge/by-orders-enriched?' + new URLSearchParams({ codes: chunk.join(','), order }).toString();
+    const data = await fetchBridgeJSON(url);
+    mergedOrders = mergedOrders.concat(data.orders||[]);
+    const s = data.stats||{};
+    stats.revenue += Number(s.revenue||0); stats.cost += Number(s.cost||0); stats.profit += Number(s.profit||0);
+    stats.lines  += Number(s.lines||0);
+  }
+  // грубая сортировка по дате
+  mergedOrders.sort((a,b)=> String(a.date||'').localeCompare(String(b.date||'')));
+  stats.orders = mergedOrders.length;
+  stats.revenue = Math.round(stats.revenue*100)/100;
+  stats.cost    = Math.round(stats.cost*100)/100;
+  stats.profit  = Math.round(stats.profit*100)/100;
+  return {orders:mergedOrders, stats};
+}
+
 async function renderBridgeTable(){
-  const df=document.getElementById('start').value;
-  const dt=document.getElementById('end').value;
-  const states = normalizeStatesValue(document.getElementById('states').value) || 'KASPI_DELIVERY';
   const box=document.getElementById('fifoBridgeTable');
   const info=document.getElementById('fifoBridgeInfo');
   box.innerHTML='Загружаем…'; box.classList.remove('muted');
 
   try{
-    const url = '/profit/bridge/by-orders?' + new URLSearchParams({
-      date_from: df, date_to: dt, state: states, order: 'asc'
-    }).toString();
-    const data = await (await fetch(url)).json();
+    const codes = window.__allOrderCodes||[];
+    if(!codes.length){ box.classList.add('muted'); box.textContent='Нет данных'; info.textContent=''; return; }
+
+    const data = await fetchEnrichedByCodes(codes, 'asc');
+    const orders = data.orders||[];
     const cur = window.APP_CURRENCY || 'KZT';
 
-    const orders = data.orders || [];
     if(!orders.length){ box.classList.add('muted'); box.textContent='Нет данных'; info.textContent=''; return; }
 
     const tbl=document.createElement('table'); tbl.className='table';
@@ -551,17 +542,21 @@ async function renderBridgeTable(){
         <th>Название</th>
         <th class="nowrap">Qty</th>
         <th class="nowrap">Сумма строки</th>
+        <th class="nowrap">Себестоимость</th>
+        <th class="nowrap">Прибыль</th>
       </tr>
     </thead><tbody></tbody>`;
     const tb=tbl.querySelector('tbody');
 
-    let totalLines=0, totalRevenue=0;
+    let totalLines=0, totalRevenue=0, totalCost=0, totalProfit=0;
+
     for(const ord of orders){
       const items = ord.items||[];
       if(!items.length) continue;
       totalLines += items.length;
       let first=true;
-      items.forEach((it, idx)=>{
+
+      items.forEach((it)=>{
         const tr=document.createElement('tr');
 
         if(first){
@@ -574,27 +569,41 @@ async function renderBridgeTable(){
         const tdSku=document.createElement('td'); tdSku.textContent = it.sku || ''; tr.appendChild(tdSku);
         const tdTitle=document.createElement('td'); tdTitle.textContent = it.title || ''; tr.appendChild(tdTitle);
         const tdQty=document.createElement('td'); tdQty.textContent = String(it.qty||1); tdQty.className='nowrap'; tr.appendChild(tdQty);
-        const tdSum=document.createElement('td'); const s=Number(it.total_price||0); totalRevenue += s; tdSum.textContent = `${fmt(s)} ${cur}`; tdSum.className='nowrap'; tr.appendChild(tdSum);
+
+        const sum=Number(it.total_price||0), cost=Number(it.cost||0), profit=Number(it.profit|| (sum-cost));
+        totalRevenue += sum; totalCost += cost; totalProfit += profit;
+
+        const tdSum=document.createElement('td'); tdSum.textContent = `${fmt(sum)} ${cur}`; tdSum.className='nowrap'; tr.appendChild(tdSum);
+        const tdCost=document.createElement('td'); tdCost.textContent = `${fmt(cost)} ${cur}`; tdCost.className='nowrap'; tr.appendChild(tdCost);
+        const tdProfit=document.createElement('td'); tdProfit.textContent = `${fmt(profit)} ${cur}`; tdProfit.className='nowrap'; tr.appendChild(tdProfit);
 
         tb.appendChild(tr);
       });
 
       // строка «Итого по заказу»
+      const rev = Number(ord?.totals?.revenue||items.reduce((a,x)=>a+(Number(x.total_price||0)),0));
+      const cc  = Number(ord?.totals?.cost   ||items.reduce((a,x)=>a+(Number(x.cost||0)),0));
+      const pp  = Number(ord?.totals?.profit ||(rev-cc));
       const trTotal=document.createElement('tr'); trTotal.className='muted';
-      const tdSpacer=document.createElement('td'); tdSpacer.colSpan=3; tdSpacer.textContent=''; trTotal.appendChild(tdSpacer);
+      const tdSpacer=document.createElement('td'); tdSpacer.colSpan=3; trTotal.appendChild(tdSpacer);
       const tdLabel=document.createElement('td'); tdLabel.colSpan=3; tdLabel.textContent='Итого по заказу'; trTotal.appendChild(tdLabel);
-      const tdVal=document.createElement('td'); tdVal.textContent=`${fmt((ord.totals&&ord.totals.revenue)||items.reduce((a,x)=>a+(Number(x.total_price||0)),0))} ${cur}`; tdVal.className='nowrap'; trTotal.appendChild(tdVal);
+      const tdRev=document.createElement('td'); tdRev.textContent=`${fmt(rev)} ${cur}`; trTotal.appendChild(tdRev);
+      const tdC=document.createElement('td'); tdC.textContent=`${fmt(cc)} ${cur}`; trTotal.appendChild(tdC);
+      const tdP=document.createElement('td'); tdP.textContent=`${fmt(pp)} ${cur}`; trTotal.appendChild(tdP);
       tb.appendChild(trTotal);
     }
 
-    info.textContent = `Заказов: ${fmt(orders.length)} · Позиции: ${fmt(totalLines)} · Выручка: ${fmt(totalRevenue)} ${cur}`;
+    info.textContent = `Заказов: ${fmt(orders.length)} · Позиции: ${fmt(totalLines)} · Выручка: ${fmt(totalRevenue)} ${cur} · Себестоимость: ${fmt(totalCost)} ${cur} · Прибыль: ${fmt(totalProfit)} ${cur}`;
     box.innerHTML=''; box.appendChild(tbl);
   }catch(e){
     box.className='muted'; box.textContent='Ошибка: ' + (e.message||e);
     info.textContent='';
   }
 }
+</script>
 
+<script>
+/* ─────────── сбор параметров и ids.async ─────────── */
 function buildParams(){
   const start = document.getElementById('start').value;
   const end   = document.getElementById('end').value;
@@ -633,9 +642,7 @@ async function runIdsJob(){
   CURRENT_JOB_ID = job_id;
 
   const cancelBtn = document.getElementById('btnCancelJob');
-  if(cancelBtn) cancelBtn.onclick = async () => {
-    try{ await fetch(`/jobs/${job_id}`, {method:'DELETE'}); }catch(_){}
-  };
+  if(cancelBtn) cancelBtn.onclick = async () => { try{ await fetch(`/jobs/${job_id}`, {method:'DELETE'}); }catch(_){} };
 
   let done=false, errored=false;
   while(!done && !errored){
@@ -659,6 +666,9 @@ async function runIdsJob(){
       const rr = await fetch(`/jobs/${job_id}/result`);
       const data = await rr.json();
       CURRENT_JOB_ID=null;
+
+      // хранение списка кодов для точной выборки
+      window.__allOrderCodes = Array.from(new Set((data.items||[]).map(it=>String(it.number||'').trim()).filter(Boolean)));
 
       // ← обязательно: прокидываем строки в мост
       await syncBridgeFromIdsData(data);
@@ -729,33 +739,41 @@ async function renderIdsResult(data){
 </script>
 
 <script>
+/* ─────────── MS: синхронизация себестоимости (опционально) ─────────── */
+document.addEventListener('DOMContentLoaded', ()=>{
+  document.getElementById('btnSyncMsCosts')?.addEventListener('click', syncMsCosts);
+});
+async function syncMsCosts(){
+  try{
+    setBusy(true);
+    const df=document.getElementById('start').value;
+    const dt=document.getElementById('end').value;
+    const url='/profit/bridge/ms/sync-costs?'+new URLSearchParams({date_from:df,date_to:dt}).toString();
+    const j=await fetchBridgeJSON(url,{method:'POST'});
+    setNote(`Себестоимость из МС обновлена: ${j.synced||0} SKU`, 'ok');
+    await renderBridgeTable();
+  }catch(e){ setNote('MS sync: ' + (e.message||e), 'err'); }
+  finally{ setBusy(false); }
+}
+</script>
+
+<script>
 /* ─────────── BOOT ─────────── */
 document.addEventListener('DOMContentLoaded', async () => {
   try{
     await loadMeta();
 
     document.getElementById('btnStates')?.addEventListener('click', openStatusMenu);
-    document.getElementById('btnStatusesAll')?.addEventListener('click', ()=>{
-      STATUS_ORDER.forEach(k=>window.STATUS_SELECTED.add(k));
-      renderStatusGrid(); renderStatusChips(); syncStatesInput();
-    });
-    document.getElementById('btnStatusesClear')?.addEventListener('click', ()=>{
-      window.STATUS_SELECTED.clear(); renderStatusGrid(); renderStatusChips(); syncStatesInput();
-    });
-    document.getElementById('btnStatusesApply')?.addEventListener('click', ()=>{
-      document.getElementById('statusMenu').classList.remove('open'); syncStatesInput();
-    });
+    document.getElementById('btnStatusesAll')?.addEventListener('click', ()=>{ STATUS_ORDER.forEach(k=>window.STATUS_SELECTED.add(k)); renderStatusGrid(); renderStatusChips(); syncStatesInput(); });
+    document.getElementById('btnStatusesClear')?.addEventListener('click', ()=>{ window.STATUS_SELECTED.clear(); renderStatusGrid(); renderStatusChips(); syncStatesInput(); });
+    document.getElementById('btnStatusesApply')?.addEventListener('click', ()=>{ document.getElementById('statusMenu').classList.remove('open'); syncStatesInput(); });
 
-    document.getElementById('states')?.addEventListener('blur', ()=>{
-      document.getElementById('states').value = normalizeStatesValue(document.getElementById('states').value);
-    });
+    document.getElementById('states')?.addEventListener('blur', ()=>{ document.getElementById('states').value = normalizeStatesValue(document.getElementById('states').value); });
 
     document.getElementById('f')?.addEventListener('submit', run);
     document.getElementById('themeToggle')?.addEventListener('change', (e)=>{ document.body.setAttribute('data-theme', e.target.checked ? 'dark' : 'light'); });
 
-    ['use_bd','bd_start','assign_mode','store_until'].forEach(id=>{
-      const el=document.getElementById(id); if(el) el.addEventListener('change', uiModeHint);
-    });
+    ['use_bd','bd_start','assign_mode','store_until'].forEach(id=>{ const el=document.getElementById(id); if(el) el.addEventListener('change', uiModeHint); });
 
     uiModeHint();
     await run(); // initial
