@@ -30,7 +30,7 @@
     .btn[disabled]{opacity:.5;pointer-events:none}
 
     .shell{border:1px solid var(--line);background:var(--card);border-radius:14px;padding:12px;margin:16px 0}
-    .kpi{display:flex;gap:12px;flex-wrap:wrap}
+    .kpi{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px}
     .kpi-item{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 12px;min-width:170px}
     .kpi-label{font-size:12px;color:var(--muted)}
     .kpi-value{font-size:22px;font-weight:700}
@@ -47,14 +47,11 @@
     .order-table{width:100%;border-collapse:collapse;margin:6px 0 12px}
     .order-table th,.order-table td{padding:6px 8px;border-bottom:1px solid var(--line);font-size:13px}
 
-    .note{margin:8px 0 12px;padding:10px 12px;border-radius:10px;display:none;position:relative}
-    .note.ok,.note.progress{display:block;background:color-mix(in oklab, var(--accent) 14%, transparent);border:1px solid color-mix(in oklab, var(--accent) 48%, transparent);color:var(--fg)}
-    .note.err{display:block;background:color-mix(in oklab, var(--danger) 14%, transparent);border:1px solid color-mix(in oklab, var(--danger) 48%, transparent);color:var(--fg)}
+    /* уведомления — НЕ перекрывают контент */
+    .note{margin:12px 0 12px;padding:10px 12px;border-radius:10px;display:none;border:1px solid transparent}
+    .note.ok{display:block;background:color-mix(in oklab, var(--accent) 14%, transparent);border-color:color-mix(in oklab, var(--accent) 48%, transparent);color:var(--fg)}
+    .note.err{display:block;background:color-mix(in oklab, var(--danger) 14%, transparent);border-color:color-mix(in oklab, var(--danger) 48%, transparent);color:var(--fg)}
     .note .small{font-size:12px;color:var(--muted)}
-    .note.progress{position:sticky; top:8px; z-index:6000; box-shadow:0 8px 24px rgba(0,0,0,.15)}
-
-    .progress {height:12px;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:rgba(255,255,255,.06);margin-top:6px}
-    .progress .bar{height:100%;width:0%;background:var(--accent);transition:width .2s cubic-bezier(.4,0,.2,1)}
 
     #topLoader{position:sticky; top:0; left:0; right:0; height:3px; z-index:7000; background:transparent}
     #topLoader .bar{height:100%; width:0%; background:var(--accent); transition:width .2s cubic-bezier(.4,0,.2,1)}
@@ -63,11 +60,6 @@
     .ids-actions{display:flex;gap:8px;margin:8px 0;flex-wrap:wrap}
     .ids-groups details{margin:8px 0}
     .pill{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:4px 8px;margin:2px 4px 0 0;background:var(--card)}
-
-    /* Быстрые периоды */
-    .segment{display:inline-flex;border:1px solid var(--line);border-radius:10px;overflow:hidden}
-    .segment button{border:0;background:var(--card);color:var(--fg);padding:4px 10px;cursor:pointer}
-    .segment button.active{background:var(--accent);color:white}
   </style>
 </head>
 <body data-theme="light">
@@ -98,20 +90,12 @@
           <label>Конец</label><input type="date" id="end" required>
           <label>Часовой пояс</label><input type="text" id="tz" value="Asia/Almaty" style="width:140px">
           <label>Поле даты</label><select id="date_field" style="width:220px"></select>
-          <div style="margin-left:auto" class="row">
-            <span class="muted">Период:</span>
-            <div class="segment" id="quickRange">
-              <button type="button" id="rngDay">День</button>
-              <button type="button" id="rngWeek">Неделя</button>
-              <button type="button" id="rngMonth">Месяц</button>
-            </div>
-          </div>
         </div>
 
         <div class="row" style="margin-top:8px">
           <div class="status-control">
             <label>Статусы (включить)</label>
-            <input type="text" id="states" placeholder="через запятую: Новый, Доставлен…" style="min-width:320px" />
+            <input type="text" id="states" placeholder="через запятую: NEW, DELIVERED…" style="min-width:320px" />
             <button class="btn secondary" id="btnStates" type="button">Выбрать</button>
             <div id="statusChips" class="chips"></div>
 
@@ -162,7 +146,7 @@
         <div class="kpi-item"><div class="kpi-label">Оборот</div><div class="kpi-value" id="kpiAmount">0</div></div>
       </section>
 
-      <!-- FIFO: Заказы и позиции -->
+      <!-- FIFO: Заказы и позиции (по /profit/bridge/*) -->
       <section class="shell">
         <div class="row" style="justify-content:space-between;align-items:center;">
           <h2 style="margin:0">FIFO: Заказы и позиции</h2>
@@ -219,29 +203,10 @@ function setTopLoader(p){
 
 function setNote(msg, mode='ok'){
   const el = document.getElementById('note');
-  el.className = 'note ' + (mode==='progress' ? 'progress' : mode);
-  if(mode==='progress'){
-    el.innerHTML = `
-      <div style="font-weight:600">${msg}</div>
-      <div class="small" id="jobText">Подготовка…</div>
-      <div class="progress"><div class="bar" id="jobBar" style="width:0%"></div></div>
-      <div class="row" style="margin-top:6px">
-        <button class="btn secondary" id="btnCancelJob" type="button">Отменить</button>
-      </div>`;
-    setTopLoader(0.04);
-  }else{
-    el.textContent = msg;
-    setTopLoader(0);
-  }
+  el.className = 'note ' + (mode==='progress' ? 'ok' : mode); // без «липкого» режима
+  el.textContent = msg;
   el.style.display = 'block';
-}
-function updateProgress(phase, done, total, pct, msg){
-  const t = document.getElementById('jobText');
-  const b = document.getElementById('jobBar');
-  const txt = `${phase==='scan'?'Выгружаем номера заказов':'Обогащаем SKU'} — ${done}/${Math.max(1,total)} · ${Math.round(pct*100)}%` + (msg?` · ${msg}`:'');
-  if(t) t.textContent = txt;
-  if(b) b.style.width = `${Math.max(1, Math.round(pct*100))}%`;
-  setTopLoader(pct);
+  if(mode==='progress'){ setTopLoader(0.04); } else { setTopLoader(0); }
 }
 window.addEventListener('error', e => setNote(e?.error?.message || e.message || 'Ошибка', 'err'));
 window.addEventListener('unhandledrejection', e => setNote(e?.reason?.message || String(e.reason) || 'Ошибка', 'err'));
@@ -363,7 +328,10 @@ async function loadMeta(){
     document.getElementById('bd_start').value = meta.business_day_start || '20:00';
     document.getElementById('store_until').value = meta.store_accept_until || '17:00';
   } catch(_){}
-  setQuickRange('day'); // по умолчанию «сегодня»
+  // по умолчанию — сегодня
+  const d=new Date(); const z=n=>String(n).padStart(2,'0'); const ymd=`${d.getFullYear()}-${z(d.getMonth()+1)}-${z(d.getDate())}`;
+  document.getElementById('start').value = ymd;
+  document.getElementById('end').value   = ymd;
   renderStatusChips();
 }
 
@@ -407,7 +375,6 @@ async function run(e){
     document.getElementById('periodLabel').textContent = `${data.range?.start||start} → ${data.range?.end||end}`;
     document.getElementById('periodCutoff').textContent = (use_bd==='1' ? (bd_start || '20:00') : '24:00');
     uiModeHint();
-    updateQuickRangeActive(); // подсветка сегмента
 
     // состояния
     const sb = document.getElementById('statesBox');
@@ -427,7 +394,7 @@ async function run(e){
       citiesChart = new Chart(ctx,{type:'bar',data:{labels,datasets:[{label:'Заказы',data:counts}]},options:{responsive:true,plugins:{legend:{display:false}}}});
     }
 
-    // → выгружаем ids, сингкуем мост и рисуем FIFO ровно по этим кодам
+    // → выгружаем ids, синхронизируем мост и рисуем FIFO ровно по этим кодам
     await runIdsJob();
     await renderBridgeTable();
 
@@ -672,7 +639,7 @@ async function runIdsJob(){
     if(st.status==='error'){ errored=true; setNote('Ошибка: '+(st.message||'неизвестно'), 'err'); break; }
     if(st.status==='canceled'){ errored=true; setNote('Операция отменена', 'err'); break; }
 
-    updateProgress(st.phase, st.done||0, st.total||1, Math.max(0, Math.min(1, st.progress||0)), st.message||'');
+    setTopLoader(Math.max(0, Math.min(1, st.progress||0)));
 
     if(st.status==='done'){
       done=true;
@@ -768,48 +735,6 @@ async function syncMsCosts(){
   }catch(e){ setNote('MS sync: ' + (e.message||e), 'err'); }
   finally{ setBusy(false); }
 }
-</script>
-
-<script>
-/* ─────────── Быстрые периоды: День / Неделя / Месяц ─────────── */
-function nowInTZ(){
-  const tz=document.getElementById('tz')?.value || 'Asia/Almaty';
-  return new Date(new Date().toLocaleString('en-US',{timeZone:tz}));
-}
-function ymd(d){ const z=n=>String(n).padStart(2,'0'); return `${d.getFullYear()}-${z(d.getMonth()+1)}-${z(d.getDate())}`; }
-function setQuickRange(mode){
-  const d = nowInTZ();
-  let start=d, end=d;
-  if(mode==='day'){
-    // start/end = сегодня
-  }else if(mode==='week'){
-    const w = new Date(d); const day=w.getDay(); const diff=(day===0?6:day-1); // понедельник
-    w.setDate(w.getDate()-diff); start=w; end=d;
-  }else if(mode==='month'){
-    start=new Date(d.getFullYear(), d.getMonth(), 1);
-    end=d;
-  }
-  document.getElementById('start').value = ymd(start);
-  document.getElementById('end').value   = ymd(end);
-  updateQuickRangeActive();
-}
-function updateQuickRangeActive(){
-  const s=document.getElementById('start').value, e=document.getElementById('end').value;
-  const d = nowInTZ(); const today=ymd(d);
-  const w = new Date(d); const diff=(w.getDay()===0?6:w.getDay()-1); w.setDate(w.getDate()-diff);
-  const monday=ymd(w);
-  const mFirst=ymd(new Date(d.getFullYear(), d.getMonth(), 1));
-  const byId=id=>document.getElementById(id)?.classList;
-
-  byId('rngDay')?.toggle('active', s===today && e===today);
-  byId('rngWeek')?.toggle('active', s===monday && e===today);
-  byId('rngMonth')?.toggle('active', s===mFirst && e===today);
-}
-document.addEventListener('DOMContentLoaded', ()=>{
-  document.getElementById('rngDay')?.addEventListener('click', ()=>{ setQuickRange('day'); run(); });
-  document.getElementById('rngWeek')?.addEventListener('click', ()=>{ setQuickRange('week'); run(); });
-  document.getElementById('rngMonth')?.addEventListener('click', ()=>{ setQuickRange('month'); run(); });
-});
 </script>
 
 <script>
