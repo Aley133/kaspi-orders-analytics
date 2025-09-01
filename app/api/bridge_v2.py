@@ -1,31 +1,44 @@
 # app/api/bridge_v2.py
 from __future__ import annotations
 
-from typing import List, Dict, Any, Optional, Tuple, DefaultDict, Literal
-from collections import defaultdict
-from pydantic import BaseModel
-from fastapi import APIRouter, Body, HTTPException, Query
-import os, sqlite3, httpx, math
+import os
+import math
+import sqlite3
 from datetime import datetime
+from collections import defaultdict
+from typing import Any, DefaultDict, Dict, List, Literal, Optional, Tuple
 
+import httpx
+from fastapi import APIRouter, Body, HTTPException, Query
+from pydantic import BaseModel
+
+# Маршрутизатор подключается в основном приложении под префиксом `/profit`,
+# поэтому конечные пути выглядят как `/profit/bridge/...`
 router = APIRouter(prefix="/bridge")
 
 # ─────────────────────────────────────────────────────────────────────
 # Конфигурация
 # ─────────────────────────────────────────────────────────────────────
+
+# Источник "номера заказов" (микросервис /orders/ids) — URL бэкенда
+ORDERS_SERVICE_URL = (os.getenv("ORDERS_SERVICE_URL") or "http://127.0.0.1:8000").rstrip("/")
+# Использовать ли онлайн-источник для by-orders-margins (а не локальную таблицу bridge_sales)
+BRIDGE_SOURCE_IDS = (os.getenv("BRIDGE_SOURCE_IDS", "1").lower() in ("1", "true", "yes"))
+
+# Ограничение по статусу (чтобы мост не засорялся лишними строками)
 BRIDGE_ONLY_STATE = (os.getenv("BRIDGE_ONLY_STATE") or "KASPI_DELIVERY").strip() or None
 
+# Таблица агрегированных проводок FIFO (если она есть, распределим по строкам заказа)
+FIFO_LEDGER_TABLE = (os.getenv("FIFO_LEDGER_TABLE") or "fifo_ledger").strip()
+
+# Ключ/доступ к Kaspi для фолбэка (если строка пришла без SKU)
 KASPI_FALLBACK_ENABLED = (os.getenv("KASPI_FALLBACK_ENABLED", "0").lower() in ("1", "true", "yes"))
 KASPI_TOKEN   = os.getenv("KASPI_TOKEN", "").strip()
 KASPI_BASEURL = (os.getenv("KASPI_BASE_URL") or "https://kaspi.kz/shop/api/v2").rstrip("/")
 
-FIFO_LEDGER_TABLE = (os.getenv("FIFO_LEDGER_TABLE") or "fifo_ledger").strip()
-
-ORDERS_SERVICE_URL = (os.getenv("ORDERS_SERVICE_URL") or "http://127.0.0.1:8000").rstrip("/")
-BRIDGE_SOURCE_IDS  = (os.getenv("BRIDGE_SOURCE_IDS", "1").lower() in ("1", "true", "yes"))
-
 HTTPX_TIMEOUT = httpx.Timeout(connect=10.0, read=40.0, write=15.0, pool=40.0)
 HTTPX_LIMITS  = httpx.Limits(max_connections=30, max_keepalive_connections=10)
+
 
 def _kaspi_headers() -> Dict[str, str]:
     if not KASPI_TOKEN:
@@ -36,23 +49,39 @@ def _kaspi_headers() -> Dict[str, str]:
         "Content-Type": "application/vnd.api+json",
     }
 
+
 # ─────────────────────────────────────────────────────────────────────
-# База данных с fallback на SQLite при отсутствии psycopg2
+# База данных
 # ─────────────────────────────────────────────────────────────────────
-PRI_DB_URL = os.getenv("PROFIT_DB_URL") or os.getenv("DATABASE_URL") or "sqlite:///./profit.db"
-FALLBACK_DB_URL = os.getenv("BRIDGE_FALLBACK_DB_URL", "sqlite:///./profit_bridge.db")
+# ВАЖНО: мост использует ту же БД, что и модуль products.py
+# По умолчанию это общий путь `/data/kaspi-orders.sqlite3`.
+def _resolve_shared_sqlite_url() -> str:
+    db_path = os.getenv("DB_PATH", "/data/kaspi-orders.sqlite3")
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    return f"sqlite:///{db_path}"
+
+
+# Если есть полноценный DATABASE_URL (PG), используем его, иначе — общий SQLite-файл
+PRI_DB_URL      = os.getenv("PROFIT_DB_URL") or os.getenv("DATABASE_URL") or _resolve_shared_sqlite_url()
+FALLBACK_DB_URL = os.getenv("BRIDGE_FALLBACK_DB_URL", _resolve_shared_sqlite_url())
 
 _ACTUAL_DB_URL = PRI_DB_URL
 _FALLBACK_USED = False
 
+
 def _driver_name() -> str:
     return "sqlite" if _ACTUAL_DB_URL.startswith("sqlite") else "pg"
+
 
 def _sqlite_path(url: str) -> str:
     return url.split("sqlite:///")[-1]
 
+
 def _get_conn():
-    """Вернёт conn к PG, а при отсутствии psycopg2 — переключится на SQLite без 500 ошибок."""
+    """
+    Возвращает подключение к БД.
+    Если настроен PG, но отсутствует psycopg2 — тихо переключаемся на SQLite (fallback).
+    """
     global _ACTUAL_DB_URL, _FALLBACK_USED
     if _ACTUAL_DB_URL.startswith("sqlite"):
         c = sqlite3.connect(_sqlite_path(_ACTUAL_DB_URL))
@@ -67,6 +96,11 @@ def _get_conn():
         c = sqlite3.connect(_sqlite_path(_ACTUAL_DB_URL))
         c.row_factory = sqlite3.Row
         return c
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Инициализация схемы (страховки)
+# ─────────────────────────────────────────────────────────────────────
 
 def _init_bridge_sales() -> None:
     """Таблица с плоскими строками продаж: каждая позиция заказа — отдельная строка."""
@@ -112,13 +146,87 @@ def _init_bridge_sales() -> None:
             cur.execute("CREATE INDEX IF NOT EXISTS ix_bridge_sales_code ON bridge_sales(order_code)")
         c.commit()
 
+
+def _ensure_catalog_schema() -> None:
+    """
+    На случай «пустой» БД создаём базовые справочные таблицы products/categories/batches,
+    чтобы фолбэк-логика могла работать. Если таблицы уже есть — NOOP.
+    """
+    with _get_conn() as c:
+        cur = c.cursor()
+        if _driver_name() == "sqlite":
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS products(
+              sku TEXT PRIMARY KEY,
+              name TEXT, brand TEXT, category TEXT,
+              price REAL, active INTEGER DEFAULT 1
+            )""")
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS categories(
+              name TEXT PRIMARY KEY,
+              base_percent REAL DEFAULT 0,
+              extra_percent REAL DEFAULT 0,
+              tax_percent REAL DEFAULT 0
+            )""")
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS batches(
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              sku TEXT NOT NULL,
+              date TEXT NOT NULL,
+              qty INTEGER NOT NULL,
+              qty_sold INTEGER DEFAULT 0,
+              unit_cost REAL NOT NULL,
+              commission_pct REAL,
+              batch_code TEXT,
+              note TEXT
+            )""")
+        else:
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS products(
+              sku TEXT PRIMARY KEY,
+              name TEXT, brand TEXT, category TEXT,
+              price DOUBLE PRECISION, active BOOLEAN
+            )""")
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS categories(
+              name TEXT PRIMARY KEY,
+              base_percent DOUBLE PRECISION DEFAULT 0,
+              extra_percent DOUBLE PRECISION DEFAULT 0,
+              tax_percent DOUBLE PRECISION DEFAULT 0
+            )""")
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS batches(
+              id SERIAL PRIMARY KEY,
+              sku TEXT NOT NULL,
+              date DATE NOT NULL,
+              qty INTEGER NOT NULL,
+              qty_sold INTEGER DEFAULT 0,
+              unit_cost DOUBLE PRECISION NOT NULL,
+              commission_pct DOUBLE PRECISION,
+              batch_code TEXT,
+              note TEXT
+            )""")
+        c.commit()
+
+
+# Вызываем страховочные инициализации при импорте модуля
+try:
+    _init_bridge_sales()
+    _ensure_catalog_schema()
+except Exception:
+    # Не блокируем импорт; ошибки будут видны при первом вызове ручек.
+    pass
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Утилиты
+# ─────────────────────────────────────────────────────────────────────
+
 def _chunked(items: List[Dict[str, Any]], n: int = 500):
     for i in range(0, len(items), n):
         yield items[i:i + n]
 
-# ─────────────────────────────────────────────────────────────────────
-# Хелперы нормализации/арифметики
-# ─────────────────────────────────────────────────────────────────────
+
 def _canon_str(x: Optional[str], maxlen: int = 512) -> Optional[str]:
     if x is None:
         return None
@@ -127,25 +235,30 @@ def _canon_str(x: Optional[str], maxlen: int = 512) -> Optional[str]:
         return None
     return s[:maxlen]
 
+
 def _canon_sku(x: Optional[str]) -> Optional[str]:
     s = _canon_str(x, 128)
     if s is None:
         return None
+    # частый мусор из Excel «1234567890123.0»
     if s.endswith(".0") and s.replace(".", "", 1).isdigit():
         s = s[:-2]
     return s
+
 
 def _to_ms(x) -> Optional[int]:
     if x is None:
         return None
     try:
         xi = int(x)
+        # если секунды — переведём в миллисекунды
         return xi if xi > 10_000_000_000 else xi * 1000
     except Exception:
         try:
             return int(datetime.fromisoformat(str(x).replace("Z", "+00:00")).timestamp() * 1000)
         except Exception:
             return None
+
 
 def _safe_float(x: Any, default: float = 0.0) -> float:
     try:
@@ -156,14 +269,31 @@ def _safe_float(x: Any, default: float = 0.0) -> float:
     except Exception:
         return default
 
+
 def _line_total(qty: int, unit: float, total: Optional[float]) -> float:
     if total is not None and _safe_float(total, -1) >= 0:
         return float(total)
     return float(_safe_float(unit) * max(1, int(qty or 0)))
 
+
+def _table_exists(conn, name: str) -> bool:
+    try:
+        cur = conn.cursor()
+        if _driver_name() == "sqlite":
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (name,))
+            return cur.fetchone() is not None
+        else:
+            cur.execute("SELECT to_regclass(%s)", (name,))
+            row = cur.fetchone()
+            return bool(row and row[0])
+    except Exception:
+        return False
+
+
 # ─────────────────────────────────────────────────────────────────────
 # UPSERT строк в bridge_sales
 # ─────────────────────────────────────────────────────────────────────
+
 def _upsert_rows(rows: List[Dict[str, Any]]) -> int:
     if not rows:
         return 0
@@ -210,11 +340,14 @@ def _upsert_rows(rows: List[Dict[str, Any]]) -> int:
         c.commit()
     return int(total or 0)
 
+
 # ─────────────────────────────────────────────────────────────────────
-# Fallback в Kaspi (для записей без SKU)
+# Kaspi fallback (если запись без SKU)
 # ─────────────────────────────────────────────────────────────────────
+
 _SKU_KEYS   = ("merchantProductCode", "article", "sku", "code", "productCode", "offerId", "vendorCode", "barcode", "skuId", "id", "merchantProductId")
 _TITLE_KEYS = ("productName", "name", "title", "itemName", "productTitle", "merchantProductName")
+
 
 def _index_included(inc_list):
     idx: Dict[Tuple[str, str], dict] = {}
@@ -224,11 +357,13 @@ def _index_included(inc_list):
             idx[(str(t), str(i))] = it
     return idx
 
+
 def _rel_id(entry, rel):
     data = ((entry or {}).get("relationships", {}).get(rel, {}) or {}).get("data")
     if isinstance(data, dict):
         return data.get("type"), data.get("id")
     return None, None
+
 
 def _extract_entry(entry, inc_index) -> Optional[Dict[str, Any]]:
     attrs = entry.get("attributes", {}) if "attributes" in (entry or {}) else (entry or {})
@@ -299,6 +434,7 @@ def _extract_entry(entry, inc_index) -> Optional[Dict[str, Any]]:
 
     return {"sku": str(sku), "title": title, "qty": qty, "unit_price": unit_price, "total_price": total_price}
 
+
 async def _fetch_entries_fallback(order_id: str) -> List[Dict[str, Any]]:
     if not (KASPI_FALLBACK_ENABLED and KASPI_TOKEN):
         return []
@@ -319,9 +455,11 @@ async def _fetch_entries_fallback(order_id: str) -> List[Dict[str, Any]]:
                 out.append(ex)
         return out
 
+
 # ─────────────────────────────────────────────────────────────────────
 # Модели входа
 # ─────────────────────────────────────────────────────────────────────
+
 class SyncItem(BaseModel):
     id: str
     code: Optional[str] = None
@@ -335,9 +473,11 @@ class SyncItem(BaseModel):
     amount: Optional[float] = None
     line_index: Optional[int] = None
 
+
 # ─────────────────────────────────────────────────────────────────────
 # Диагностика
 # ─────────────────────────────────────────────────────────────────────
+
 @router.get("/db/ping")
 def db_ping():
     return {
@@ -351,11 +491,17 @@ def db_ping():
         "bridge_source_ids": BRIDGE_SOURCE_IDS,
     }
 
+
 # ─────────────────────────────────────────────────────────────────────
 # Синхронизация строк продаж
 # ─────────────────────────────────────────────────────────────────────
+
 @router.post("/sync-by-ids")
 async def bridge_sync_by_ids(items: List[SyncItem] = Body(...)):
+    """
+    Принимает плоские позиции заказов (order_id + line_index + sku + qty + цены) и записывает в bridge_sales.
+    Если sku отсутствует — при разрешённом fallback подтягиваем строки из Kaspi.
+    """
     if not items:
         return {"synced_orders": 0, "items_inserted": 0, "skipped_no_sku": 0, "skipped_by_state": 0, "fallback_used": 0, "errors": []}
 
@@ -412,6 +558,7 @@ async def bridge_sync_by_ids(items: List[SyncItem] = Body(...)):
     except Exception:
         errors.append("upsert_offline_error")
 
+    # Фолбэк по тем заказам, где sku не пришёл
     for ref in fallback_refs:
         try:
             if BRIDGE_ONLY_STATE and ref.state and ref.state != BRIDGE_ONLY_STATE:
@@ -454,12 +601,16 @@ async def bridge_sync_by_ids(items: List[SyncItem] = Body(...)):
         "errors": errors,
     }
 
+
 @router.post("/sync-from-ids")
 def bridge_sync_from_ids(
     date_from: str = Body(..., embed=True),
     date_to:   str = Body(..., embed=True),
     state: Optional[str] = Body(None, embed=True),
 ):
+    """
+    Синхронизирует bridge_sales напрямую из /orders/ids за период (удобно для бэкапов/ручного запуска).
+    """
     ms_from = _to_ms(date_from); ms_to = _to_ms(date_to)
     if ms_from is None or ms_to is None:
         raise HTTPException(400, "date_from/date_to должны быть YYYY-MM-DD")
@@ -538,9 +689,11 @@ def bridge_sync_from_ids(
     inserted = _upsert_rows(rows)
     return {"orders": len(counters), "rows": len(rows), "inserted": inserted}
 
+
 # ─────────────────────────────────────────────────────────────────────
-# Плоский список строк (фильтр по SKU)
+# Плоский список строк (фильтр по SKU) — для UI «Заказы по SKU»
 # ─────────────────────────────────────────────────────────────────────
+
 @router.get("/list")
 def bridge_list(
     sku: str = Query(..., description="Искомый SKU"),
@@ -604,9 +757,11 @@ def bridge_list(
         "fallback_used": _FALLBACK_USED,
     }
 
+
 # ─────────────────────────────────────────────────────────────────────
-# «№ заказа → позиции» (быстрый просмотр)
+# «№ заказа → позиции» (быстрый просмотр без маржи)
 # ─────────────────────────────────────────────────────────────────────
+
 @router.get("/by-orders")
 def bridge_by_orders(
     date_from: str = Query(..., description="YYYY-MM-DD"),
@@ -689,25 +844,11 @@ def bridge_by_orders(
         "note": "Стоимость/комиссия считаются в FIFO; здесь — связь №заказа → SKU.",
     }
 
-# ─────────────────────────────────────────────────────────────────────
-# Проверка существования таблиц
-# ─────────────────────────────────────────────────────────────────────
-def _table_exists(conn, name: str) -> bool:
-    try:
-        cur = conn.cursor()
-        if _driver_name() == "sqlite":
-            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (name,))
-            return cur.fetchone() is not None
-        else:
-            cur.execute("SELECT to_regclass(%s)", (name,))
-            row = cur.fetchone()
-            return bool(row and row[0])
-    except Exception:
-        return False
 
 # ─────────────────────────────────────────────────────────────────────
 # Fallback по комиссиям/себестоимости (на случай отсутствия ledger)
 # ─────────────────────────────────────────────────────────────────────
+
 def _fallback_commission_cost_for_skus(skus: List[str]) -> Dict[str, Dict[str, float]]:
     """
     Возвращает по SKU: {'commission_pct': float, 'avg_cost': float}
@@ -716,7 +857,7 @@ def _fallback_commission_cost_for_skus(skus: List[str]) -> Dict[str, Dict[str, f
     """
     if not skus:
         return {}
-    uniq = sorted({str(s) for s in skus})
+    uniq = sorted({str(s).strip() for s in skus if str(s).strip()})
 
     out: Dict[str, Dict[str, float]] = {s: {"commission_pct": 0.0, "avg_cost": 0.0} for s in uniq}
 
@@ -752,7 +893,11 @@ def _fallback_commission_cost_for_skus(skus: List[str]) -> Dict[str, Dict[str, f
         if has_categories:
             try:
                 if _driver_name() == "sqlite":
-                    cur.execute("SELECT name, COALESCE(base_percent,0)+COALESCE(extra_percent,0)+COALESCE(tax_percent,0) AS pct FROM categories")
+                    cur.execute("""
+                        SELECT name,
+                               COALESCE(base_percent,0)+COALESCE(extra_percent,0)+COALESCE(tax_percent,0) AS pct
+                        FROM categories
+                    """)
                     pct_by_cat = {r["name"]: float(r["pct"] or 0.0) for r in cur.fetchall()}
                 else:
                     cur.execute("""
@@ -814,9 +959,11 @@ def _fallback_commission_cost_for_skus(skus: List[str]) -> Dict[str, Dict[str, f
         out[s]["avg_cost"]       = float(avg_cost.get(s, 0.0))
     return out
 
+
 # ─────────────────────────────────────────────────────────────────────
-# «№ заказа → позиции» + маржинальность (FIFO)
+# «№ заказа → позиции» + маржинальность (FIFO/фолбэк)
 # ─────────────────────────────────────────────────────────────────────
+
 @router.get("/by-orders-margins")
 def bridge_by_orders_margins(
     date_from: str = Query(..., description="YYYY-MM-DD"),
@@ -830,7 +977,7 @@ def bridge_by_orders_margins(
     ms_to = ms_to + 24*3600*1000 - 1
     sec_from, sec_to = ms_from // 1000, ms_to // 1000
 
-    # 1) заказы
+    # 1) Источник строк заказа
     orders_lines: List[Dict[str, Any]] = []
     source_used = "ids"
     if BRIDGE_SOURCE_IDS:
@@ -1021,7 +1168,8 @@ def bridge_by_orders_margins(
 
         for ln in lines:
             w = ln["total_price"] if ln["total_price"] > 0 else float(ln["qty"] or 0)
-            if w <= 0: w = 1.0
+            if w <= 0:
+                w = 1.0
             share = min(1.0, max(0.0, w / total_weight))
             commission = agg["commission"] * share
             cost       = agg["cost"] * share
@@ -1058,5 +1206,5 @@ def bridge_by_orders_margins(
         "orders": orders_out,
         "driver": _driver_name(),
         "fallback_used": _FALLBACK_USED,
-        "note": "Источник: Номера заказов (fallback bridge). Ledger ms/sec. Fallback комиссия/себестоимость из «Мой склад».",
+        "note": "Источник: Номера заказов или bridge_sales. Ledger (ms/sec) распределён по строкам. Фолбэк — категории/партии из «Мой склад».",
     }
