@@ -19,6 +19,7 @@
     html,body{height:100%}
     body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Helvetica Neue","Noto Sans",Arial,"Apple Color Emoji","Segoe UI Emoji"}
     a{color:inherit}
+    .muted{color:var(--muted)}
     .layout{display:flex;min-height:100vh}
     .sidebar{width:240px;border-right:1px solid var(--line);padding:16px;background:var(--card)}
     .content{flex:1;min-width:0;padding:16px 18px}
@@ -265,6 +266,7 @@
 <script>
 /* ─────────── ХЕЛПЕРЫ ─────────── */
 const nf = new Intl.NumberFormat('ru-RU');
+function num(x, d=0){ const n = Number(String(x).replace(/\s| |,/g,'').replace(/[^\d.-]/g,'')); return Number.isFinite(n) ? (d?n.toFixed(d):n) : 0; }
 function fmt(n){ return nf.format(Math.round((Number(n) + Number.EPSILON) * 100) / 100); }
 
 let BUSY = false;
@@ -490,8 +492,8 @@ async function run(e){
     }
 
     // ——— ПОЛНАЯ СИНХРОНИЗАЦИЯ МОСТА + визуализация ———
-    await runIdsJob();          // async выгрузка номеров (+обогащение)
-    await loadProfitFIFO();     // FIFO KPI/таблицы
+    await runIdsJob();            // async выгрузка номеров (+обогащение)
+    await loadProfitFIFO();       // FIFO KPI/таблицы
     await renderOrderSkuMatrix(); // матрица заказ→SKU
     await checkProfitStatus(data);
 
@@ -514,8 +516,8 @@ function buildOrderItemsTable(group, currency){
 
   for(const o of (group.items||[])){
     const lines = (o.items && o.items.length)
-      ? o.items.map(li=>({sku:String(li.sku||''),title:String(li.title||''),qty:Number(li.qty||1),sum:Number(li.total_price ?? li.amount ?? li.unit_price ?? 0)}))
-      : [{sku:String(o.sku||''),title:String(o.title||o.name||''),qty:1,sum:Number(o.amount||0)}];
+      ? o.items.map(li=>({sku:String(li.sku||''),title:String(li.title||''),qty:Number(li.qty||1),sum:num(li.sum ?? li.total_price ?? li.amount ?? li.unit_price)}))
+      : [{sku:String(o.sku||''),title:String(o.title||o.name||''),qty:1,sum:num(o.amount)}];
 
     for(const li of lines){
       const tr=document.createElement('tr');
@@ -542,14 +544,14 @@ async function syncBridgeFromIdsData(data){
         let idx = 0;
         const lines = Array.isArray(o.items) && o.items.length
           ? o.items
-          : (o.sku ? [{ sku:o.sku, qty:1, total_price:o.amount, title:o.title||o.name }] : []);
+          : (o.sku ? [{ sku:o.sku, qty:1, sum:o.amount, title:o.title||o.name }] : []);
 
         for(const li of (lines||[])){
           const skuRaw = li.sku ?? li.code ?? '';
           const sku = String(skuRaw ?? '').trim();
           const qty = Number(li.qty ?? 1) || 1;
-          const total = Number(li.total_price ?? li.amount ?? li.unit_price ?? 0) || 0;
-          const unit  = (Number(li.unit_price ?? 0) || (qty>0 ? total/qty : 0));
+          const total = num(li.sum ?? li.total_price ?? li.amount ?? li.unit_price, 2);
+          const unit  = qty>0 ? (total/qty) : num(li.unit_price, 2);
           items.push({
             id: orderId,
             code: orderCode,
@@ -584,12 +586,13 @@ async function syncBridgeFromIdsData(data){
 async function renderOrderSkuMatrix(){
   const df=document.getElementById('start').value;
   const dt=document.getElementById('end').value;
+  const states = normalizeStatesValue(document.getElementById('states').value) || 'KASPI_DELIVERY';
   const box=document.getElementById('orderSkuMatrix');
-  box.innerHTML='Загружаем…';
+  box.innerHTML='Загружаем…'; box.classList.remove('muted');
 
   try{
     const url = '/profit/bridge/by-orders-margins?' + new URLSearchParams({
-      date_from: df, date_to: dt, state: 'KASPI_DELIVERY', order: 'asc'
+      date_from: df, date_to: dt, state: states, order: 'asc'
     }).toString();
     const data = await fetchProfitJSON(url);
     const cur = window.APP_CURRENCY || 'KZT';
@@ -602,8 +605,6 @@ async function renderOrderSkuMatrix(){
           <th>Выручка</th><th>Комиссия</th><th>Себестоимость</th><th>Прибыль</th></tr>
     </thead><tbody></tbody>`;
     const tb=tbl.querySelector('tbody');
-
-    window.__ordersByPeriod = window.__ordersByPeriod || {};
 
     for(const ord of data.orders){
       for(const it of (ord.items||[])){
@@ -624,7 +625,15 @@ async function renderOrderSkuMatrix(){
       }
     }
 
-    box.classList.remove('muted'); box.innerHTML=''; box.appendChild(tbl);
+    box.innerHTML='';
+    box.appendChild(tbl);
+
+    // диагностика источника
+    const diag=document.createElement('div'); diag.className='muted'; diag.style.marginTop='6px';
+    const any = data.orders?.[0];
+    const src = any?.source || data.source_used || '';
+    const err = any?.source_error || data.source_error || '';
+    if(src){ diag.textContent = `Источник позиций: ${src}${err?` — ${err}`:''}`; box.appendChild(diag); }
   }catch(e){
     box.className='muted'; box.textContent='Ошибка: ' + (e.message||e);
   }
@@ -695,7 +704,7 @@ async function runIdsJob(){
       const data = await rr.json();
       CURRENT_JOB_ID=null;
 
-      // ← новая обязательная часть: прокидываем строки в мост
+      // ← обязательно: прокидываем строки в мост
       await syncBridgeFromIdsData(data);
 
       await renderIdsResult(data);
@@ -728,7 +737,7 @@ async function renderIdsResult(data){
   const container = document.getElementById('ids'); container.innerHTML='';
   const currency = data.currency || window.APP_CURRENCY || 'KZT';
   const totalCount = (typeof data.period_total_count === 'number') ? data.period_total_count : (data.items||[]).length;
-  const totalAmount = (typeof data.period_total_amount === 'number') ? data.period_total_amount : (data.items||[]).reduce((a,it)=>a+(Number(it.amount)||0),0);
+  const totalAmount = (typeof data.period_total_amount === 'number') ? data.period_total_amount : (data.items||[]).reduce((a,it)=>a+(num(it.amount)),0);
 
   const summary = document.createElement('div'); summary.className='ids-summary';
   summary.innerHTML = `<span>Итого за период:</span> <b>${fmt(totalCount)}</b><span> шт.</span> · <b>${fmt(totalAmount)}</b> <span>${currency}</span>`;
@@ -750,7 +759,7 @@ async function renderIdsResult(data){
   const detailsList=[];
   for(const group of (data.groups||[])){
     const det=document.createElement('details'); det.open=true;
-    const dayTotal=(typeof group.total_amount==='number')?group.total_amount:group.items.reduce((acc,it)=>acc+(Number(it.amount)||0),0);
+    const dayTotal=(typeof group.total_amount==='number')?group.total_amount:group.items.reduce((acc,it)=>acc+(num(it.amount)),0);
     const sum=document.createElement('summary'); sum.textContent=`${group.day} — ${group.items.length} шт. · ${fmt(dayTotal)} ${currency}`;
     det.appendChild(sum); det.appendChild(buildOrderItemsTable(group, currency));
     detailsList.push(det); wrapper.appendChild(det);
@@ -910,7 +919,7 @@ function setSyncChip(state,text){
   el.querySelector('span:last-child').textContent=text; el.title=text;
 }
 
-async function checkProfitStatus(analyticsData){
+async function checkProfitStatus(){
   try{
     const df=document.getElementById('start').value; const dt=document.getElementById('end').value;
     if(!df||!dt){ setSyncChip('warn','нет периода'); return; }
