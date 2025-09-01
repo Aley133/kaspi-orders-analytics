@@ -21,7 +21,7 @@ from cachetools import TTLCache
 from httpx import HTTPStatusError, RequestError
 
 # Роутеры доменных модулей
-from app.api.bridge_v2 import router as bridge_v2_router
+from app.api.bridge_v2 import router as bridge_router 
 from app.api.profit_fifo import get_profit_fifo_router
 
 # Роутер и ХЕЛПЕРЫ из debug_sku.py (для корректного извлечения позиций)
@@ -140,6 +140,7 @@ app.include_router(get_products_router(client), prefix="/products")
 app.include_router(get_profit_fifo_router(),   prefix="/profit")
 app.include_router(bridge_v2_router, prefix="/profit") 
 app.include_router(get_debug_router())
+app.include_router(bridge_router) 
 
 # -------------------- Utils --------------------
 def tzinfo_of(name: str) -> pytz.BaseTzInfo:
