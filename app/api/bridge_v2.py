@@ -24,7 +24,7 @@ FIFO_LEDGER_TABLE = (os.getenv("FIFO_LEDGER_TABLE") or "fifo_ledger").strip()
 
 # откуда читать «Номера заказов»
 ORDERS_SERVICE_URL = (os.getenv("ORDERS_SERVICE_URL") or "http://127.0.0.1:8000").rstrip("/")
-BRIDGE_SOURCE_IDS  = os.getenv("BRIDGE_SOURCE_IDS", "1").lower() in ("1", "true", "yes")
+BRIDGE_SOURCE_IDS  = (os.getenv("BRIDGE_SOURCE_IDS", "1") or "1").lower() in ("1", "true", "yes")
 
 HTTPX_TIMEOUT = httpx.Timeout(connect=10.0, read=40.0, write=15.0, pool=40.0)
 HTTPX_LIMITS  = httpx.Limits(max_connections=30, max_keepalive_connections=10)
@@ -54,7 +54,7 @@ def _sqlite_path(url: str) -> str:
     return url.split("sqlite:///")[-1]
 
 def _get_conn():
-    """Вернёт conn к PG, а при отсутствии psycopg2 — переключится на SQLite без 500 ошибок."""
+    """PG → при отсутствии psycopg2 fallback на SQLite (без 500)."""
     global _ACTUAL_DB_URL, _FALLBACK_USED
     if _ACTUAL_DB_URL.startswith("sqlite"):
         c = sqlite3.connect(_sqlite_path(_ACTUAL_DB_URL))
@@ -71,7 +71,7 @@ def _get_conn():
         return c
 
 def _init_bridge_sales() -> None:
-    """Таблица с плоскими строками продаж: каждая позиция заказа — отдельная строка."""
+    """Плоские строки продаж: каждая позиция заказа — отдельная строка."""
     with _get_conn() as c:
         cur = c.cursor()
         if _driver_name() == "sqlite":
@@ -133,6 +133,7 @@ def _canon_sku(x: Optional[str]) -> Optional[str]:
     s = _canon_str(x, 128)
     if s is None:
         return None
+    # убираем артефакты вида "123.0"
     if s.endswith(".0") and s.replace(".", "", 1).isdigit():
         s = s[:-2]
     return s
@@ -418,37 +419,37 @@ async def bridge_sync_by_ids(items: List[SyncItem] = Body(...)):
 
     # достраиваем через Kaspi API те заказы, где SKU не было
     for ref in fallback_refs:
-    try:
-        if BRIDGE_ONLY_STATE and ref.state and ref.state != BRIDGE_ONLY_STATE:
-            skipped_by_state += 1
-            continue
-        entries = await _fetch_entries_fallback(ref.id)
-        if not entries:
-            skipped_no_sku += 1
-            continue
-        fallback_used += 1
-        order_ms = _to_ms(ref.date)
-        for e in entries:
-            idx = e.get("__index")
-            if idx is None:
-                idx = counters[ref.id]
-                counters[ref.id] = int(idx) + 1
-            offline_rows = [{
-                "order_id": str(ref.id),
-                "line_index": int(idx),
-                "order_code": _canon_str(ref.code, 64),
-                "date_utc_ms": order_ms,
-                "state": _canon_str(ref.state, 64),
-                "sku": _canon_sku(e.get("sku")),
-                "title": _canon_str(e.get("title"), 512),
-                "qty": int(e.get("qty") or 1),
-                "unit_price": float(_safe_float(e.get("unit_price"))),
-                "total_price": float(_safe_float(e.get("total_price"))),
-            }]
-            inserted += _upsert_rows(offline_rows)
-            touched_orders.add(str(ref.id))
-    except Exception:
-        errors.append("fallback_error")
+        try:
+            if BRIDGE_ONLY_STATE and ref.state and ref.state != BRIDGE_ONLY_STATE:
+                skipped_by_state += 1
+                continue
+            entries = await _fetch_entries_fallback(ref.id)
+            if not entries:
+                skipped_no_sku += 1
+                continue
+            fallback_used += 1
+            order_ms = _to_ms(ref.date)
+            for e in entries:
+                idx = e.get("__index")
+                if idx is None:
+                    idx = counters[ref.id]
+                    counters[ref.id] = int(idx) + 1
+                offline_rows = [{
+                    "order_id": str(ref.id),
+                    "line_index": int(idx),
+                    "order_code": _canon_str(ref.code, 64),
+                    "date_utc_ms": order_ms,
+                    "state": _canon_str(ref.state, 64),
+                    "sku": _canon_sku(e.get("sku")),
+                    "title": _canon_str(e.get("title"), 512),
+                    "qty": int(e.get("qty") or 1),
+                    "unit_price": float(_safe_float(e.get("unit_price"))),
+                    "total_price": float(_safe_float(e.get("total_price"))),
+                }]
+                inserted += _upsert_rows(offline_rows)
+                touched_orders.add(str(ref.id))
+        except Exception:
+            errors.append("fallback_error")
 
     return {
         "synced_orders": len(touched_orders),
@@ -710,11 +711,20 @@ def bridge_by_orders(
 # ─────────────────────────────────────────────────────────────────────
 # Справка по комиссиям/себестоимости из «Мой склад» (fallback)
 # ─────────────────────────────────────────────────────────────────────
+def _table_exists(cur, name: str) -> bool:
+    if _driver_name() == "sqlite":
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (name,))
+        return cur.fetchone() is not None
+    else:
+        cur.execute("SELECT to_regclass(%s)", (name,))
+        return cur.fetchone()[0] is not None
+
 def _fallback_commission_cost_for_skus(skus: List[str]) -> Dict[str, Dict[str, float]]:
     """
     Возвращает по SKU: {'commission_pct': float, 'avg_cost': float}
     Берём commission_pct из последней партии, если None — из категории.
     Среднюю себестоимость считаем по всем партиям: SUM(qty*unit_cost)/SUM(qty).
+    Если таблиц нет — возвращаем пусто.
     """
     if not skus:
         return {}
@@ -723,6 +733,11 @@ def _fallback_commission_cost_for_skus(skus: List[str]) -> Dict[str, Dict[str, f
     out: Dict[str, Dict[str, float]] = {s: {"commission_pct": 0.0, "avg_cost": 0.0} for s in uniq}
     with _get_conn() as c:
         cur = c.cursor()
+        # если нет нужных таблиц — мягко выходим
+        needed = ("products", "categories", "batches")
+        if not all(_table_exists(cur, t) for t in needed):
+            return {}
+
         if _driver_name() == "sqlite":
             ph = ",".join(["?"] * len(uniq))
             cur.execute(f"SELECT sku, COALESCE(category,'') AS category FROM products WHERE sku IN ({ph})", uniq)
@@ -792,17 +807,17 @@ def bridge_by_orders_margins(
 
     Источник позиций: /orders/ids (Номера заказов). Fallback: bridge_sales.
     Маржа берётся из FIFO-ledger и распределяется по строкам ПРОПОРЦИОНАЛЬНО сумме строки
-    (если сумма недоступна — по qty). Так исключаем дублирование/расхождения.
+    (если сумма недоступна — по qty).
     """
-    # 0) временной диапазон и ms/sec для ledger
+    # 0) диапазон
     ms_from = _to_ms(date_from); ms_to = _to_ms(date_to)
     if ms_from is None or ms_to is None:
         raise HTTPException(400, "date_from/date_to должны быть YYYY-MM-DD")
     ms_to = ms_to + 24*3600*1000 - 1
     sec_from, sec_to = ms_from // 1000, ms_to // 1000
 
-    # 1) Грузим заказы из «Номера заказов» (или fallback на bridge_sales)
-    orders_lines: List[Dict[str, Any]] = []  # элементы: {order_code, order_id, date_ms, state, sku, title, qty, unit_price, total_price}
+    # 1) заказы из «Номера заказов» (или fallback на bridge_sales)
+    orders_lines: List[Dict[str, Any]] = []
     source_used = "ids"
     if BRIDGE_SOURCE_IDS:
         try:
@@ -829,8 +844,8 @@ def bridge_by_orders_margins(
                 st = _canon_str(it.get("state"), 64)
                 if isinstance(it.get("items"), list) and it["items"]:
                     for li in it["items"]:
-                        sku = _canon_sku(li.get("sku")); 
-                        if not sku: 
+                        sku = _canon_sku(li.get("sku"))
+                        if not sku:
                             continue
                         qty = int(li.get("qty") or 1)
                         unit = _safe_float(li.get("unit_price"))
@@ -856,7 +871,7 @@ def bridge_by_orders_margins(
             source_used = "bridge"
 
     if not orders_lines:
-        # fallback: читаем из bridge_sales
+        # fallback: bridge_sales
         source_used = "bridge"
         where = ["date_utc_ms BETWEEN :ms_from AND :ms_to"]
         params: Dict[str, Any] = {"ms_from": ms_from, "ms_to": ms_to}
@@ -898,7 +913,7 @@ def bridge_by_orders_margins(
                 qty=qty, unit_price=unit, total_price=total
             ))
 
-    # 2) Агрегаты FIFO-ledger по (order_code, sku) — учитываем и ms, и sec
+    # 2) Агрегаты FIFO-ledger по (order_code, sku) — учитываем ms и sec
     with _get_conn() as c:
         cur = c.cursor()
         if _driver_name() == "sqlite":
@@ -997,7 +1012,8 @@ def bridge_by_orders_margins(
 
         for ln in lines:
             w = ln["total_price"] if ln["total_price"] > 0 else float(ln["qty"] or 0)
-            if w <= 0: w = 1.0
+            if w <= 0:
+                w = 1.0
             share = min(1.0, max(0.0, w / total_weight))
             commission = agg["commission"] * share
             cost       = agg["cost"] * share
