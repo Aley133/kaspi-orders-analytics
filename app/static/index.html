@@ -53,6 +53,7 @@
     .note.err{display:block;background:color-mix(in oklab, var(--danger) 14%, transparent);border-color:color-mix(in oklab, var(--danger) 48%, transparent);color:var(--fg)}
     .note .small{font-size:12px;color:var(--muted)}
 
+    /* верхний «лоадер»-бар */
     #topLoader{position:sticky; top:0; left:0; right:0; height:3px; z-index:7000; background:transparent}
     #topLoader .bar{height:100%; width:0%; background:var(--accent); transition:width .2s cubic-bezier(.4,0,.2,1)}
 
@@ -60,6 +61,20 @@
     .ids-actions{display:flex;gap:8px;margin:8px 0;flex-wrap:wrap}
     .ids-groups details{margin:8px 0}
     .pill{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:4px 8px;margin:2px 4px 0 0;background:var(--card)}
+
+    /* меню выбора статусов */
+    .status-menu{display:none;margin-top:6px;border:1px solid var(--line);background:var(--card);border-radius:10px;padding:10px}
+    .status-menu.open{display:block}
+    .status-grid label{display:block;margin:4px 0}
+    .menu-actions{display:flex;gap:8px;margin-top:8px}
+
+    /* переключатель темы */
+    .switch{position:relative;display:inline-block;width:38px;height:22px;margin-right:6px;vertical-align:middle}
+    .switch input{display:none}
+    .switch .slider{position:absolute;inset:0;background:var(--line);border-radius:999px;cursor:pointer}
+    .switch .slider::before{content:"";position:absolute;width:18px;height:18px;left:2px;top:2px;background:#fff;border-radius:50%;transition:transform .2s}
+    .switch input:checked + .slider{background:var(--accent)}
+    .switch input:checked + .slider::before{transform:translateX(16px)}
   </style>
 </head>
 <body data-theme="light">
@@ -146,7 +161,7 @@
         <div class="kpi-item"><div class="kpi-label">Оборот</div><div class="kpi-value" id="kpiAmount">0</div></div>
       </section>
 
-      <!-- FIFO: Заказы и позиции (по /profit/bridge/*) -->
+      <!-- FIFO: Заказы и позиции -->
       <section class="shell">
         <div class="row" style="justify-content:space-between;align-items:center;">
           <h2 style="margin:0">FIFO: Заказы и позиции</h2>
@@ -450,7 +465,9 @@ async function syncBridgeFromIdsData(data){
 
         for(const li of (lines||[])){
           const {qty,unit,total} = deriveLine(li);
-          const sku = String(firstNonEmpty([li.sku, li.code, ''])||'').trim();
+          const sku = String(firstNonEmpty([li.sku, li.code, li.offerId, li.vendorCode, li.productCode, li.variant_code,
+            li.barcode, li.ean, ''
+          ]) || '').trim();
           items.push({
             id: orderId, code: orderCode, date, state,
             sku: sku || null, title: (li.title ?? li.name ?? null),
@@ -648,7 +665,7 @@ async function runIdsJob(){
       CURRENT_JOB_ID=null;
 
       // список кодов — основа для FIFO
-      window.__allOrderCodes = Array.from(new Set((data.items||[]).map(it=>String(it.number||'').trim()).filter(Boolean)));
+      window.__allOrderCodes = Array.from(new Set((data.items||[]).map(it=>it.number).filter(Boolean).map(String)));
 
       // ← прокидываем строки в мост
       await syncBridgeFromIdsData(data);
