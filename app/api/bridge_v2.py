@@ -8,7 +8,6 @@ from fastapi import APIRouter, Body, HTTPException, Query
 import os, sqlite3, httpx, math
 from datetime import datetime
 
-# префикс сразу определим здесь → все пути будут начинаться с /bridge/*
 router = APIRouter(prefix="/bridge")
 
 # ─────────────────────────────────────────────────────────────────────
@@ -20,10 +19,8 @@ KASPI_FALLBACK_ENABLED = (os.getenv("KASPI_FALLBACK_ENABLED", "0").lower() in ("
 KASPI_TOKEN   = os.getenv("KASPI_TOKEN", "").strip()
 KASPI_BASEURL = (os.getenv("KASPI_BASE_URL") or "https://kaspi.kz/shop/api/v2").rstrip("/")
 
-# имя таблицы FIFO-ledger (можно переопределить через env)
 FIFO_LEDGER_TABLE = (os.getenv("FIFO_LEDGER_TABLE") or "fifo_ledger").strip()
 
-# откуда читать «Номера заказов»
 ORDERS_SERVICE_URL = (os.getenv("ORDERS_SERVICE_URL") or "http://127.0.0.1:8000").rstrip("/")
 BRIDGE_SOURCE_IDS  = (os.getenv("BRIDGE_SOURCE_IDS", "1").lower() in ("1", "true", "yes"))
 
@@ -326,11 +323,11 @@ async def _fetch_entries_fallback(order_id: str) -> List[Dict[str, Any]]:
 # Модели входа
 # ─────────────────────────────────────────────────────────────────────
 class SyncItem(BaseModel):
-    id: str                      # order_id
-    code: Optional[str] = None   # order_code (номер)
-    date: Optional[Any] = None   # дата заказа
-    state: Optional[str] = None  # статус
-    sku: Optional[str] = None    # если есть — пишем сразу
+    id: str
+    code: Optional[str] = None
+    date: Optional[Any] = None
+    state: Optional[str] = None
+    sku: Optional[str] = None
     title: Optional[str] = None
     qty: Optional[int] = 1
     unit_price: Optional[float] = None
@@ -355,14 +352,10 @@ def db_ping():
     }
 
 # ─────────────────────────────────────────────────────────────────────
-# Синхронизация строк продаж: payload (ручной и из fallback)
+# Синхронизация строк продаж
 # ─────────────────────────────────────────────────────────────────────
 @router.post("/sync-by-ids")
 async def bridge_sync_by_ids(items: List[SyncItem] = Body(...)):
-    """
-    Принимает заказы/позиции и кладёт их построчно в bridge_sales.
-    Если какая-то позиция пришла без SKU — достраиваем по API Kaspi (если включён fallback).
-    """
     if not items:
         return {"synced_orders": 0, "items_inserted": 0, "skipped_no_sku": 0, "skipped_by_state": 0, "fallback_used": 0, "errors": []}
 
@@ -419,7 +412,6 @@ async def bridge_sync_by_ids(items: List[SyncItem] = Body(...)):
     except Exception:
         errors.append("upsert_offline_error")
 
-    # достраиваем через Kaspi API те заказы, где SKU не было
     for ref in fallback_refs:
         try:
             if BRIDGE_ONLY_STATE and ref.state and ref.state != BRIDGE_ONLY_STATE:
@@ -462,19 +454,12 @@ async def bridge_sync_by_ids(items: List[SyncItem] = Body(...)):
         "errors": errors,
     }
 
-# ─────────────────────────────────────────────────────────────────────
-# Синхронизация строк продаж: из «Номера заказов» (HTTP)
-# ─────────────────────────────────────────────────────────────────────
 @router.post("/sync-from-ids")
 def bridge_sync_from_ids(
     date_from: str = Body(..., embed=True),
     date_to:   str = Body(..., embed=True),
     state: Optional[str] = Body(None, embed=True),
 ):
-    """
-    Заполняет bridge_sales данными из /orders/ids (источник фронта «Номера заказов»).
-    Это делает таблицу /bridge/list 100% консистентной с тем, что видит пользователь.
-    """
     ms_from = _to_ms(date_from); ms_to = _to_ms(date_to)
     if ms_from is None or ms_to is None:
         raise HTTPException(400, "date_from/date_to должны быть YYYY-MM-DD")
@@ -508,7 +493,6 @@ def bridge_sync_from_ids(
         state_val = _canon_str(it.get("state"), 64)
         date_ms = _to_ms(it.get("date"))
 
-        # разбор позиций
         if isinstance(it.get("items"), list) and it["items"]:
             for li in it["items"]:
                 sku = _canon_sku(li.get("sku"))
@@ -531,7 +515,6 @@ def bridge_sync_from_ids(
                     "total_price": total,
                 })
         else:
-            # одиночная строка (на всякий случай)
             sku = _canon_sku(it.get("sku"))
             if not sku:
                 continue
@@ -571,7 +554,7 @@ def bridge_list(
     ms_to = _to_ms(date_to)
     if ms_from is None or ms_to is None:
         raise HTTPException(400, "date_from/date_to должны быть YYYY-MM-DD")
-    ms_to = ms_to + 24 * 3600 * 1000 - 1  # включительно
+    ms_to = ms_to + 24 * 3600 * 1000 - 1
 
     with _get_conn() as c:
         cur = c.cursor()
@@ -601,7 +584,7 @@ def bridge_list(
         d_iso = datetime.utcfromtimestamp((r.get("date_utc_ms") or 0) / 1000).isoformat(timespec="seconds")
         items.append({
             "order_id":   r.get("order_id"),
-            "order_code": r.get("order_code"),  # номер заказа
+            "order_code": r.get("order_code"),
             "date":       d_iso,
             "state":      r.get("state"),
             "sku":        r.get("sku"),
@@ -707,77 +690,132 @@ def bridge_by_orders(
     }
 
 # ─────────────────────────────────────────────────────────────────────
+# Проверка существования таблиц
+# ─────────────────────────────────────────────────────────────────────
+def _table_exists(conn, name: str) -> bool:
+    try:
+        cur = conn.cursor()
+        if _driver_name() == "sqlite":
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (name,))
+            return cur.fetchone() is not None
+        else:
+            cur.execute("SELECT to_regclass(%s)", (name,))
+            row = cur.fetchone()
+            return bool(row and row[0])
+    except Exception:
+        return False
+
+# ─────────────────────────────────────────────────────────────────────
 # Fallback по комиссиям/себестоимости (на случай отсутствия ledger)
 # ─────────────────────────────────────────────────────────────────────
 def _fallback_commission_cost_for_skus(skus: List[str]) -> Dict[str, Dict[str, float]]:
     """
     Возвращает по SKU: {'commission_pct': float, 'avg_cost': float}
-    Берём commission_pct из последней партии, если None — из категории.
-    Среднюю себестоимость считаем по всем партиям: SUM(qty*unit_cost)/SUM(qty).
+    Безопасно работает, даже если нет таблиц products/categories/batches:
+      — если таблиц нет, возвращает нули.
     """
     if not skus:
         return {}
     uniq = sorted({str(s) for s in skus})
 
     out: Dict[str, Dict[str, float]] = {s: {"commission_pct": 0.0, "avg_cost": 0.0} for s in uniq}
+
     with _get_conn() as c:
         cur = c.cursor()
-        if _driver_name() == "sqlite":
-            ph = ",".join(["?"] * len(uniq))
-            cur.execute(f"SELECT sku, COALESCE(category,'') AS category FROM products WHERE sku IN ({ph})", uniq)
-            cat_by_sku = {r["sku"]: r["category"] for r in cur.fetchall()}
-            cur.execute("SELECT name, COALESCE(base_percent,0)+COALESCE(extra_percent,0)+COALESCE(tax_percent,0) AS pct FROM categories")
-            pct_by_cat = {r["name"]: float(r["pct"] or 0.0) for r in cur.fetchall()}
-            cur.execute(
-                f"""SELECT b.sku, b.commission_pct
-                    FROM batches b
-                    JOIN (
-                      SELECT sku, MAX(date) AS max_date, MAX(id) AS max_id
-                      FROM batches WHERE sku IN ({ph})
-                      GROUP BY sku
-                    ) m ON m.sku=b.sku AND b.id=m.max_id
-                    WHERE b.sku IN ({ph})""",
-                uniq + uniq
-            )
-            last_comm = {r["sku"]: r["commission_pct"] for r in cur.fetchall()}
-            cur.execute(
-                f"""SELECT sku, (SUM(qty*unit_cost)*1.0)/NULLIF(SUM(qty),0) AS avg_cost
-                    FROM batches WHERE sku IN ({ph}) GROUP BY sku""",
-                uniq
-            )
-            avg_cost = {r["sku"]: float(r["avg_cost"] or 0.0) for r in cur.fetchall()}
-        else:
-            cur.execute("SELECT sku, COALESCE(category,'') AS category FROM products WHERE sku = ANY(%s)", (uniq,))
-            cat_by_sku = {r[0]: r[1] for r in cur.fetchall()}
-            cur.execute("""
-                SELECT name, COALESCE(base_percent,0)+COALESCE(extra_percent,0)+COALESCE(tax_percent,0) AS pct
-                FROM categories
-            """)
-            pct_by_cat = {r[0]: float(r[1] or 0.0) for r in cur.fetchall()}
-            cur.execute("""
-                SELECT DISTINCT ON (sku) sku, commission_pct
-                FROM batches
-                WHERE sku = ANY(%s)
-                ORDER BY sku, date DESC, id DESC
-            """, (uniq,))
-            last_comm = {r[0]: r[1] for r in cur.fetchall()}
-            cur.execute("""
-                SELECT sku, SUM(qty*unit_cost)::float / NULLIF(SUM(qty),0)::float AS avg_cost
-                FROM batches WHERE sku = ANY(%s) GROUP BY sku
-            """, (uniq,))
-            avg_cost = {r[0]: float(r[1] or 0.0) for r in cur.fetchall()}
 
+        has_products   = _table_exists(c, "products")
+        has_categories = _table_exists(c, "categories")
+        has_batches    = _table_exists(c, "batches")
+
+        if not (has_products or has_categories or has_batches):
+            return out  # ничего нет — вернули нули
+
+        cat_by_sku: Dict[str, str] = {}
+        pct_by_cat: Dict[str, float] = {}
+        last_comm: Dict[str, Optional[float]] = {}
+        avg_cost: Dict[str, float] = {}
+
+        # products → category
+        if has_products:
+            try:
+                if _driver_name() == "sqlite":
+                    ph = ",".join(["?"] * len(uniq))
+                    cur.execute(f"SELECT sku, COALESCE(category,'') AS category FROM products WHERE sku IN ({ph})", uniq)
+                    cat_by_sku = {r["sku"]: r["category"] for r in cur.fetchall()}
+                else:
+                    cur.execute("SELECT sku, COALESCE(category,'') AS category FROM products WHERE sku = ANY(%s)", (uniq,))
+                    cat_by_sku = {r[0]: r[1] for r in cur.fetchall()}
+            except Exception:
+                cat_by_sku = {}
+
+        # categories → percent
+        if has_categories:
+            try:
+                if _driver_name() == "sqlite":
+                    cur.execute("SELECT name, COALESCE(base_percent,0)+COALESCE(extra_percent,0)+COALESCE(tax_percent,0) AS pct FROM categories")
+                    pct_by_cat = {r["name"]: float(r["pct"] or 0.0) for r in cur.fetchall()}
+                else:
+                    cur.execute("""
+                        SELECT name, COALESCE(base_percent,0)+COALESCE(extra_percent,0)+COALESCE(tax_percent,0) AS pct
+                        FROM categories
+                    """)
+                    pct_by_cat = {r[0]: float(r[1] or 0.0) for r in cur.fetchall()}
+            except Exception:
+                pct_by_cat = {}
+
+        # batches → последняя комиссия + средняя себестоимость
+        if has_batches:
+            try:
+                if _driver_name() == "sqlite":
+                    ph = ",".join(["?"] * len(uniq))
+                    # последняя партия по дате/id
+                    cur.execute(
+                        f"""SELECT b.sku, b.commission_pct
+                            FROM batches b
+                            JOIN (
+                              SELECT sku, MAX(date) AS max_date, MAX(id) AS max_id
+                              FROM batches WHERE sku IN ({ph})
+                              GROUP BY sku
+                            ) m ON m.sku=b.sku AND b.id=m.max_id
+                            WHERE b.sku IN ({ph})""",
+                        uniq + uniq
+                    )
+                    last_comm = {r["sku"]: r["commission_pct"] for r in cur.fetchall()}
+                    # средняя себестоимость
+                    cur.execute(
+                        f"""SELECT sku, (SUM(qty*unit_cost)*1.0)/NULLIF(SUM(qty),0) AS avg_cost
+                            FROM batches WHERE sku IN ({ph}) GROUP BY sku""",
+                        uniq
+                    )
+                    avg_cost = {r["sku"]: float(r["avg_cost"] or 0.0) for r in cur.fetchall()}
+                else:
+                    cur.execute("""
+                        SELECT DISTINCT ON (sku) sku, commission_pct
+                        FROM batches
+                        WHERE sku = ANY(%s)
+                        ORDER BY sku, date DESC, id DESC
+                    """, (uniq,))
+                    last_comm = {r[0]: r[1] for r in cur.fetchall()}
+
+                    cur.execute("""
+                        SELECT sku, SUM(qty*unit_cost)::float / NULLIF(SUM(qty),0)::float AS avg_cost
+                        FROM batches WHERE sku = ANY(%s) GROUP BY sku
+                    """, (uniq,))
+                    avg_cost = {r[0]: float(r[1] or 0.0) for r in cur.fetchall()}
+            except Exception:
+                last_comm, avg_cost = {}, {}
+
+    # Сборка результата
     for s in uniq:
         pct = last_comm.get(s)
         if pct is None:
             pct = pct_by_cat.get(cat_by_sku.get(s, ""), 0.0)
         out[s]["commission_pct"] = float(pct or 0.0)
-        out[s]["avg_cost"] = float(avg_cost.get(s, 0.0))
+        out[s]["avg_cost"]       = float(avg_cost.get(s, 0.0))
     return out
 
 # ─────────────────────────────────────────────────────────────────────
 # «№ заказа → позиции» + маржинальность (FIFO)
-# (источник данных по заказам — «Номера заказов», при сбое — bridge_sales)
 # ─────────────────────────────────────────────────────────────────────
 @router.get("/by-orders-margins")
 def bridge_by_orders_margins(
@@ -786,11 +824,6 @@ def bridge_by_orders_margins(
     state: Optional[str] = Query(None, description="фильтр по состоянию (например KASPI_DELIVERY)"),
     order: Literal["asc", "desc"] = Query("asc"),
 ):
-    """
-    Возвращает заказы с позициями и маржой по каждой позиции.
-    Источник позиций: /orders/ids (Номера заказов). Fallback: bridge_sales.
-    Маржа берётся из FIFO-ledger и распределяется по строкам ПРОПОРЦИОНАЛЬНО сумме строки.
-    """
     ms_from = _to_ms(date_from); ms_to = _to_ms(date_to)
     if ms_from is None or ms_to is None:
         raise HTTPException(400, "date_from/date_to должны быть YYYY-MM-DD")
@@ -848,7 +881,6 @@ def bridge_by_orders_margins(
             source_used = "bridge"
 
     if not orders_lines:
-        # fallback к bridge_sales
         source_used = "bridge"
         where = ["date_utc_ms BETWEEN :ms_from AND :ms_to"]
         params: Dict[str, Any] = {"ms_from": ms_from, "ms_to": ms_to}
@@ -890,7 +922,7 @@ def bridge_by_orders_margins(
                 qty=qty, unit_price=unit, total_price=total
             ))
 
-    # 2) ledger агрегаты по (order_code, sku) — учитываем миллисекунды и секунды
+    # 2) ledger агрегаты по (order_code, sku)
     with _get_conn() as c:
         cur = c.cursor()
         if _driver_name() == "sqlite":
