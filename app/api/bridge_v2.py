@@ -12,36 +12,23 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 
-# --------------------------------------------------------------------------------------
-# Router (регистрация сразу на два префикса, чтобы не ловить 404)
-# --------------------------------------------------------------------------------------
 router = APIRouter(tags=["bridge_v2"])
-
-# Все пути, которые будет вешать каждый эндпоинт
 PFX = ("/profit/bridge", "/bridge")
 
-# --------------------------------------------------------------------------------------
-# Конфиг
-# --------------------------------------------------------------------------------------
+# ------------------------------ Config ------------------------------
 DB_PATH = os.getenv("BRIDGE_DB_PATH", "data/bridge_v2.sqlite3")
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-
-# API-ключ (если пусто — доступ без ключа)
 REQ_API_KEY = os.getenv("BRIDGE_API_KEY", "").strip() or None
 
-# МойСклад
 MS_BASE = os.getenv("MS_BASE", "https://api.moysklad.ru/api/remap/1.2").rstrip("/")
 MS_LOGIN = os.getenv("MS_LOGIN", "").strip()
 MS_PASSWORD = os.getenv("MS_PASSWORD", "").strip()
-MS_BASIC = os.getenv("MS_BASIC", "").strip()  # готовая строка Basic (base64(login:pass))
+MS_BASIC = os.getenv("MS_BASIC", "").strip()
 HTTPX_TIMEOUT = httpx.Timeout(connect=10.0, read=40.0, write=15.0, pool=40.0)
 HTTPX_LIMITS = httpx.Limits(max_connections=20, max_keepalive_connections=10)
 
-# --------------------------------------------------------------------------------------
-# Security
-# --------------------------------------------------------------------------------------
+# ------------------------------ Security ------------------------------
 def require_api_key(request: Request):
-    """Если указан BRIDGE_API_KEY — требуем X-API-Key или ?api_key=."""
     if not REQ_API_KEY:
         return True
     provided = request.headers.get("X-API-Key") or request.query_params.get("api_key")
@@ -49,9 +36,7 @@ def require_api_key(request: Request):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API key")
     return True
 
-# --------------------------------------------------------------------------------------
-# DB helpers
-# --------------------------------------------------------------------------------------
+# ------------------------------ DB ------------------------------
 def _connect() -> sqlite3.Connection:
     c = sqlite3.connect(DB_PATH)
     c.row_factory = sqlite3.Row
@@ -59,7 +44,6 @@ def _connect() -> sqlite3.Connection:
 
 def _init_db():
     with _connect() as con:
-        # сырые строки из ids
         con.execute("""
             CREATE TABLE IF NOT EXISTS bridge_lines(
               order_id     TEXT NOT NULL,
@@ -77,11 +61,11 @@ def _init_db():
               PRIMARY KEY(order_id, line_index)
             )
         """)
-        con.execute("CREATE INDEX IF NOT EXISTS ix_lines_date ON bridge_lines(date_utc_ms)")
+        con.execute("CREATE INDEX IF NOT EXISTS ix_lines_date  ON bridge_lines(date_utc_ms)")
         con.execute("CREATE INDEX IF NOT EXISTS ix_lines_state ON bridge_lines(state)")
         con.execute("CREATE INDEX IF NOT EXISTS ix_lines_sku   ON bridge_lines(sku)")
+        con.execute("CREATE INDEX IF NOT EXISTS ix_lines_code  ON bridge_lines(order_code)")
 
-        # кэш себестоимостей из МС (средняя/входная цена)
         con.execute("""
             CREATE TABLE IF NOT EXISTS ms_costs(
               sku        TEXT PRIMARY KEY,
@@ -90,7 +74,7 @@ def _init_db():
             )
         """)
 
-        # заготовки под FIFO (на следующий шаг)
+        # FIFO заготовки (на следующий шаг)
         con.execute("""
             CREATE TABLE IF NOT EXISTS batches(
               id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -120,9 +104,7 @@ def _init_db():
         con.commit()
 _init_db()
 
-# --------------------------------------------------------------------------------------
-# Модели
-# --------------------------------------------------------------------------------------
+# ------------------------------ Models ------------------------------
 class BridgeLineIn(BaseModel):
     id: str
     code: Optional[str] = None
@@ -141,7 +123,6 @@ class OrderItemOut(BaseModel):
     qty: int = 1
     unit_price: float = 0.0
     total_price: float = 0.0
-    # обогащение:
     cost: Optional[float] = None
     profit: Optional[float] = None
 
@@ -156,10 +137,9 @@ class OrderOut(BaseModel):
 class OrdersResponse(BaseModel):
     orders: List[OrderOut] = Field(default_factory=list)
     source_used: str = "bridge_v2"
+    stats: Dict[str, float] = Field(default_factory=dict)
 
-# --------------------------------------------------------------------------------------
-# Утилиты
-# --------------------------------------------------------------------------------------
+# ------------------------------ Utils ------------------------------
 def _to_ms(value: Any) -> Optional[int]:
     if value is None:
         return None
@@ -185,11 +165,10 @@ def _ms_to_iso(ms: Optional[int]) -> Optional[str]:
         return None
     return datetime.fromtimestamp(ms/1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
 
-def _parse_states(raw: Optional[str]) -> Optional[List[str]]:
+def _parse_csv(raw: Optional[str]) -> List[str]:
     if not raw:
-        return None
-    vals = [p.strip() for p in str(raw).split(",") if p.strip()]
-    return vals or None
+        return []
+    return [p.strip() for p in str(raw).split(",") if p.strip()]
 
 def _canon_sku(s: Optional[str]) -> Optional[str]:
     if not s:
@@ -197,9 +176,7 @@ def _canon_sku(s: Optional[str]) -> Optional[str]:
     v = str(s).strip()
     return v or None
 
-# --------------------------------------------------------------------------------------
-# МойСклад: авторизация + fetch
-# --------------------------------------------------------------------------------------
+# ------------------------------ MoySklad ------------------------------
 def _ms_headers() -> Dict[str, str]:
     auth = ""
     if MS_BASIC:
@@ -216,35 +193,19 @@ def _ms_headers() -> Dict[str, str]:
     }
 
 async def _ms_fetch_cost_for_sku(cli: httpx.AsyncClient, sku: str) -> Optional[float]:
-    """
-    Пытаемся найти product по article==SKU (а затем по code==SKU) и взять buyPrice.value.
-    Возвращаем None если не нашли.
-    """
     try:
-        # По article
-        r = await cli.get(
-            f"{MS_BASE}/entity/product",
-            params={"limit": 1, "filter": f"article={sku}"},
-            headers=_ms_headers(),
-        )
+        r = await cli.get(f"{MS_BASE}/entity/product", params={"limit": 1, "filter": f"article={sku}"}, headers=_ms_headers())
         r.raise_for_status()
         j = r.json()
         if (j.get("meta", {}).get("size") or 0) > 0 and j.get("rows"):
-            row = j["rows"][0]
-            bp = (row.get("buyPrice") or {}).get("value")
+            bp = (j["rows"][0].get("buyPrice") or {}).get("value")
             if bp is not None:
                 return float(bp)
-        # По code
-        r = await cli.get(
-            f"{MS_BASE}/entity/product",
-            params={"limit": 1, "filter": f"code={sku}"},
-            headers=_ms_headers(),
-        )
+        r = await cli.get(f"{MS_BASE}/entity/product", params={"limit": 1, "filter": f"code={sku}"}, headers=_ms_headers())
         r.raise_for_status()
         j = r.json()
         if (j.get("meta", {}).get("size") or 0) > 0 and j.get("rows"):
-            row = j["rows"][0]
-            bp = (row.get("buyPrice") or {}).get("value")
+            bp = (j["rows"][0].get("buyPrice") or {}).get("value")
             if bp is not None:
                 return float(bp)
     except Exception:
@@ -261,7 +222,6 @@ async def _ms_sync_costs(skus: Iterable[str]) -> Dict[str, float]:
             c = await _ms_fetch_cost_for_sku(cli, s)
             if c is not None:
                 out[s] = float(c)
-    # Сохраним в БД
     now = int(time.time() * 1000)
     with _connect() as con:
         con.executemany(
@@ -281,9 +241,7 @@ def _get_cost_map_for_skus(skus: Iterable[str]) -> Dict[str, float]:
         rows = list(con.execute(f"SELECT sku,cost FROM ms_costs WHERE sku IN ({q})", keys))
     return {r["sku"]: float(r["cost"] or 0.0) for r in rows}
 
-# --------------------------------------------------------------------------------------
-# Endpoints
-# --------------------------------------------------------------------------------------
+# ------------------------------ Endpoints ------------------------------
 @router.get(f"{PFX[0]}/ping")
 @router.get(f"{PFX[1]}/ping")
 def ping():
@@ -295,12 +253,8 @@ def ping():
 @router.post(f"{PFX[0]}/sync-by-ids")
 @router.post(f"{PFX[1]}/sync-by-ids")
 def sync_by_ids(items: List[BridgeLineIn], _: bool = Depends(require_api_key)):
-    """
-    Принимаем плоские строки (результат ids.async) и UPSERT по (order_id, line_index)
-    """
     if not items:
         return {"inserted": 0, "updated": 0, "skipped": 0}
-
     inserted = 0
     updated = 0
     skipped = 0
@@ -345,11 +299,9 @@ def sync_by_ids(items: List[BridgeLineIn], _: bool = Depends(require_api_key)):
             except Exception:
                 total = unit * qty
             line_index = int(it.line_index or 0)
-
             con.execute(sql, (order_id, order_code, state, date_ms, sku, title, qty, unit, total, line_index))
             updated += 1
         con.commit()
-
     processed = len(items) - skipped
     if updated == 0 and processed > 0:
         inserted = processed
@@ -367,17 +319,11 @@ def list_by_sku(
     order: str = Query("asc"),
     _: bool = Depends(require_api_key),
 ):
-    df, dt = _to_ms(date_from), _to_ms(date_to)
-    if df is None or dt is None:
-        # date_from/to приходит как YYYY-MM-DD -> _to_ms понимает
-        try:
-            df = int(datetime.fromisoformat(date_from).replace(tzinfo=timezone.utc).timestamp() * 1000)
-            dt = int((datetime.fromisoformat(date_to).replace(tzinfo=timezone.utc).timestamp() + 86400) * 1000) - 1
-        except Exception:
-            raise HTTPException(400, "date_from/date_to must be YYYY-MM-DD")
-    else:
-        dt = dt + 24*3600*1000 - 1
-
+    try:
+        df = int(datetime.fromisoformat(date_from).replace(tzinfo=timezone.utc).timestamp() * 1000)
+        dt = int((datetime.fromisoformat(date_to).replace(tzinfo=timezone.utc).timestamp() + 86400) * 1000) - 1
+    except Exception:
+        raise HTTPException(400, "date_from/date_to must be YYYY-MM-DD")
     with _connect() as con:
         rows = list(
             con.execute(
@@ -406,35 +352,12 @@ def list_by_sku(
         )
     return {"sku": sku, "date_from": date_from, "date_to": date_to, "count": len(items), "items": items}
 
-@router.get(f"{PFX[0]}/by-orders")
-@router.get(f"{PFX[1]}/by-orders")
-def by_orders(
-    date_from: str = Query(..., description="YYYY-MM-DD"),
-    date_to: str = Query(..., description="YYYY-MM-DD"),
-    state: Optional[str] = Query(None, description="CSV статусов"),
-    order: str = Query("asc"),
-    _: bool = Depends(require_api_key),
-) -> OrdersResponse:
-    try:
-        start_ms = int(datetime.fromisoformat(date_from).replace(tzinfo=timezone.utc).timestamp() * 1000)
-        end_ms = int((datetime.fromisoformat(date_to).replace(tzinfo=timezone.utc).timestamp() + 86400) * 1000) - 1
-    except Exception:
-        raise HTTPException(400, "date_from/date_to must be YYYY-MM-DD")
-
-    states = _parse_states(state)
-    order_dir = "ASC" if order.lower() == "asc" else "DESC"
-
+def _collect_orders(where_sql: str, params: List[Any], order_dir: str) -> OrdersResponse:
     with _connect() as con:
-        where = ["date_utc_ms BETWEEN ? AND ?"]
-        params: List[Any] = [start_ms, end_ms]
-        if states:
-            where.append("state IN (%s)" % ",".join("?" for _ in states))
-            params.extend(states)
-
         sql_orders = f"""
             SELECT order_id, order_code, MIN(date_utc_ms) AS date_utc_ms, MAX(state) as state
             FROM bridge_lines
-            WHERE {' AND '.join(where)}
+            WHERE {where_sql}
             GROUP BY order_id, order_code
             ORDER BY date_utc_ms {order_dir}
         """
@@ -442,6 +365,9 @@ def by_orders(
         sql_items = "SELECT sku,title,qty,unit_price,total_price FROM bridge_lines WHERE order_id=? ORDER BY line_index ASC"
 
         out: List[OrderOut] = []
+        total_lines = 0
+        revenue_sum = 0.0
+
         for r in o_rows:
             oid, oc = r["order_id"], r["order_code"]
             items_rows = list(con.execute(sql_items, (oid,)))
@@ -452,11 +378,13 @@ def by_orders(
                 unit = float(ir["unit_price"] or 0.0)
                 tot = float(ir["total_price"] or (unit * qty))
                 revenue += tot
+                total_lines += 1
                 items.append(
                     OrderItemOut(
                         sku=ir["sku"], title=ir["title"], qty=qty, unit_price=unit, total_price=tot
                     )
                 )
+            revenue_sum += revenue
             out.append(
                 OrderOut(
                     order_id=oid,
@@ -467,17 +395,67 @@ def by_orders(
                     totals={"revenue": round(revenue, 2)},
                 )
             )
-    return OrdersResponse(orders=out, source_used="bridge_v2")
 
-# ---------- Обогащённая версия: подбираем себестоимость из МойСклад (не FIFO) ----------
+    stats = {"orders": len(out), "lines": total_lines, "revenue": round(revenue_sum, 2)}
+    return OrdersResponse(orders=out, source_used="bridge_v2", stats=stats)
+
+@router.get(f"{PFX[0]}/by-orders")
+@router.get(f"{PFX[1]}/by-orders")
+def by_orders(
+    date_from: Optional[str] = Query(None, description="YYYY-MM-DD"),
+    date_to: Optional[str] = Query(None, description="YYYY-MM-DD"),
+    state: Optional[str] = Query(None, description="CSV статусов"),
+    order: str = Query("asc"),
+    codes: Optional[str] = Query(None, description="CSV order_code; если задано — даты игнорируются"),
+    ids: Optional[str] = Query(None, description="CSV order_id; если задано — даты игнорируются"),
+    _: bool = Depends(require_api_key),
+) -> OrdersResponse:
+    states = _parse_csv(state)
+    order_dir = "ASC" if order.lower() == "asc" else "DESC"
+
+    codes_list = _parse_csv(codes)
+    ids_list = _parse_csv(ids)
+
+    # === приоритет: точный список из «Номера заказов (для сверки)»
+    if codes_list or ids_list:
+        parts = []
+        params: List[Any] = []
+        if codes_list:
+            parts.append(f"order_code IN ({','.join('?' for _ in codes_list)})")
+            params += codes_list
+        if ids_list:
+            parts.append(f"order_id IN ({','.join('?' for _ in ids_list)})")
+            params += ids_list
+        if states:
+            parts.append(f"state IN ({','.join('?' for _ in states)})")
+            params += states
+        where_sql = " AND ".join(parts) if parts else "1=0"
+        return _collect_orders(where_sql, params, order_dir)
+
+    # === иначе работаем по датам (как раньше)
+    if not (date_from and date_to):
+        raise HTTPException(400, "Either provide (codes/ids) or (date_from & date_to)")
+    try:
+        start_ms = int(datetime.fromisoformat(date_from).replace(tzinfo=timezone.utc).timestamp() * 1000)
+        end_ms = int((datetime.fromisoformat(date_to).replace(tzinfo=timezone.utc).timestamp() + 86400) * 1000) - 1
+    except Exception:
+        raise HTTPException(400, "date_from/date_to must be YYYY-MM-DD")
+
+    parts = ["date_utc_ms BETWEEN ? AND ?"]
+    params = [start_ms, end_ms]
+    if states:
+        parts.append(f"state IN ({','.join('?' for _ in states)})")
+        params += states
+    return _collect_orders(" AND ".join(parts), params, order_dir)
+
+# ---------- Обогащённая версия: дополнение себестоимости из МС ----------
 @router.post(f"{PFX[0]}/ms/sync-costs")
 @router.post(f"{PFX[1]}/ms/sync-costs")
 async def ms_sync_costs(
-    date_from: Optional[str] = Query(None, description="YYYY-MM-DD; если не задано — все уникальные SKU"),
+    date_from: Optional[str] = Query(None, description="YYYY-MM-DD"),
     date_to: Optional[str] = Query(None),
     _: bool = Depends(require_api_key),
 ):
-    # соберём SKU из БД (за период, если задан)
     with _connect() as con:
         if date_from and date_to:
             try:
@@ -498,18 +476,15 @@ async def ms_sync_costs(
 @router.get(f"{PFX[0]}/by-orders-enriched")
 @router.get(f"{PFX[1]}/by-orders-enriched")
 def by_orders_enriched(
-    date_from: str = Query(..., description="YYYY-MM-DD"),
-    date_to: str = Query(..., description="YYYY-MM-DD"),
+    date_from: Optional[str] = Query(None, description="YYYY-MM-DD"),
+    date_to: Optional[str] = Query(None, description="YYYY-MM-DD"),
     state: Optional[str] = Query(None, description="CSV статусов"),
     order: str = Query("asc"),
+    codes: Optional[str] = Query(None, description="CSV order_code"),
+    ids: Optional[str] = Query(None, description="CSV order_id"),
     _: bool = Depends(require_api_key),
 ) -> OrdersResponse:
-    """
-    То же, что /by-orders, но дополняем строки cost/profit, используя ms_costs.
-    (Это НЕ FIFO, а средняя входная цена по SKU. FIFO подключим в этом же модуле позже.)
-    """
-    base = by_orders(date_from=date_from, date_to=date_to, state=state, order=order, _=True)
-    # соберём все SKU
+    base = by_orders(date_from=date_from, date_to=date_to, state=state, order=order, codes=codes, ids=ids, _=True)
     skus: List[str] = []
     for o in base.orders:
         for it in o.items:
@@ -517,7 +492,9 @@ def by_orders_enriched(
                 skus.append(it.sku)
     cost_map = _get_cost_map_for_skus(skus)
 
-    # проставим себестоимость и прибыль
+    revenue_sum = 0.0
+    cost_sum = 0.0
+
     for o in base.orders:
         total_cost = 0.0
         for it in o.items:
@@ -530,5 +507,14 @@ def by_orders_enriched(
         rev = float(o.totals.get("revenue", 0.0))
         o.totals["cost"] = round(total_cost, 2)
         o.totals["profit"] = round(rev - total_cost, 2)
+        revenue_sum += rev
+        cost_sum += total_cost
 
+    base.stats = {
+        "orders": base.stats.get("orders", len(base.orders)),
+        "lines": base.stats.get("lines", sum(len(o.items) for o in base.orders)),
+        "revenue": round(revenue_sum, 2),
+        "cost": round(cost_sum, 2),
+        "profit": round(revenue_sum - cost_sum, 2),
+    }
     return base
