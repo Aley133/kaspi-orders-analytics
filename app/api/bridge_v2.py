@@ -418,37 +418,37 @@ async def bridge_sync_by_ids(items: List[SyncItem] = Body(...)):
 
     # достраиваем через Kaspi API те заказы, где SKU не было
     for ref in fallback_refs:
-        try:
-            if BRIDGE_ONLY_STATE and ref.state and ref.state != BRIDGE_ONLY_STATE:
-                skipped_by_state += 1
-                continue
-            entries = await _fetch_entries_fallback(ref.id)
-            if not entries:
-                skipped_no_sku += 1
-                continue
-            fallback_used += 1
-            order_ms = _to_ms(ref.date)
-            for e in entries:
-                idx = e.get("__index")
-                if idx is None:
-                    idx = counters[ref.id]
-                    counters[ref.id] = int(idx) + 1
-                offline_rows = [{
-                    "order_id": str(ref.id),
-                    "line_index": int(idx),
-                    "order_code": _canon_str(ref.code, 64),
-                    "date_utc_ms": order_ms,
-                    "state": _canon_str(ref.state, 64),
-                    "sku": _canon_sku(e["sku"]),
-                    "title": _canon_str(e.get("title"), 512),
-                    "qty": int(e["qty"]),
-                    "unit_price": float(_safe_float(e["unit_price"]))),
-                    "total_price": float(_safe_float(e["total_price"]))),
-                }]
-                inserted += _upsert_rows(offline_rows)
-                touched_orders.add(str(ref.id))
-        except Exception:
-            errors.append("fallback_error")
+    try:
+        if BRIDGE_ONLY_STATE and ref.state and ref.state != BRIDGE_ONLY_STATE:
+            skipped_by_state += 1
+            continue
+        entries = await _fetch_entries_fallback(ref.id)
+        if not entries:
+            skipped_no_sku += 1
+            continue
+        fallback_used += 1
+        order_ms = _to_ms(ref.date)
+        for e in entries:
+            idx = e.get("__index")
+            if idx is None:
+                idx = counters[ref.id]
+                counters[ref.id] = int(idx) + 1
+            offline_rows = [{
+                "order_id": str(ref.id),
+                "line_index": int(idx),
+                "order_code": _canon_str(ref.code, 64),
+                "date_utc_ms": order_ms,
+                "state": _canon_str(ref.state, 64),
+                "sku": _canon_sku(e.get("sku")),
+                "title": _canon_str(e.get("title"), 512),
+                "qty": int(e.get("qty") or 1),
+                "unit_price": float(_safe_float(e.get("unit_price"))),
+                "total_price": float(_safe_float(e.get("total_price"))),
+            }]
+            inserted += _upsert_rows(offline_rows)
+            touched_orders.add(str(ref.id))
+    except Exception:
+        errors.append("fallback_error")
 
     return {
         "synced_orders": len(touched_orders),
