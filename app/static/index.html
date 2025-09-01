@@ -177,69 +177,7 @@
         <div class="kpi-item"><div class="kpi-label">Оборот</div><div class="kpi-value" id="kpiAmount">0</div></div>
       </section>
 
-      <!-- БЛОК FIFO -->
-      <section class="shell">
-        <div class="row" style="justify-content:space-between;align-items:center;">
-          <h2 style="margin:0">Прибыль (FIFO)</h2>
-          <div class="row" style="gap:10px;align-items:center">
-            <span id="profitKeyBadge" class="chip" title="Ключ для защищённых эндпоинтов"><span class="dot"></span><span>ключ не задан</span></span>
-            <span id="profitSyncChip" class="chip" title="Статус синхронизации"><span class="dot"></span><span>статус неизвестен</span></span>
-            <button type="button" class="btn secondary" id="btnProfitApiKey">API-Key</button>
-            <label for="profitGroup">Группировка</label>
-            <select id="profitGroup"><option value="day">День</option><option value="week">Неделя</option><option value="month">Месяц</option></select>
-            <button type="button" class="btn secondary" id="btnProfitSync">Синхронизировать</button>
-            <button type="button" class="btn secondary" id="btnProfitRebuild" title="Пересчитать списания FIFO за период">Перестроить FIFO</button>
-            <button type="button" class="btn" id="btnProfitSyncRebuild">Синхронизировать + Перестроить</button>
-          </div>
-        </div>
-
-        <div id="profitDbInfo" class="muted" style="margin:6px 0 10px"></div>
-
-        <div class="kpi" style="margin-top:10px">
-          <div class="kpi-item"><div class="kpi-label">Выручка</div><div class="kpi-value" id="kpiPRevenue">0</div></div>
-          <div class="kpi-item"><div class="kpi-label">Комиссия</div><div class="kpi-value" id="kpiPCommission">0</div></div>
-          <div class="kpi-item"><div class="kpi-label">Себестоимость</div><div class="kpi-value" id="kpiPCost">0</div></div>
-          <div class="kpi-item"><div class="kpi-label">Прибыль</div><div class="kpi-value" id="kpiPProfit">0</div></div>
-        </div>
-
-        <div id="profitChartHolder" style="margin-top:8px"><canvas id="profitChart"></canvas></div>
-        <div id="profitEmpty" class="muted" style="display:none;padding:8px 0">Нет данных для выбранного периода</div>
-
-        <div class="row" style="gap:16px; margin-top:16px; align-items:flex-start; flex-wrap:wrap">
-          <div style="flex:1; min-width:340px">
-            <h3 style="margin:0 0 6px">Таблица периодов</h3>
-            <table id="tbl-profit" class="table">
-              <thead><tr>
-                <th>Период</th><th>Выручка</th><th>Комиссия</th><th>Себестоимость</th><th>Прибыль</th><th>Номера заказа</th>
-              </tr></thead>
-              <tbody></tbody>
-            </table>
-          </div>
-
-          <div style="flex:1; min-width:340px">
-            <h3 style="margin:0 0 6px">Топ SKU по прибыли <span class="muted">(кликните SKU — покажем номера заказов)</span></h3>
-            <table id="tbl-profit-sku" class="table">
-              <thead><tr><th>SKU</th><th>Выручка</th><th>Комиссия</th><th>Себестоимость</th><th>Прибыль</th></tr></thead>
-              <tbody></tbody>
-            </table>
-          </div>
-        </div>
-
-        <div class="shell" style="margin-top:12px">
-          <div class="row" style="justify-content:space-between;align-items:center">
-            <h3 style="margin:0">Заказы по SKU</h3>
-            <div class="row">
-              <input type="text" id="skuSearch" placeholder="введите SKU" style="min-width:260px">
-              <button class="btn" id="btnSkuSearch" type="button">Показать</button>
-              <button class="btn secondary" id="btnSkuClear" type="button">Очистить</button>
-            </div>
-          </div>
-          <div id="skuOrdersInfo" class="muted" style="margin:8px 0"></div>
-          <div id="skuOrders"></div>
-        </div>
-      </section>
-
-      <!-- МАТРИЦА: № заказа → SKU -->
+      <!-- МАТРИЦА: № заказа → SKU (без FIFO-метрик) -->
       <section class="shell">
         <h3 style="margin:0 0 6px">Привязка: № заказа → SKU</h3>
         <div id="orderSkuMatrix" class="muted">Пусто…</div>
@@ -272,7 +210,7 @@ function fmt(n){ return nf.format(Math.round((Number(n) + Number.EPSILON) * 100)
 let BUSY = false;
 function setBusy(on){
   BUSY = !!on;
-  for(const id of ['btnProfitSync','btnProfitRebuild','btnProfitSyncRebuild','btn-run','btnSkuSearch']){
+  for(const id of ['btn-run']){
     const b = document.getElementById(id);
     if(!b) continue;
     b.disabled = on;
@@ -330,7 +268,7 @@ function fmtMs(ms){
 
 <script>
 /* ─────────── UI/STATE ─────────── */
-let citiesChart=null, profitChart=null;
+let citiesChart=null;
 window.APP_CURRENCY='KZT';
 window.__ordersByPeriod={};
 window.__orderToSkus={};
@@ -491,11 +429,9 @@ async function run(e){
       citiesChart = new Chart(ctx,{type:'bar',data:{labels,datasets:[{label:'Заказы',data:counts}]},options:{responsive:true,plugins:{legend:{display:false}}}});
     }
 
-    // ——— ПОЛНАЯ СИНХРОНИЗАЦИЯ МОСТА + визуализация ———
-    await runIdsJob();            // async выгрузка номеров (+обогащение)
-    await loadProfitFIFO();       // FIFO KPI/таблицы
-    await renderOrderSkuMatrix(); // матрица заказ→SKU
-    await checkProfitStatus(data);
+    // ——— Выгрузка номеров (+обогащение), мост и матрица ———
+    await runIdsJob();
+    await renderOrderSkuMatrix();
 
     setNote('Данные обновлены', 'ok');
   }catch(err){ setNote('Ошибка загрузки: ' + (err?.message || err), 'err'); }
@@ -591,18 +527,17 @@ async function renderOrderSkuMatrix(){
   box.innerHTML='Загружаем…'; box.classList.remove('muted');
 
   try{
-    const url = '/profit/bridge/by-orders-margins?' + new URLSearchParams({
+    const url = '/profit/bridge/by-orders?' + new URLSearchParams({
       date_from: df, date_to: dt, state: states, order: 'asc'
     }).toString();
-    const data = await fetchProfitJSON(url);
+    const data = await (await fetch(url)).json();
     const cur = window.APP_CURRENCY || 'KZT';
 
     if(!data.orders?.length){ box.classList.add('muted'); box.textContent='Нет данных'; return; }
 
     const tbl=document.createElement('table'); tbl.className='table';
     tbl.innerHTML=`<thead>
-      <tr><th style="width:200px">№ заказа</th><th>SKU</th>
-          <th>Выручка</th><th>Комиссия</th><th>Себестоимость</th><th>Прибыль</th></tr>
+      <tr><th style="width:200px">№ заказа</th><th>SKU</th><th>Название</th><th>Qty</th><th>Сумма строки</th></tr>
     </thead><tbody></tbody>`;
     const tb=tbl.querySelector('tbody');
 
@@ -611,15 +546,10 @@ async function renderOrderSkuMatrix(){
         const tr=document.createElement('tr');
 
         const tdNum=document.createElement('td'); tdNum.textContent = ord.order_code || ord.order_id || ''; tr.appendChild(tdNum);
-
-        const tdSku=document.createElement('td'); tdSku.className='matrix-sku';
-        const a=document.createElement('a'); a.textContent=it.sku||''; a.href='#';
-        a.onclick=(e)=>{ e.preventDefault(); showOrdersForSKU(it.sku); };
-        tdSku.appendChild(a); tr.appendChild(tdSku);
-
-        const cols=[it.total_price, it.commission, it.cost, it.profit]
-          .map(v => `${fmt(v||0)} ${cur}`);
-        for(const v of cols){ const td=document.createElement('td'); td.textContent=v; tr.appendChild(td); }
+        const tdSku=document.createElement('td'); tdSku.textContent = it.sku || ''; tr.appendChild(tdSku);
+        const tdTitle=document.createElement('td'); tdTitle.textContent = it.title || ''; tr.appendChild(tdTitle);
+        const tdQty=document.createElement('td'); tdQty.textContent = String(it.qty||1); tr.appendChild(tdQty);
+        const tdSum=document.createElement('td'); tdSum.textContent = `${fmt(it.total_price||0)} ${cur}`; tr.appendChild(tdSum);
 
         tb.appendChild(tr);
       }
@@ -627,13 +557,6 @@ async function renderOrderSkuMatrix(){
 
     box.innerHTML='';
     box.appendChild(tbl);
-
-    // диагностика источника
-    const diag=document.createElement('div'); diag.className='muted'; diag.style.marginTop='6px';
-    const any = data.orders?.[0];
-    const src = any?.source || data.source_used || '';
-    const err = any?.source_error || data.source_error || '';
-    if(src){ diag.textContent = `Источник позиций: ${src}${err?` — ${err}`:''}`; box.appendChild(diag); }
   }catch(e){
     box.className='muted'; box.textContent='Ошибка: ' + (e.message||e);
   }
@@ -772,240 +695,6 @@ async function renderIdsResult(data){
 </script>
 
 <script>
-/* ─────────── FIFO: ключ/инъекции + API-хелперы ─────────── */
-(()=> {
-  const KEY="KASPI_API_KEY";
-  const badge=()=>document.getElementById('profitKeyBadge');
-  function refreshBadge(){ const v=localStorage.getItem(KEY)||""; const el=badge(); el.querySelector('.dot').className='dot ' + (v ? 'on' : ''); el.querySelector('span:last-child').textContent = v ? 'ключ установлен' : 'ключ не задан'; }
-  window.KASPI_API_KEY=localStorage.getItem(KEY)||""; refreshBadge();
-
-  const origFetch=window.fetch.bind(window);
-  window.fetch=function(input,init){
-    try{
-      let urlStr=typeof input==='string'?input:(input&&input.url)||'';
-      if(urlStr.startsWith('/profit/')){
-        init=init||{};
-        const k=window.KASPI_API_KEY||'';
-        let headers=init.headers instanceof Headers?init.headers:new Headers(init.headers||{});
-        if(k) headers.set('X-API-Key',k);
-        init.headers=headers;
-        if(k){ const u=new URL(urlStr,location.origin); if(!u.searchParams.has('api_key')) u.searchParams.set('api_key',k);
-          input=(typeof input==='string')?(u.pathname+u.search):new Request(u.toString(),init);
-        }
-      }
-    }catch(_){}
-    return origFetch(input,init);
-  };
-
-  window.setApiKey=function(k){ localStorage.setItem(KEY,k||''); window.KASPI_API_KEY=k||''; refreshBadge(); };
-
-  document.addEventListener('DOMContentLoaded', ()=>{
-    document.getElementById('btnProfitApiKey')?.addEventListener('click', ()=>{
-      const v=prompt('Введите X-API-Key (сохранится в этом браузере):', window.KASPI_API_KEY||'');
-      if(v!==null){ setApiKey(v.trim()); alert('Сохранено. Повторите действие.'); }
-    });
-  });
-})();
-
-async function fetchProfitJSON(url, opts, _retry){
-  const r=await fetch(url, opts||{});
-  if(r.status===401||r.status===403){
-    if(!_retry){ const v=prompt('Укажите X-API-Key для блока FIFO:', window.KASPI_API_KEY||''); if(v!==null){ window.setApiKey(v.trim()); return fetchProfitJSON(url, opts, true); } }
-    throw new Error(await r.text()||'Unauthorized');
-  }
-  if(!r.ok){ const body=await r.text(); throw new Error(body||r.statusText||('HTTP '+r.status)); }
-  const ct=r.headers.get('content-type')||''; return ct.includes('application/json')?r.json():r.text();
-}
-
-function setFifoKPIs(total,cur){
-  const t=total||{revenue:0,commission:0,cost:0,profit:0};
-  document.getElementById('kpiPRevenue').textContent   = `${fmt(t.revenue||0)} ${cur}`;
-  document.getElementById('kpiPCommission').textContent= `${fmt(t.commission||0)} ${cur}`;
-  document.getElementById('kpiPCost').textContent      = `${fmt(t.cost||0)} ${cur}`;
-  document.getElementById('kpiPProfit').textContent    = `${fmt(t.profit||0)} ${cur}`;
-}
-
-function drawProfitChart(rows,cur){
-  const empty=document.getElementById('profitEmpty'); const holder=document.getElementById('profitChartHolder'); const canvas=document.getElementById('profitChart');
-  if(!canvas||typeof Chart==='undefined'){ if(empty) empty.style.display='block'; if(holder) holder.style.display='none'; return; }
-  const ctx=canvas.getContext('2d'); if(profitChart){ try{ profitChart.destroy(); }catch(_){ } profitChart=null; }
-  if(!(rows||[]).length){ if(empty) empty.style.display='block'; if(holder) holder.style.display='none'; return; }
-  if(empty) empty.style.display='none'; if(holder) holder.style.display='block';
-  profitChart=new Chart(ctx,{ type:'bar',
-    data:{ labels:(rows||[]).map(r=>r.period), datasets:[{ label:'Прибыль', data:(rows||[]).map(r=>Number(r.profit||0)) }] },
-    options:{ responsive:true, plugins:{ legend:{ display:false }, tooltip:{ callbacks:{ label:(c)=>`Прибыль: ${fmt(c.parsed.y)} ${cur}` } } }, scales:{ x:{ ticks:{ maxRotation:0 } }, y:{ beginAtZero:true } } }
-  });
-}
-
-async function pingProfitDb(){
-  try{ const info=await fetchProfitJSON('/profit/db/ping'); const driver=info?.driver||(info?.db_path?.startsWith('postgres')?'pg':'sqlite');
-    document.getElementById('profitDbInfo').textContent = `FIFO DB: ${driver}${info?.fallback_enabled?' · fallback:on':''}`;
-  }catch(_){ document.getElementById('profitDbInfo').textContent=''; }
-}
-</script>
-
-<script>
-/* ─────────── FIFO: операции ─────────── */
-async function syncProfit(){
-  const start=document.getElementById('start').value;
-  const end  =document.getElementById('end').value;
-  if(!start||!end){ setNote('Сначала задайте период (начало/конец).', 'err'); return; }
-
-  const tz=document.getElementById('tz').value||'Asia/Almaty';
-  const date_field=document.getElementById('date_field').value;
-  const use_bd=document.getElementById('use_bd')?.checked ? '1':'0';
-  const bd_start=document.getElementById('bd_start')?.value||'20:00';
-
-  try{
-    const qs=new URLSearchParams({ start,end,tz,date_field,states:'KASPI_DELIVERY',exclude_states:'CANCELED',use_bd,business_day_start:bd_start,order:'asc',grouped:'0',limit:'100000',with_items:'1',items_mode:'all' });
-    const ids=await (await fetch('/orders/ids?'+qs.toString())).json();
-
-    const orders=(ids.items||[]).filter(x=>x.state==='KASPI_DELIVERY').map(x=>{
-      const lines = Array.isArray(x.items)&&x.items.length
-        ? x.items.filter(li=>li&&li.sku).map(li=>({sku:String(li.sku),qty:Number(li.qty||1),unit_price:Number(li.unit_price ?? (li.total_price && li.qty ? li.total_price/li.qty : 0))}))
-        : (x.sku ? [{ sku:String(x.sku), qty:1, unit_price:Number(x.amount||0) }] : []);
-      return { id:x.id, date:x.date, customer:null, items:lines };
-    }).filter(o=>o.items.length);
-
-    if(!orders.length){ setNote('Нет заказов KASPI_DELIVERY с позициями в выбранном периоде', 'err'); return; }
-
-    const up=await fetch('/profit/orders/upsert-bulk',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({orders}) });
-    if(!up.ok) throw new Error(await up.text()||up.statusText);
-    const upRes=await up.json();
-
-    const rb=await fetch(`/profit/rebuild-ledger?date_from=${start}&date_to=${end}`,{method:'POST'});
-    if(!rb.ok) throw new Error(await rb.text()||rb.statusText);
-    const rbRes=await rb.json();
-
-    setNote(`Синхронизация FIFO: заказов=${upRes.orders_inserted+upRes.orders_updated}, позиций=${upRes.items_inserted}, списаний=${rbRes.recomputed}`, 'ok');
-
-    await runIdsJob(); await loadProfitFIFO(); await renderOrderSkuMatrix(); await checkProfitStatus();
-  }catch(e){ setNote('Синхронизация не удалась: ' + (e.message||e), 'err'); }
-}
-
-async function rebuildFifo(){
-  if(BUSY) return;
-  const df=document.getElementById('start').value;
-  const dt=document.getElementById('end').value;
-  if(!df||!dt){ setNote('Сначала задайте период (начало/конец).', 'err'); return; }
-  setBusy(true);
-  try{
-    const p=new URLSearchParams({date_from:df,date_to:dt});
-    const res=await fetchProfitJSON('/profit/rebuild-ledger?'+p.toString(),{method:'POST'});
-    setNote(`FIFO перестроен. Добавлено списаний: ${res?.recomputed||0}`, 'ok');
-    await runIdsJob(); await loadProfitFIFO(); await renderOrderSkuMatrix(); await checkProfitStatus();
-  }catch(e){ setNote('Перестроение FIFO не удалось: ' + e.message, 'err'); }
-  finally{ setBusy(false); }
-}
-
-async function syncAndRebuild(){
-  await syncProfit(); if(BUSY) return; setBusy(true);
-  try{
-    const df=document.getElementById('start').value; const dt=document.getElementById('end').value;
-    const p=new URLSearchParams({date_from:df,date_to:dt});
-    const res=await fetchProfitJSON('/profit/rebuild-ledger?'+p.toString(),{method:'POST'});
-    setNote(`Синхр.+пересчёт выполнены. Списаний: ${res?.recomputed||0}`, 'ok');
-    await runIdsJob(); await loadProfitFIFO(); await renderOrderSkuMatrix(); await checkProfitStatus();
-  }catch(e){ setNote('Пересчёт не удался: ' + e.message, 'err'); }
-  finally{ setBusy(false); }
-}
-</script>
-
-<script>
-/* ─────────── FIFO: статус + KPI + таблицы + Заказы по SKU ─────────── */
-function setSyncChip(state,text){
-  const el=document.getElementById('profitSyncChip'); const dot=el.querySelector('.dot');
-  dot.className='dot ' + (state==='ok'?'on':state==='warn'?'warn':state==='err'?'err':'');
-  el.querySelector('span:last-child').textContent=text; el.title=text;
-}
-
-async function checkProfitStatus(){
-  try{
-    const df=document.getElementById('start').value; const dt=document.getElementById('end').value;
-    if(!df||!dt){ setSyncChip('warn','нет периода'); return; }
-    const p=new URLSearchParams({ date_from:df, date_to:dt, group_by:'total', use_bd:(document.getElementById('use_bd')?.checked?'1':'0'), bd_start:(document.getElementById('bd_start')?.value||'20:00') });
-    const sum=await fetchProfitJSON('/profit/summary?'+p.toString());
-    const t=sum.total||{revenue:0,commission:0,cost:0,profit:0};
-
-    if((t.revenue||0)>0 || (t.cost||0)>0 || (t.commission||0)>0 || (t.profit||0)!==0) setSyncChip('ok','синхронизировано');
-    else setSyncChip('','нет данных FIFO в периоде');
-  }catch(_){ setSyncChip('err','ошибка проверки статуса'); }
-}
-
-async function loadProfitFIFO(){
-  const df=document.getElementById('start').value;
-  const dt=document.getElementById('end').value;
-  if(!df||!dt) return;
-
-  const use_bd=document.getElementById('use_bd')?.checked?'1':'0';
-  const bd_start=document.getElementById('bd_start')?.value||'20:00';
-  const group_by=document.getElementById('profitGroup')?.value||'day';
-
-  try{
-    const p=new URLSearchParams({date_from:df,date_to:dt,group_by,use_bd,bd_start});
-    const sum=await fetchProfitJSON('/profit/summary?'+p.toString());
-    const cur=sum.currency||window.APP_CURRENCY||'KZT';
-    setFifoKPIs(sum.total,cur); drawProfitChart(sum.rows||[], cur);
-
-    const tb=document.querySelector('#tbl-profit tbody'); tb.innerHTML='';
-    for(const r of (sum.rows||[])){
-      const tr=document.createElement('tr');
-      const nums=(window.__ordersByPeriod && window.__ordersByPeriod[r.period]) ? window.__ordersByPeriod[r.period] : [];
-      [ r.period, `${fmt(r.revenue)} ${cur}`, `${fmt(r.commission)} ${cur}`, `${fmt(r.cost)} ${cur}`, `${fmt(r.profit)} ${cur}` ]
-       .forEach(c=>{ const td=document.createElement('td'); td.textContent=c; tr.appendChild(td); });
-      const tdCodes=document.createElement('td'); tdCodes.textContent = nums.length ? nums.join(', ') : '—'; tdCodes.className='codes-cell'; tr.appendChild(tdCodes);
-      tb.appendChild(tr);
-    }
-
-    const top = await fetchProfitJSON('/profit/by-sku?'+new URLSearchParams({date_from:df,date_to:dt,limit:50}).toString());
-    const tbSku=document.querySelector('#tbl-profit-sku tbody'); tbSku.innerHTML='';
-    for(const row of (top.rows||[])){
-      const tr=document.createElement('tr');
-      const skuTd=document.createElement('td'); skuTd.textContent=row.sku; skuTd.className='clickable'; skuTd.title='Показать номера заказов этого SKU';
-      skuTd.addEventListener('click',()=>showOrdersForSKU(row.sku)); tr.appendChild(skuTd);
-      [row.revenue,row.commission,row.cost,row.profit].forEach(v=>{ const td=document.createElement('td'); td.textContent=`${fmt(v)} ${cur}`; tr.appendChild(td); });
-      tbSku.appendChild(tr);
-    }
-  }catch(e){
-    console.warn('FIFO:',e);
-    setFifoKPIs({revenue:0,commission:0,cost:0,profit:0}, window.APP_CURRENCY||'KZT');
-    drawProfitChart([], window.APP_CURRENCY||'KZT');
-    document.querySelector('#tbl-profit tbody').innerHTML='';
-    document.querySelector('#tbl-profit-sku tbody').innerHTML='';
-  }
-}
-
-async function showOrdersForSKU(sku){
-  if(!sku){ setNote('Укажите SKU', 'err'); return; }
-  const df=document.getElementById('start').value;
-  const dt=document.getElementById('end').value;
-  const info=document.getElementById('skuOrdersInfo');
-  const holder=document.getElementById('skuOrders');
-  info.textContent=`SKU: ${sku} · период ${df} — ${dt}`; holder.innerHTML='';
-  try{
-    setBusy(true);
-    const data=await fetchProfitJSON('/profit/bridge/list?'+new URLSearchParams({sku,date_from:df,date_to:dt,limit:100000}).toString());
-    const rows=data.items || data.rows || [];
-    if(!rows.length){ holder.innerHTML='<div class="muted">Ничего не найдено</div>'; return; }
-    const tbl=document.createElement('table'); tbl.className='table';
-    tbl.innerHTML=`<thead><tr><th>№ заказа</th><th>SKU</th><th>Название</th><th>Qty</th><th>Сумма строки</th><th>Состояние</th><th>Время</th></tr></thead><tbody></tbody>`;
-    const tb=tbl.querySelector('tbody');
-    for(const r of rows){
-      const tr=document.createElement('tr');
-      [ r.order_code||r.order_id||'', r.sku||'', r.title||'', String(r.qty||1),
-        fmt(r.total_price||r.unit_price||0)+' '+(window.APP_CURRENCY||'KZT'),
-        r.state||'', r.date||fmtMs(r.date_utc_ms) ]
-      .forEach(c=>{ const td=document.createElement('td'); td.textContent=c; tr.appendChild(td); });
-      tb.appendChild(tr);
-    }
-    holder.appendChild(tbl);
-    (document.getElementById('skuSearch')||{}).value=sku;
-  }catch(e){ holder.innerHTML=`<div class="muted">Ошибка: ${e.message||e}</div>`; }
-  finally{ setBusy(false); }
-}
-</script>
-
-<script>
 /* ─────────── BOOT ─────────── */
 document.addEventListener('DOMContentLoaded', async () => {
   try{
@@ -1029,19 +718,12 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     document.getElementById('f')?.addEventListener('submit', run);
     document.getElementById('themeToggle')?.addEventListener('change', (e)=>{ document.body.setAttribute('data-theme', e.target.checked ? 'dark' : 'light'); });
-    document.getElementById('profitGroup')?.addEventListener('change', loadProfitFIFO);
-    document.getElementById('btnProfitRebuild')?.addEventListener('click', rebuildFifo);
-    document.getElementById('btnProfitSync')?.addEventListener('click', syncProfit);
-    document.getElementById('btnProfitSyncRebuild')?.addEventListener('click', syncAndRebuild);
-    document.getElementById('btnSkuSearch')?.addEventListener('click', ()=>showOrdersForSKU((document.getElementById('skuSearch')?.value||'').trim()));
-    document.getElementById('btnSkuClear')?.addEventListener('click', ()=>{ document.getElementById('skuSearch').value=''; document.getElementById('skuOrders').innerHTML=''; document.getElementById('skuOrdersInfo').textContent=''; });
 
     ['use_bd','bd_start','assign_mode','store_until'].forEach(id=>{
       const el=document.getElementById(id); if(el) el.addEventListener('change', uiModeHint);
     });
 
     uiModeHint();
-    await pingProfitDb();
     await run(); // initial
   }catch(e){ setNote('Ошибка инициализации: ' + (e?.message||e), 'err'); }
 });
