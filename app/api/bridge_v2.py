@@ -1,4 +1,3 @@
-# app/api/bridge_v2.py
 from __future__ import annotations
 
 import base64
@@ -24,8 +23,13 @@ MS_BASE = os.getenv("MS_BASE", "https://api.moysklad.ru/api/remap/1.2").rstrip("
 MS_LOGIN = os.getenv("MS_LOGIN", "").strip()
 MS_PASSWORD = os.getenv("MS_PASSWORD", "").strip()
 MS_BASIC = os.getenv("MS_BASIC", "").strip()
+
 HTTPX_TIMEOUT = httpx.Timeout(connect=10.0, read=40.0, write=15.0, pool=40.0)
-HTTPX_LIMITS = httpx.Limits(max_connections=20, max_keepalive_connections=10)
+HTTPX_LIMITS = httpx.Limits(max_connections=30, max_keepalive_connections=12)
+
+# Если нужен «жёсткий» фильтр по состоянию при записи (например, только KASPI_DELIVERY):
+ONLY_STATE = (os.getenv("BRIDGE_ONLY_STATE") or "").strip() or None
+
 
 # ------------------------------ Security ------------------------------
 def require_api_key(request: Request):
@@ -36,11 +40,13 @@ def require_api_key(request: Request):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API key")
     return True
 
+
 # ------------------------------ DB ------------------------------
 def _connect() -> sqlite3.Connection:
     c = sqlite3.connect(DB_PATH)
     c.row_factory = sqlite3.Row
     return c
+
 
 def _init_db():
     with _connect() as con:
@@ -73,36 +79,9 @@ def _init_db():
               updated_at INTEGER
             )
         """)
-
-        # FIFO заготовки (на следующий шаг)
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS batches(
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              sku TEXT NOT NULL,
-              date_utc_ms INTEGER,
-              qty REAL NOT NULL,
-              unit_cost REAL NOT NULL,
-              source TEXT,
-              unique(sku, date_utc_ms, unit_cost, qty)
-            )
-        """)
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS fifo_ledger(
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              order_code TEXT,
-              order_id   TEXT,
-              date_utc_ms INTEGER,
-              sku TEXT,
-              qty REAL,
-              unit_price REAL,
-              revenue REAL,
-              cost REAL,
-              commission REAL,
-              profit REAL
-            )
-        """)
         con.commit()
 _init_db()
+
 
 # ------------------------------ Models ------------------------------
 class BridgeLineIn(BaseModel):
@@ -115,7 +94,9 @@ class BridgeLineIn(BaseModel):
     qty: Optional[int] = 1
     unit_price: Optional[float] = 0.0
     total_price: Optional[float] = 0.0
-    line_index: int = 0
+    amount: Optional[float] = None
+    line_index: Optional[int] = None
+
 
 class OrderItemOut(BaseModel):
     sku: Optional[str] = None
@@ -126,6 +107,7 @@ class OrderItemOut(BaseModel):
     cost: Optional[float] = None
     profit: Optional[float] = None
 
+
 class OrderOut(BaseModel):
     order_id: str
     order_code: Optional[str] = None
@@ -134,15 +116,18 @@ class OrderOut(BaseModel):
     items: List[OrderItemOut] = Field(default_factory=list)
     totals: Dict[str, float] = Field(default_factory=dict)
 
+
 class OrdersResponse(BaseModel):
     orders: List[OrderOut] = Field(default_factory=list)
     source_used: str = "bridge_v2"
     stats: Dict[str, float] = Field(default_factory=dict)
 
+
 # ------------------------------ Utils ------------------------------
 def _to_ms(value: Any) -> Optional[int]:
     if value is None:
         return None
+    # int seconds/ms
     try:
         n = int(str(value).strip())
         return n if n >= 10_000_000_000 else n * 1000
@@ -160,21 +145,25 @@ def _to_ms(value: Any) -> Optional[int]:
     except Exception:
         return None
 
+
 def _ms_to_iso(ms: Optional[int]) -> Optional[str]:
     if ms is None:
         return None
     return datetime.fromtimestamp(ms/1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+
 
 def _parse_csv(raw: Optional[str]) -> List[str]:
     if not raw:
         return []
     return [p.strip() for p in str(raw).split(",") if p.strip()]
 
+
 def _canon_sku(s: Optional[str]) -> Optional[str]:
     if not s:
         return None
     v = str(s).strip()
     return v or None
+
 
 # ------------------------------ MoySklad ------------------------------
 def _ms_headers() -> Dict[str, str]:
@@ -192,25 +181,124 @@ def _ms_headers() -> Dict[str, str]:
         "Content-Type": "application/json;charset=utf-8",
     }
 
-async def _ms_fetch_cost_for_sku(cli: httpx.AsyncClient, sku: str) -> Optional[float]:
-    try:
-        r = await cli.get(f"{MS_BASE}/entity/product", params={"limit": 1, "filter": f"article={sku}"}, headers=_ms_headers())
-        r.raise_for_status()
-        j = r.json()
-        if (j.get("meta", {}).get("size") or 0) > 0 and j.get("rows"):
-            bp = (j["rows"][0].get("buyPrice") or {}).get("value")
-            if bp is not None:
-                return float(bp)
-        r = await cli.get(f"{MS_BASE}/entity/product", params={"limit": 1, "filter": f"code={sku}"}, headers=_ms_headers())
-        r.raise_for_status()
-        j = r.json()
-        if (j.get("meta", {}).get("size") or 0) > 0 and j.get("rows"):
-            bp = (j["rows"][0].get("buyPrice") or {}).get("value")
-            if bp is not None:
-                return float(bp)
-    except Exception:
+
+async def _ms_buyprice_for_product(cli: httpx.AsyncClient, entity: str, _id_or_filter: str, by_filter: bool) -> Optional[float]:
+    """
+    Возвращает buyPrice.value/100 для product/variant.
+    entity: 'product' | 'variant'
+    _id_or_filter: id (если by_filter=False) или filter=... (если True)
+    """
+    url = f"{MS_BASE}/entity/{entity}"
+    params: Dict[str, str] = {"limit": "1"}
+    if by_filter:
+        params.update({"filter": _id_or_filter})
+    else:
+        url = f"{url}/{_id_or_filter}"
+
+    r = await cli.get(url, params=params if by_filter else None, headers=_ms_headers())
+    r.raise_for_status()
+    data = r.json()
+    row = None
+    if by_filter:
+        if (data.get("meta", {}).get("size") or 0) > 0 and data.get("rows"):
+            row = data["rows"][0]
+    else:
+        row = data
+
+    if not isinstance(row, dict):
         return None
+
+    # Основной источник — buyPrice.value (в копейках/тыйынах)
+    bp = (row.get("buyPrice") or {}).get("value")
+    if bp is not None:
+        try:
+            return float(bp) / 100.0
+        except Exception:
+            return None
+
+    # Иногда buyPrice пуст — попробуем из supplyPrices/minPrice/salePrices (всё тоже /100).
+    # Это эвристика, можно расширить при необходимости.
+    for key in ("minPrice",):
+        v = (row.get(key) or {}).get("value")
+        if v is not None:
+            try:
+                return float(v) / 100.0
+            except Exception:
+                pass
+
+    # salePrices — это цены продажи, но на крайний случай
+    if isinstance(row.get("salePrices"), list) and row["salePrices"]:
+        v = (row["salePrices"][0] or {}).get("value")
+        if v is not None:
+            try:
+                return float(v) / 100.0
+            except Exception:
+                pass
     return None
+
+
+async def _ms_fetch_cost_for_sku(cli: httpx.AsyncClient, sku: str) -> Optional[float]:
+    """
+    Ищем по variant и product, пробуем article/code/externalCode и общий search.
+    Возвращаем float в денежных единицах (value/100).
+    """
+    sku = str(sku).strip()
+    if not sku:
+        return None
+
+    # 1) Прямые точные фильтры
+    filters = [
+        ("variant", f"code={sku}"),
+        ("variant", f"article={sku}"),
+        ("variant", f"externalCode={sku}"),
+        ("product", f"code={sku}"),
+        ("product", f"article={sku}"),
+        ("product", f"externalCode={sku}"),
+    ]
+    for ent, flt in filters:
+        try:
+            v = await _ms_buyprice_for_product(cli, ent, flt, by_filter=True)
+            if v is not None:
+                return v
+        except httpx.HTTPError:
+            pass
+
+    # 2) Поиск search= (возвращает список; берём первую строку)
+    try:
+        r = await cli.get(f"{MS_BASE}/entity/product", params={"limit": 10, "search": sku}, headers=_ms_headers())
+        r.raise_for_status()
+        j = r.json()
+        row = (j.get("rows") or [None])[0]
+        if row and row.get("id"):
+            v = await _ms_buyprice_for_product(cli, "product", row["id"], by_filter=False)
+            if v is not None:
+                return v
+    except httpx.HTTPError:
+        pass
+
+    try:
+        r = await cli.get(f"{MS_BASE}/entity/variant", params={"limit": 10, "search": sku}, headers=_ms_headers())
+        r.raise_for_status()
+        j = r.json()
+        row = (j.get("rows") or [None])[0]
+        if row and row.get("id"):
+            v = await _ms_buyprice_for_product(cli, "variant", row["id"], by_filter=False)
+            if v is not None:
+                return v
+    except httpx.HTTPError:
+        pass
+
+    # 3) На крайний случай — если sku вида "123_456" — пробуем правую/левую часть.
+    if "_" in sku:
+        left, right = sku.split("_", 1)
+        for part in (right, left):
+            if part and part != sku:
+                v = await _ms_fetch_cost_for_sku(cli, part)
+                if v is not None:
+                    return v
+
+    return None
+
 
 async def _ms_sync_costs(skus: Iterable[str]) -> Dict[str, float]:
     uniq = sorted({s for s in (skus or []) if s})
@@ -232,6 +320,7 @@ async def _ms_sync_costs(skus: Iterable[str]) -> Dict[str, float]:
         con.commit()
     return out
 
+
 def _get_cost_map_for_skus(skus: Iterable[str]) -> Dict[str, float]:
     keys = sorted({s for s in skus if s})
     if not keys:
@@ -240,6 +329,7 @@ def _get_cost_map_for_skus(skus: Iterable[str]) -> Dict[str, float]:
     with _connect() as con:
         rows = list(con.execute(f"SELECT sku,cost FROM ms_costs WHERE sku IN ({q})", keys))
     return {r["sku"]: float(r["cost"] or 0.0) for r in rows}
+
 
 # ------------------------------ Endpoints ------------------------------
 @router.get(f"{PFX[0]}/ping")
@@ -250,14 +340,25 @@ def ping():
         m = int(con.execute("SELECT COUNT(*) FROM ms_costs").fetchone()[0])
     return {"ok": True, "db": DB_PATH, "lines": c, "ms_costs": m, "ts": int(time.time() * 1000)}
 
+
 @router.post(f"{PFX[0]}/sync-by-ids")
 @router.post(f"{PFX[1]}/sync-by-ids")
 def sync_by_ids(items: List[BridgeLineIn], _: bool = Depends(require_api_key)):
+    """
+    Принимаем плоские строки (как делает фронт из «Номера заказов (для сверки)»)
+    — и сохраняем позиции. Если total не пришёл, считаем unit*qty.
+    Можно включить жёсткую фильтрацию по состоянию через ONLY_STATE.
+    """
     if not items:
         return {"inserted": 0, "updated": 0, "skipped": 0}
+
     inserted = 0
     updated = 0
     skipped = 0
+
+    # локальный автоиндекс строк, если line_index не передан
+    counters: Dict[str, int] = {}
+
     with _connect() as con:
         con.execute("PRAGMA journal_mode=WAL;")
         con.execute("PRAGMA synchronous=NORMAL;")
@@ -281,76 +382,61 @@ def sync_by_ids(items: List[BridgeLineIn], _: bool = Depends(require_api_key)):
             if not order_id:
                 skipped += 1
                 continue
+            if ONLY_STATE and it.state and it.state != ONLY_STATE:
+                skipped += 1
+                continue
+
             order_code = (it.code or "").strip() or None
             state = (it.state or "").strip() or None
             date_ms = _to_ms(it.date)
             sku = _canon_sku(it.sku)
             title = (it.title or "").strip() or None
+
+            # qty
             try:
                 qty = int(it.qty or 1)
             except Exception:
                 qty = 1
-            try:
-                unit = float(it.unit_price or 0.0)
-            except Exception:
-                unit = 0.0
-            try:
-                total = float(it.total_price or (unit * qty))
-            except Exception:
-                total = unit * qty
-            line_index = int(it.line_index or 0)
+
+            # total: (total_price | amount) || unit*qty || 0
+            total = None
+            if it.total_price is not None:
+                total = float(it.total_price)
+            elif it.amount is not None:
+                total = float(it.amount)
+            elif it.unit_price is not None:
+                try:
+                    total = float(it.unit_price) * qty
+                except Exception:
+                    total = None
+            if total is None:
+                total = 0.0
+
+            # unit: если не пришёл — из total/qty
+            unit = None
+            if it.unit_price is not None:
+                try:
+                    unit = float(it.unit_price)
+                except Exception:
+                    unit = None
+            if unit is None:
+                unit = float(total) / max(1, qty)
+
+            # индекс строки
+            if it.line_index is not None:
+                line_index = int(it.line_index)
+            else:
+                line_index = counters.get(order_id, 0)
+                counters[order_id] = line_index + 1
+
             con.execute(sql, (order_id, order_code, state, date_ms, sku, title, qty, unit, total, line_index))
             updated += 1
         con.commit()
+
     processed = len(items) - skipped
-    if updated == 0 and processed > 0:
-        inserted = processed
-    else:
-        inserted = max(0, processed - updated)
+    inserted = max(0, processed - updated)
     return {"inserted": inserted, "updated": updated, "skipped": skipped}
 
-@router.get(f"{PFX[0]}/list")
-@router.get(f"{PFX[1]}/list")
-def list_by_sku(
-    sku: str = Query(...),
-    date_from: str = Query(...),
-    date_to: str = Query(...),
-    limit: int = Query(100000, ge=1, le=200000),
-    order: str = Query("asc"),
-    _: bool = Depends(require_api_key),
-):
-    try:
-        df = int(datetime.fromisoformat(date_from).replace(tzinfo=timezone.utc).timestamp() * 1000)
-        dt = int((datetime.fromisoformat(date_to).replace(tzinfo=timezone.utc).timestamp() + 86400) * 1000) - 1
-    except Exception:
-        raise HTTPException(400, "date_from/date_to must be YYYY-MM-DD")
-    with _connect() as con:
-        rows = list(
-            con.execute(
-                f"""SELECT order_id, order_code, date_utc_ms, state, sku, title, qty, unit_price, total_price
-                    FROM bridge_lines
-                    WHERE sku=? AND date_utc_ms BETWEEN ? AND ?
-                    ORDER BY date_utc_ms {'ASC' if order.lower()=='asc' else 'DESC'}, order_id, line_index
-                    LIMIT ?""",
-                (sku, df, dt, int(limit)),
-            )
-        )
-    items = []
-    for r in rows:
-        items.append(
-            dict(
-                order_id=r["order_id"],
-                order_code=r["order_code"],
-                date=_ms_to_iso(r["date_utc_ms"]),
-                state=r["state"],
-                sku=r["sku"],
-                title=r["title"],
-                qty=int(r["qty"] or 1),
-                unit_price=float(r["unit_price"] or 0.0),
-                total_price=float(r["total_price"] or 0.0),
-            )
-        )
-    return {"sku": sku, "date_from": date_from, "date_to": date_to, "count": len(items), "items": items}
 
 def _collect_orders(where_sql: str, params: List[Any], order_dir: str) -> OrdersResponse:
     with _connect() as con:
@@ -399,6 +485,7 @@ def _collect_orders(where_sql: str, params: List[Any], order_dir: str) -> Orders
     stats = {"orders": len(out), "lines": total_lines, "revenue": round(revenue_sum, 2)}
     return OrdersResponse(orders=out, source_used="bridge_v2", stats=stats)
 
+
 @router.get(f"{PFX[0]}/by-orders")
 @router.get(f"{PFX[1]}/by-orders")
 def by_orders(
@@ -416,7 +503,7 @@ def by_orders(
     codes_list = _parse_csv(codes)
     ids_list = _parse_csv(ids)
 
-    # === приоритет: точный список из «Номера заказов (для сверки)»
+    # приоритет — точный список из «Номера заказов (для сверки)»
     if codes_list or ids_list:
         parts = []
         params: List[Any] = []
@@ -432,7 +519,7 @@ def by_orders(
         where_sql = " AND ".join(parts) if parts else "1=0"
         return _collect_orders(where_sql, params, order_dir)
 
-    # === иначе работаем по датам (как раньше)
+    # иначе — по датам
     if not (date_from and date_to):
         raise HTTPException(400, "Either provide (codes/ids) or (date_from & date_to)")
     try:
@@ -448,7 +535,8 @@ def by_orders(
         params += states
     return _collect_orders(" AND ".join(parts), params, order_dir)
 
-# ---------- Обогащённая версия: дополнение себестоимости из МС ----------
+
+# ---------- Обогащённая версия: добавляем себестоимость из МС ----------
 @router.post(f"{PFX[0]}/ms/sync-costs")
 @router.post(f"{PFX[1]}/ms/sync-costs")
 async def ms_sync_costs(
@@ -472,6 +560,7 @@ async def ms_sync_costs(
     skus = [r["sku"] for r in rows if r["sku"]]
     synced = await _ms_sync_costs(skus)
     return {"ok": True, "synced": len(synced), "examples": dict(list(synced.items())[:5])}
+
 
 @router.get(f"{PFX[0]}/by-orders-enriched")
 @router.get(f"{PFX[1]}/by-orders-enriched")
