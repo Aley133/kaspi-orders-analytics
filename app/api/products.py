@@ -599,6 +599,29 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
                 ok = c.execute("PRAGMA integrity_check").fetchone()[0]
             return {"ok": ok == "ok", "driver": "sqlite"}
 
+
+    @router.post("/db/ensure-sku/{sku}")
+    async def ensure_sku(
+        sku: str,
+        name: str = Query(...),
+        price: float = Query(0.0),
+        qty: int = Query(0),
+        active: int = Query(1),
+        brand: Optional[str] = None,
+        category: Optional[str] = None,
+        barcode: Optional[str] = None,
+        _: bool = Depends(require_api_key),
+    ):
+        _ensure_schema()
+        payload = [{
+            "sku": sku, "code": sku, "name": name,
+            "price": float(price), "qty": int(qty),
+            "active": int(active), "brand": brand,
+            "category": category, "barcode": barcode,
+        }]
+        ins, upd = _upsert_products(payload)
+        return {"ok": True, "inserted": ins, "updated": upd}
+    
     # Каталог (Kaspi)
     @router.get("/list")
     async def list_products(
