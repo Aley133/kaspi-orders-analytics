@@ -10,6 +10,7 @@ import os, shutil
 import sqlite3
 from xml.etree import ElementTree as ET
 from contextlib import contextmanager
+import asyncio
 
 # ──────────────────────────────────────────────────────────────────────────────
 # API-ключ (для write-операций)
@@ -46,6 +47,27 @@ except Exception:
         except Exception:
             ProductStock = None
             normalize_row = None
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Optional imports from debug_sku (для ensure-sku)
+# ──────────────────────────────────────────────────────────────────────────────
+try:
+    from app.debug_sku import (
+        build_window_ms,
+        _iter_orders_httpx,
+        _fetch_by_order_id,
+        title_candidates,
+        sku_candidates,
+    )  # type: ignore
+except Exception:
+    try:
+        from ..debug_sku import build_window_ms, _iter_orders_httpx, _fetch_by_order_id, title_candidates, sku_candidates  # type: ignore
+    except Exception:
+        build_window_ms = None
+        _iter_orders_httpx = None
+        _fetch_by_order_id = None
+        title_candidates = None
+        sku_candidates = None
 
 # ──────────────────────────────────────────────────────────────────────────────
 # DB backend switch (PG via SQLAlchemy / fallback SQLite)
@@ -176,7 +198,7 @@ def _ensure_schema():
                 tax_percent DOUBLE PRECISION DEFAULT 0.0
             );
             """))
-            # Миграции «на лету»
+            # Миграции «на лету»: страховки под FIFO
             c.execute(_q("""
             DO $$
             BEGIN
@@ -194,12 +216,12 @@ def _ensure_schema():
             c.execute(_q("""
             UPDATE batches
                SET batch_code = CONCAT(
-                    SUBSTRING('ABCDEFGHJKLMNPQRSTUVWXYZ23456789' FROM floor(random()*32)::int + 1 FOR 1),
-                    SUBSTRING('ABCDEFGHJKLMNPQRSTUVWXYZ23456789' FROM floor(random()*32)::int + 1 FOR 1),
-                    SUBSTRING('ABCDEFGHJKLMNPQRSTUVWXYZ23456789' FROM floor(random()*32)::int + 1 FOR 1),
-                    SUBSTRING('ABCDEFGHJKLMNPQRSTUVWXYZ23456789' FROM floor(random()*32)::int + 1 FOR 1),
-                    SUBSTRING('ABCDEFGHJKLMNPQRSTUVWXYZ23456789' FROM floor(random()*32)::int + 1 FOR 1),
-                    SUBSTRING('ABCDEFGHJKLMNPQRSTUVWXYZ23456789' FROM floor(random()*32)::int + 1 FOR 1)
+                    SUBSTRING('ABCDEFGHJKLMNPQRSTUVWXYZ23456789' FROM floor(random())*32::int + 1 FOR 1),
+                    SUBSTRING('ABCDEFGHJKLMNPQRSTUVWXYZ23456789' FROM floor(random())*32::int + 1 FOR 1),
+                    SUBSTRING('ABCDEFGHJKLMNPQRSTUVWXYZ23456789' FROM floor(random())*32::int + 1 FOR 1),
+                    SUBSTRING('ABCDEFGHJKLMNPQRSTUVWXYZ23456789' FROM floor(random())*32::int + 1 FOR 1),
+                    SUBSTRING('ABCDEFGHJKLMNPQRSTUVWXYZ23456789' FROM floor(random())*32::int + 1 FOR 1),
+                    SUBSTRING('ABCDEFGHJKLMNPQRSTUVWXYZ23456789' FROM floor(random())*32::int + 1 FOR 1)
                )
              WHERE (batch_code IS NULL OR batch_code='');
             """))
@@ -230,8 +252,7 @@ def _ensure_schema():
                 commission_pct REAL,
                 batch_code TEXT,
                 qty_sold INTEGER DEFAULT 0,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY(sku) REFERENCES products(sku) ON DELETE CASCADE
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
             );
 
             CREATE TABLE IF NOT EXISTS categories(
@@ -521,7 +542,7 @@ def _recount_qty_sold_from_ledger() -> int:
     updated = 0
     with _db() as c:
         # найти подходящую таблицу леджера
-        ledgers = ["fifo_ledger", "profit_fifo_ledger", "ledger_fifo"]
+        ledgers = ["profit_fifo_ledger", "fifo_ledger", "ledger_fifo"]
         ledger = next((t for t in ledgers if _table_exists(c, t)), None)
         if not ledger:
             return 0
@@ -538,7 +559,6 @@ def _recount_qty_sold_from_ledger() -> int:
                 f"SELECT {batch_col} AS bid, SUM({qty_col}) AS used FROM {ledger} GROUP BY {batch_col}"
             )).all()
             used = {int(r._mapping["bid"]): int(r._mapping["used"] or 0) for r in rows}
-            # обнулить и обновить только то, что есть
             c.execute(_q("UPDATE batches SET qty_sold = 0 WHERE qty_sold IS NULL"))
             for bid, val in used.items():
                 r = c.execute(_q("UPDATE batches SET qty_sold=:v WHERE id=:bid AND COALESCE(qty_sold,0) <> :v"),
@@ -999,7 +1019,7 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
         return {"status": "ok", "integrity": ok}
 
     # ──────────────────────────────────────────────────────────────────────────
-    # Остатки и пересчёт qty_sold
+    # Остатки, продано, пересчёт qty_sold
     # ──────────────────────────────────────────────────────────────────────────
     @router.get("/batches/with-leftovers")
     async def batches_with_leftovers(q: Optional[str] = Query(None, description="поиск по SKU")):
@@ -1033,5 +1053,135 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
     async def batches_recount_sold(_: bool = Depends(require_api_key)):
         changed = _recount_qty_sold_from_ledger()
         return {"ok": True, "updated_batches": int(changed)}
+
+    # NEW: агрегат «сколько продано по SKU» из леджера
+    @router.get("/db/sold-by-sku")
+    async def sold_by_sku(sku: Optional[str] = Query(None, description="Если передан — только по одному SKU")):
+        _ensure_schema()
+        with _db() as c:
+            if not _table_exists(c, "profit_fifo_ledger"):
+                return {"ok": True, "rows": []}
+            if _USE_PG:
+                if sku:
+                    rows = c.execute(_q(
+                        "SELECT sku, COALESCE(SUM(qty),0) AS sold FROM profit_fifo_ledger WHERE sku=:s GROUP BY sku"
+                    ), {"s": sku}).all()
+                else:
+                    rows = c.execute(_q(
+                        "SELECT sku, COALESCE(SUM(qty),0) AS sold FROM profit_fifo_ledger GROUP BY sku ORDER BY sku"
+                    )).all()
+                rows = _rows_to_dicts(rows)
+            else:
+                if sku:
+                    rows = [dict(r) for r in c.execute(
+                        "SELECT sku, COALESCE(SUM(qty),0) AS sold FROM profit_fifo_ledger WHERE sku=? GROUP BY sku", (sku,)
+                    ).fetchall()]
+                else:
+                    rows = [dict(r) for r in c.execute(
+                        "SELECT sku, COALESCE(SUM(qty),0) AS sold FROM profit_fifo_ledger GROUP BY sku ORDER BY sku"
+                    ).fetchall()]
+        return {"ok": True, "rows": rows}
+
+    # NEW: партии с проданным qty из леджера
+    @router.get("/db/price-batches-with-sold/{sku}")
+    async def price_batches_with_sold(sku: str):
+        _ensure_schema()
+        with _db() as c:
+            if not _table_exists(c, "profit_fifo_ledger"):
+                # fallback — без sold_qty (будет 0)
+                if _USE_PG:
+                    rows = c.execute(_q(
+                        "SELECT id, date, qty, 0 AS sold_qty, unit_cost, note, commission_pct, batch_code "
+                        "FROM batches WHERE sku=:s ORDER BY date, id"
+                    ), {"s": sku}).all()
+                    rows = _rows_to_dicts(rows)
+                else:
+                    rows = [dict(r) for r in c.execute(
+                        "SELECT id, date, qty, 0 AS sold_qty, unit_cost, note, commission_pct, batch_code "
+                        "FROM batches WHERE sku=? ORDER BY date, id", (sku,)
+                    ).fetchall()]
+                return {"ok": True, "sku": sku, "batches": rows}
+
+            if _USE_PG:
+                rows = c.execute(_q(
+                    "SELECT b.id, b.date, b.qty, "
+                    "       COALESCE(l.sold,0) AS sold_qty, "
+                    "       b.unit_cost, b.note, b.commission_pct, b.batch_code "
+                    "  FROM batches b "
+                    "  LEFT JOIN (SELECT batch_id, SUM(qty) AS sold FROM profit_fifo_ledger GROUP BY batch_id) l "
+                    "    ON l.batch_id = b.id "
+                    " WHERE b.sku=:s "
+                    " ORDER BY b.date, b.id"
+                ), {"s": sku}).all()
+                rows = _rows_to_dicts(rows)
+            else:
+                rows = [dict(r) for r in c.execute(
+                    "SELECT b.id, b.date, b.qty, "
+                    "       COALESCE(l.sold,0) AS sold_qty, "
+                    "       b.unit_cost, b.note, b.commission_pct, b.batch_code "
+                    "  FROM batches b "
+                    "  LEFT JOIN (SELECT batch_id, SUM(qty) AS sold FROM profit_fifo_ledger GROUP BY batch_id) l "
+                    "    ON l.batch_id = b.id "
+                    " WHERE b.sku=? "
+                    " ORDER BY b.date, b.id", (sku,)
+                ).fetchall()]
+        return {"ok": True, "sku": sku, "batches": rows}
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # (Опционально) ENSURE-SKU: найти «новый» товар по заказам и добавить в products
+    # ──────────────────────────────────────────────────────────────────────────
+    @router.post("/db/ensure-sku/{sku}")
+    async def ensure_sku(
+        sku: str,
+        start: str = Query(..., description="YYYY-MM-DD"),
+        end: str = Query(..., description="YYYY-MM-DD"),
+        tz: str = Query("Asia/Almaty"),
+        date_field: str = Query("creationDate"),
+        _: bool = Depends(require_api_key),
+    ):
+        """
+        Если каталог Kaspi не отдаёт позицию, пробуем найти SKU среди позиций заказов
+        за окно [start..end] и апсертом завести его в products.
+        """
+        if not (build_window_ms and _iter_orders_httpx and _fetch_by_order_id and title_candidates and sku_candidates):
+            raise HTTPException(status_code=501, detail="debug_sku helpers недоступны на сервере")
+        _ensure_schema()
+
+        s_ms, e_ms = build_window_ms(start, end, tz)
+        found_title: Optional[str] = None
+        first_brand: Optional[str] = None
+
+        async def _scan() -> bool:
+            nonlocal found_title, first_brand
+            orders = await _iter_orders_httpx(s_ms, e_ms, date_field, page_size=50, max_pages=50)
+            # идём по заказам (как в debug_sample_full), вытаскиваем все позиции
+            for od in orders:
+                oid = od.get("id")
+                brief = await _fetch_by_order_id(str(oid))
+                for ent in (brief.get("entries") or []):
+                    skus = (ent.get("sku_candidates") or {})
+                    titles = (ent.get("title_candidates") or {})
+                    # нормализуем: проверим прямые и вложенные кандидаты
+                    vals = {str(v).strip() for v in skus.values() if isinstance(v, (str, int, float))}
+                    if sku in vals:
+                        # нашли
+                        found_title = next(iter(titles.values()), None)
+                        # бренда обычно нет в entries; оставим None
+                        return True
+            return False
+
+        ok = await _scan()
+        if not ok:
+            return {"ok": False, "message": "SKU не найден в заказах за указанный период"}
+
+        # апсертим в products
+        inserted, updated = _upsert_products([{
+            "id": sku, "code": sku,
+            "name": found_title or sku,
+            "brand": first_brand,
+            "qty": 0, "price": 0.0, "active": None
+        }])
+
+        return {"ok": True, "sku": sku, "name": found_title or sku, "inserted": inserted, "updated": updated}
 
     return router
