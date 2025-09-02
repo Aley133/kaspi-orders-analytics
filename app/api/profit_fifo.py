@@ -13,6 +13,23 @@ from psycopg.rows import dict_row
 # DB
 # ──────────────────────────────────────────────────────────────────────────────
 DB_URL = os.getenv("DATABASE_URL") or os.getenv("DB_URL")
+RAW_DB_URL = os.getenv("DATABASE_URL") or os.getenv("DB_URL")
+
+def _normalize_pg_url(u: str | None) -> str:
+    if not u:
+        raise RuntimeError("DATABASE_URL/DB_URL is not set")
+    u = u.strip()
+    # SQLAlchemy-style -> libpq
+    if u.startswith("postgresql+"):
+        u = "postgresql://" + u.split("://", 1)[1]
+    # старые Heroku-подобные схемы
+    if u.startswith("postgres://"):
+        u = "postgresql://" + u.split("://", 1)[1]
+    return u
+
+def _pg():
+    url = _normalize_pg_url(RAW_DB_URL)
+    return psycopg.connect(url, autocommit=False, row_factory=dict_row)
 
 def _pg():
     if not DB_URL:
