@@ -215,15 +215,14 @@ def _ensure_schema():
             # batch_code для старых строк
             c.execute(_q("""
             UPDATE batches
-               SET batch_code = CONCAT(
-                    SUBSTRING('ABCDEFGHJKLMNPQRSTUVWXYZ23456789' FROM floor(random())*32::int + 1 FOR 1),
-                    SUBSTRING('ABCDEFGHJKLMNPQRSTUVWXYZ23456789' FROM floor(random())*32::int + 1 FOR 1),
-                    SUBSTRING('ABCDEFGHJKLMNPQRSTUVWXYZ23456789' FROM floor(random())*32::int + 1 FOR 1),
-                    SUBSTRING('ABCDEFGHJKLMNPQRSTUVWXYZ23456789' FROM floor(random())*32::int + 1 FOR 1),
-                    SUBSTRING('ABCDEFGHJKLMNPQRSTUVWXYZ23456789' FROM floor(random())*32::int + 1 FOR 1),
-                    SUBSTRING('ABCDEFGHJKLMNPQRSTUVWXYZ23456789' FROM floor(random())*32::int + 1 FOR 1)
-               )
-             WHERE (batch_code IS NULL OR batch_code='');
+               SET batch_code =
+                   substr('ABCDEFGHJKLMNPQRSTUVWXYZ23456789', ((random()*32)::int)+1, 1) ||
+                   substr('ABCDEFGHJKLMNPQRSTUVWXYZ23456789', ((random()*32)::int)+1, 1) ||
+                   substr('ABCDEFGHJKLMNPQRSTUVWXYZ23456789', ((random()*32)::int)+1, 1) ||
+                   substr('ABCDEFGHJKLMNPQRSTUVWXYZ23456789', ((random()*32)::int)+1, 1) ||
+                   substr('ABCDEFGHJKLMNPQRSTUVWXYZ23456789', ((random()*32)::int)+1, 1) ||
+                   substr('ABCDEFGHJKLMNPQRSTUVWXYZ23456789', ((random()*32)::int)+1, 1)
+             WHERE batch_code IS NULL OR batch_code='';
             """))
     else:
         with _db() as c:
