@@ -10,14 +10,14 @@
       --pri:#1f7aee; --pri-weak:#e9eef6; --pill-bg:#eef2ff; --pill-fg:#3730a3;
       --ok-bg:#ecfdf5; --ok-fg:#065f46; --ok-border:#a7f3d0;
       --err-bg:#fef2f2; --err-fg:#991b1b; --err-border:#fecaca;
-      --chip:#e2e8f0;
+      --chip:#e2e8f0; --warn:#f59e0b; --danger:#ef4444; --success:#10b981;
     }
     body[data-theme="dark"]{
       --bg:#0b1220; --fg:#e5e7eb; --muted:#94a3b8; --card:#0f1829; --line:#1f2a37;
       --pri:#3b82f6; --pri-weak:#132036; --pill-bg:#1e293b; --pill-fg:#bfdbfe;
       --ok-bg:#112a1f; --ok-fg:#a7f3d0; --ok-border:#134e4a;
       --err-bg:#3b0d0d; --err-fg:#fecaca; --err-border:#7f1d1d;
-      --chip:#0f172a;
+      --chip:#0f172a; --warn:#f59e0b; --danger:#ef4444; --success:#10b981;
     }
     *{box-sizing:border-box}
     html,body{height:100%}
@@ -38,7 +38,7 @@
     .btn{background:var(--pri);color:#fff;border:0;border-radius:10px;padding:8px 12px;cursor:pointer}
     .btn.secondary{background:var(--pri-weak);color:var(--fg)}
     .btn-link{background:transparent;border:0;color:var(--pri);cursor:pointer;padding:0}
-    input[type="text"],input[type="number"],input[type="date"],select{
+    input[type="text"],input[type="number"],input[type="date"],input[type="password"],select{
       height:34px;padding:6px 8px;border:1px solid var(--line);border-radius:10px;background:transparent;color:var(--fg)
     }
     table{border-collapse:collapse;width:100%}
@@ -46,7 +46,7 @@
     thead th{position:sticky;top:0;background:var(--card);z-index:1}
     .muted{color:var(--muted)}
     .dot{display:inline-block;width:10px;height:10px;border-radius:50%;background:#9ca3af}
-    .dot.on{background:#10b981}
+    .dot.on{background:var(--success)}
     .note{margin:8px 0 12px; padding:8px 10px;border-radius:8px;display:none}
     .note.ok{display:block;background:var(--ok-bg);color:var(--ok-fg);border:1px solid var(--ok-border)}
     .note.err{display:block;background:var(--err-bg);color:var(--err-fg);border:1px solid var(--err-border)}
@@ -54,6 +54,15 @@
     .block{padding:12px}
     .chip{display:inline-flex;align-items:center;gap:6px;background:var(--chip);color:var(--fg);padding:4px 8px;border-radius:999px;font-size:12px}
     .chip .dot{width:8px;height:8px}
+    .statbar{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0}
+    .stat{display:flex;align-items:center;gap:8px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 10px}
+    .stat .badge{font-weight:700}
+    .stat.ok .badge{color:var(--success)}
+    .stat.warn .badge{color:var(--warn)}
+    .stat.err .badge{color:var(--danger)}
+    .panel{border:1px solid var(--line);border-radius:12px;background:var(--card);padding:12px;margin:12px 0}
+    .log{margin-top:8px;max-height:240px;overflow:auto;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+    .kpi{font-weight:700}
   </style>
 </head>
 <body data-theme="light">
@@ -76,15 +85,56 @@
     <main class="content">
       <h1>Мой склад</h1>
 
+      <!-- СИГНАЛЫ СПИСАНИЙ -->
+      <div id="signals" class="statbar">
+        <div class="stat" id="sig-today"><span class="badge">Сегодня:</span><span class="muted">—</span></div>
+        <div class="stat" id="sig-7d"><span class="badge">7 дней:</span><span class="muted">—</span></div>
+        <div class="stat" id="sig-30d"><span class="badge">30 дней:</span><span class="muted">—</span></div>
+        <div class="stat" id="sig-last"><span class="badge">Последнее списание:</span><span class="muted">—</span></div>
+      </div>
+
+      <!-- ПАНЕЛЬ FIFO -->
+      <div class="panel" id="fifo-panel">
+        <div class="row" style="align-items:end">
+          <div>
+            <div class="muted">Период</div>
+            <input type="date" id="fifo-from"> —
+            <input type="date" id="fifo-to">
+          </div>
+          <div>
+            <div class="muted">BRIDGE API key (/profit/*)</div>
+            <input id="fifo-bkey" type="password" placeholder="kaspi_live_***" style="width:280px">
+          </div>
+          <div>
+            <div class="muted">Products API key (/products/*)</div>
+            <input id="fifo-apikey" type="password" placeholder="API_KEY из env" style="width:240px">
+          </div>
+          <label class="row" title="Если включить — для пропусков создадим товар (если его нет) и добавим партию на недостающее кол-во.">
+            <input id="fifo-fill-missing" type="checkbox"><span>Добить партии для пропусков</span>
+          </label>
+          <div>
+            <div class="muted">Себестоимость по умолчанию</div>
+            <input id="fifo-default-cost" type="number" min="0" step="1" value="3000" style="width:120px">
+          </div>
+          <div>
+            <div class="muted">Комиссия, %</div>
+            <input id="fifo-default-comm" type="number" min="0" step="0.1" value="15" style="width:120px">
+          </div>
+          <button class="btn" id="fifo-run">Списать со склада</button>
+          <button class="btn secondary" id="fifo-refresh">Пересчитать сигналы</button>
+        </div>
+        <div id="fifo-log" class="log"></div>
+      </div>
+
+      <!-- ПАНЕЛЬ УПРАВЛЕНИЯ ТОВАРАМИ -->
       <div class="row" style="margin-bottom:10px">
         <label><input id="onlyActive" type="checkbox" checked> Только активные</label>
         <input id="search" type="text" placeholder="Название, код, бренд..." style="min-width:260px">
-        <!-- быстрый переход к SKU -->
         <input id="findSku" type="text" placeholder="SKU" style="width:160px">
         <button class="btn secondary" id="btnFindSku">Открыть SKU</button>
 
         <button class="btn" id="btnLoadApi">Загрузить</button>
-        <label class="btn secondary" for="fileInput">Импорт из файла (XML/XLSX)</label>
+        <label class="btn secondary" for="fileInput">Импорт XML/XLSX</label>
         <input type="file" id="fileInput" accept=".xml,.xlsx,.xls" style="display:none">
         <button class="btn secondary" id="btnSaveDb">Сохранить таблицу в БД</button>
         <button class="btn secondary" id="btnExportDb">Экспорт CSV (БД)</button>
@@ -92,7 +142,6 @@
         <button class="btn secondary" id="btnApiKey">API-Key</button>
         <span id="apiKeyBadge" class="chip"><span class="dot"></span><span>ключ не задан</span></span>
 
-        <!-- элементы только для локальной SQLite -->
         <button class="btn secondary" id="btnBackup" data-sqlite-only>Бэкап БД</button>
         <label class="btn secondary" for="restoreFile" data-sqlite-only>Восстановить БД</label>
         <input type="file" id="restoreFile" accept=".sqlite3" style="display:none" data-sqlite-only>
@@ -115,7 +164,7 @@
                 <th>Остаток (партии)</th>
                 <th>Кол-во партий</th>
                 <th>Маржа (посл.), KZT</th>
-                <th class="col-right">Партии</th>
+                <th class="col-right">Партии / История</th>
               </tr>
             </thead>
             <tbody></tbody>
@@ -126,10 +175,15 @@
   </div>
 
 <script type="module">
+/* ──────────────────────────────────────────────────────────────────
+   helpers / UI
+────────────────────────────────────────────────────────────────── */
 const qs=(s,el=document)=>el.querySelector(s);
 const qsa=(s,el=document)=>[...el.querySelectorAll(s)];
 const nf = new Intl.NumberFormat('ru-RU');
 const fmt = n => nf.format(Number(n||0));
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const escapeHtml = (s) => String(s||'').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]);
 
 function setNote(msg, ok=false){
   const el = qs('#note');
@@ -148,7 +202,9 @@ function setNote(msg, ok=false){
   });
 })();
 
-// --- Fetch helper с автоповтором при 401/403 (запрос ключа) ---
+/* ──────────────────────────────────────────────────────────────────
+   fetchJSON (+401 prompt)
+────────────────────────────────────────────────────────────────── */
 async function fetchJSON(url, opts, _retry){
   const r = await fetch(url, opts||{});
   if(r.status===401 || r.status===403){
@@ -168,27 +224,34 @@ async function fetchJSON(url, opts, _retry){
   return ct.includes('application/json') ? r.json() : r.text();
 }
 
+/* ──────────────────────────────────────────────────────────────────
+   products table
+────────────────────────────────────────────────────────────────── */
 function parsePriceCell(cell){ return Number((cell?.textContent||'0').toString().replace(/\s/g,'')); }
 
 function renderProducts(items){
   const tb = qs('#tbl tbody');
   tb.innerHTML = '';
-  items.forEach(it=>{
+  (items||[]).forEach(it=>{
     const tr = document.createElement('tr');
     const sku = it.code || it.id || '';
     tr.dataset.sku = sku;
     tr.innerHTML = `
       <td>${sku}</td>
-      <td>${it.name||''}</td>
-      <td>${it.brand||''}</td>
-      <td>${it.category||''}</td>
+      <td>${escapeHtml(it.name||'')}</td>
+      <td>${escapeHtml(it.brand||'')}</td>
+      <td>${escapeHtml(it.category||'')}</td>
       <td>${fmt(it.qty||0)}</td>
       <td>${fmt(it.price||0)}</td>
       <td><span class="dot ${((it.qty||0)>0 || it.active===true) ? 'on':''}"></span></td>
       <td>${fmt(it.left_total ?? 0)}</td>
       <td>${fmt(it.batch_count||0)}</td>
       <td>${it.last_margin!=null ? fmt(it.last_margin) : '—'}</td>
-      <td class="col-right"><button class="btn-link btn-parties">Партии</button></td>
+      <td class="col-right">
+        <button class="btn-link btn-parties">Партии</button>
+        <span class="muted"> · </span>
+        <button class="btn-link btn-history">История списаний</button>
+      </td>
     `;
     tb.appendChild(tr);
   });
@@ -232,6 +295,275 @@ function makeDetailRow(colspan){
   const td = document.createElement('td'); td.colSpan = colspan; tr.appendChild(td); return tr;
 }
 
+/* ──────────────────────────────────────────────────────────────────
+   FIFO metrics / signals
+────────────────────────────────────────────────────────────────── */
+function isoDay(d){ return d.toISOString().slice(0,10); }
+function dayStartTs(dateStr){ return new Date(dateStr+'T00:00:00.000Z').getTime(); }
+function dayEndTs(dateStr){   return new Date(dateStr+'T23:59:59.999Z').getTime(); }
+function addDays(dateStr, d){
+  const dt = new Date(dateStr+'T00:00:00Z'); dt.setUTCDate(dt.getUTCDate()+d); return isoDay(dt);
+}
+
+async function getOrderCodes(start, end){
+  const qs1 = new URLSearchParams({
+    start, end, tz:'Asia/Almaty', date_field:'creationDate',
+    order:'asc', grouped:'1', limit:'0', with_items:'1',
+    use_bd:'1', business_day_start:'20:00',
+    assign_mode:'smart', store_accept_until:'17:00',
+    items_mode:'all', exclude_states:'CANCELED',
+  });
+  const j = await fetchJSON('/orders/ids?' + qs1.toString());
+  // /orders/ids возвращает либо {ids: [...]}, либо {items:[{order_code:..}]}
+  if (Array.isArray(j.ids)) return j.ids.map(x => String(x));
+  if (Array.isArray(j.items)) {
+    const codes = j.items.map(r => r.order_code || r.number || r.code).filter(Boolean).map(String);
+    return [...new Set(codes)];
+  }
+  return [];
+}
+
+async function getLedgerByCodes(orderCodes, chunk=30, perLimit=10000){
+  const res = [];
+  for (let i=0; i<orderCodes.length; i+=chunk){
+    const part = orderCodes.slice(i, i+chunk).map(encodeURIComponent).join(',');
+    const url = `/profit/bridge/fifo/ledger?codes=${part}&limit=${perLimit}`;
+    const j = await fetchJSON(url);
+    if (Array.isArray(j.items)) res.push(...j.items);
+    // маленькая пауза чтобы не долбить
+    if (orderCodes.length>chunk) await sleep(50);
+  }
+  return res;
+}
+
+function calcSignalsFromLedger(items, startTs, endTs){
+  const rows = items.filter(x => typeof x.date_utc_ms==='number' && x.date_utc_ms>=startTs && x.date_utc_ms<=endTs);
+  const orders = new Set(rows.map(x => x.order_code));
+  const skus   = new Set(rows.map(x => x.sku));
+  const qtySum = rows.reduce((a,r)=>a+(Number(r.qty)||0),0);
+  const profitSum = rows.reduce((a,r)=>a+(Number(r.profit_amount)||0),0);
+  return { rows, orders: orders.size, skus: skus.size, qty: qtySum, profit: profitSum };
+}
+
+function paintSignal(elId, label){
+  const el = qs(elId); if(!el) return (st)=>{};
+  return (st)=>{
+    el.classList.remove('ok','warn','err');
+    let cls = st.rows.length>0 ? 'ok' : 'err';
+    el.classList.add(cls);
+    el.innerHTML = `<span class="badge">${label}</span>
+      <span>${st.rows.length} леджер-стр.</span>
+      <span class="muted"> · заказов:</span> <span class="kpi">${st.orders}</span>
+      <span class="muted"> · SKU:</span> <span class="kpi">${st.skus}</span>
+      <span class="muted"> · qty:</span> <span class="kpi">${fmt(st.qty)}</span>
+      <span class="muted"> · прибыль:</span> <span class="kpi">${fmt(st.profit)} KZT</span>`;
+  };
+}
+
+async function refreshSignals(){
+  try{
+    // сегодня
+    const today = isoDay(new Date());
+    const codesToday = await getOrderCodes(today, today);
+    const ledToday = codesToday.length ? await getLedgerByCodes(codesToday) : [];
+    paintSignal('#sig-today','Сегодня:')(calcSignalsFromLedger(ledToday, dayStartTs(today), dayEndTs(today)));
+
+    // 7 дней (включая сегодня)
+    const start7 = addDays(today, -6);
+    const codes7 = await getOrderCodes(start7, today);
+    const led7 = codes7.length ? await getLedgerByCodes(codes7) : [];
+    paintSignal('#sig-7d','7 дней:')(calcSignalsFromLedger(led7, dayStartTs(start7), dayEndTs(today)));
+
+    // 30 дней
+    const start30 = addDays(today, -29);
+    const codes30 = await getOrderCodes(start30, today);
+    const led30 = codes30.length ? await getLedgerByCodes(codes30) : [];
+    paintSignal('#sig-30d','30 дней:')(calcSignalsFromLedger(led30, dayStartTs(start30), dayEndTs(today)));
+
+    // «последнее списание»: берём последние 1–2 строки из леджера (берём последние за сегодня/30д) и показываем created_at
+    let lastCreated = null;
+    const pick = (arr)=>arr.reduce((acc,r)=>{
+      const ts = Date.parse(r.created_at || '');
+      return (!isNaN(ts) && (!acc || ts>acc)) ? ts : acc;
+    }, null);
+    lastCreated = pick(led30.length ? led30 : led7.length ? led7 : ledToday);
+    const elLast = qs('#sig-last');
+    elLast.classList.remove('ok','warn','err');
+    if(lastCreated){
+      elLast.classList.add('ok');
+      const dt = new Date(lastCreated);
+      elLast.innerHTML = `<span class="badge">Последнее списание:</span>
+        <span>${dt.toLocaleDateString()} ${dt.toLocaleTimeString()}</span>`;
+    }else{
+      elLast.classList.add('err');
+      elLast.innerHTML = `<span class="badge">Последнее списание:</span><span class="muted">не найдено</span>`;
+    }
+  }catch(e){
+    const el = qs('#sig-today');
+    if (el) { el.classList.add('err'); el.innerHTML = `<span class="badge">Сегодня:</span><span class="muted">ошибка</span>`; }
+  }
+}
+
+/* ──────────────────────────────────────────────────────────────────
+   FIFO panel (run pipeline)
+────────────────────────────────────────────────────────────────── */
+function logFIFO(msg, obj){
+  const el = qs("#fifo-log");
+  const time = new Date().toLocaleTimeString();
+  el.innerHTML += `<div>[${time}] ${escapeHtml(msg)}</div>`;
+  if (obj) {
+    el.innerHTML += `<pre style="white-space:pre-wrap;margin:4px 0">${escapeHtml(JSON.stringify(obj, null, 2))}</pre>`;
+  }
+  el.scrollTop = el.scrollHeight;
+}
+
+function setDefaultDates(){
+  const today = new Date();
+  const y = new Date(Date.now()-24*3600*1000);
+  qs("#fifo-from").value = y.toISOString().slice(0,10);
+  qs("#fifo-to").value   = today.toISOString().slice(0,10);
+  qs("#fifo-bkey").value   = localStorage.getItem("BKEY")   || "";
+  qs("#fifo-apikey").value = localStorage.getItem("APIKEY") || "";
+}
+
+async function getIdsForPeriod(FROM, TO){
+  const p = new URLSearchParams({
+    start: FROM, end: TO,
+    tz: 'Asia/Almaty',
+    date_field: 'creationDate',
+    order: 'asc',
+    grouped: '1',
+    limit: '0',
+    with_items: '1',
+    use_bd: '1',
+    business_day_start: '20:00',
+    assign_mode: 'smart',
+    store_accept_until: '17:00',
+    items_mode: 'all',
+    exclude_states: 'CANCELED',
+  });
+  const j = await fetchJSON('/orders/ids?' + p.toString());
+  if (Array.isArray(j.ids)) return j.ids;
+  if (Array.isArray(j.items)) {
+    // если вдруг вернулся детальный список — заберём id
+    return j.items.map(r=>r.id).filter(Boolean);
+  }
+  return [];
+}
+
+async function syncBridgeByIds(BKEY, ids){
+  let synced=0, codes=[];
+  for (let i=0;i<ids.length;i+=200){
+    const part = ids.slice(i,i+200);
+    const res = await fetchJSON('/profit/bridge/sync-by-ids?api_key='+encodeURIComponent(BKEY), {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ ids: part })
+    });
+    synced += Number(res.synced||0);
+    if (Array.isArray(res.codes)) codes.push(...res.codes);
+    await sleep(60);
+  }
+  return { synced, codes:[...new Set(codes)] };
+}
+
+async function ensureSkuAndBatch(APIKEY, sku, need, cost, comm){
+  try{
+    await fetchJSON(`/products/db/ensure-sku/${encodeURIComponent(sku)}?name=${encodeURIComponent(sku)}&price=0&qty=0&active=1`, {
+      method:'POST', headers: { 'X-API-Key': APIKEY }
+    });
+  }catch(_){}
+  const j = await fetchJSON(`/products/db/price-batches/${encodeURIComponent(sku)}`, {
+    method:'POST',
+    headers: { 'Content-Type':'application/json', 'X-API-Key': APIKEY },
+    body: JSON.stringify({ entries: [{
+      date: new Date().toISOString().slice(0,10),
+      qty: Number(need),
+      unit_cost: Number(cost),
+      commission_pct: Number(comm),
+      note: 'auto-fill'
+    }]})
+  });
+  return j;
+}
+
+async function runFIFO(){
+  const FROM = qs('#fifo-from').value;
+  const TO   = qs('#fifo-to').value;
+  const BKEY = (qs('#fifo-bkey').value||"").trim();
+  const APIKEY = (qs('#fifo-apikey').value||"").trim();
+  const FILL = qs('#fifo-fill-missing').checked;
+  const DEFAULT_COST = Number(qs('#fifo-default-cost').value||0);
+  const DEFAULT_COMM = Number(qs('#fifo-default-comm').value||0);
+
+  localStorage.setItem("BKEY", BKEY);
+  localStorage.setItem("APIKEY", APIKEY);
+
+  const btn = qs('#fifo-run'); btn.disabled = true; btn.textContent = 'Работаю…';
+  qs('#fifo-log').innerHTML = '';
+
+  try{
+    logFIFO('Пинг БД…');
+    const ping = await fetchJSON('/products/db/ping');
+    if (!ping.ok) throw new Error('DB ping failed');
+    logFIFO('OK', ping);
+
+    // ids → sync bridge
+    logFIFO(`Получаю ids заказов ${FROM}..${TO}…`);
+    const ids = await getIdsForPeriod(FROM, TO);
+    logFIFO(`Найдено заказов: ${ids.length}`);
+    if (ids.length && BKEY){
+      logFIFO('Синхронизация bridge…');
+      const syncRes = await syncBridgeByIds(BKEY, ids);
+      logFIFO('Bridge sync', syncRes);
+    }
+
+    // первичный apply (по периоду)
+    logFIFO('FIFO apply #1…');
+    const apply1 = await fetchJSON(`/profit/bridge/fifo/apply?date_from=${FROM}&date_to=${TO}`, { method:'POST' });
+    logFIFO('Apply #1 результат', apply1);
+    let gaps = Array.isArray(apply1.gaps) ? apply1.gaps : [];
+
+    // добивка партий по дефициту
+    if (gaps.length && FILL && APIKEY) {
+      const agg = {};
+      gaps.forEach(g => { const s=String(g.sku||'').trim(); const n=Number(g.not_covered_qty||0); if(s&&n>0) agg[s]=(agg[s]||0)+n; });
+      logFIFO('Дефицит по SKU:', agg);
+      for (const [sku, need] of Object.entries(agg)) {
+        logFIFO(`Добавляю партию: ${sku} → ${need}шт по ${DEFAULT_COST} KZT, комиссия ${DEFAULT_COMM}%`);
+        const r = await ensureSkuAndBatch(APIKEY, sku, need, DEFAULT_COST, DEFAULT_COMM);
+        logFIFO('OK', r);
+        await sleep(40);
+      }
+      // повторный apply только по этим заказам
+      const affectedCodes = [...new Set(gaps.map(g => g.order_code).filter(Boolean))];
+      if (affectedCodes.length){
+        logFIFO('FIFO apply #2 по заказам:', affectedCodes);
+        const apply2 = await fetchJSON(`/profit/bridge/fifo/apply?codes=${affectedCodes.map(encodeURIComponent).join(',')}`, { method:'POST' });
+        logFIFO('Apply #2 результат', apply2);
+        gaps = Array.isArray(apply2.gaps) ? apply2.gaps : [];
+      }
+    }
+
+    // пересчёт qty_sold
+    logFIFO('Пересчитываю qty_sold по партиям…');
+    const rec = await fetchJSON('/profit/bridge/fifo/recalc-batches', { method:'POST' });
+    logFIFO('recalc-batches', rec);
+
+    if (gaps.length===0) logFIFO('✅ Готово: дыры отсутствуют, полное списание выполнено.');
+    else                 logFIFO('⚠ Есть незакрытые дыры:', gaps);
+
+    // обновить сигналы
+    await refreshSignals();
+  }catch(e){
+    logFIFO('❌ Ошибка: ' + (e?.message || e));
+  }finally{
+    btn.disabled = false; btn.textContent = 'Списать со склада';
+  }
+}
+
+/* ──────────────────────────────────────────────────────────────────
+   product details (batches + history)
+────────────────────────────────────────────────────────────────── */
 async function openDetail(row){
   clearDetails();
   const sku = row?.dataset?.sku || row.cells?.[0]?.textContent?.trim();
@@ -244,7 +576,7 @@ async function openDetail(row){
   mount.innerHTML = `
     <div class="block">
       <div style="display:flex;align-items:center;gap:10px;margin:8px 0 6px">
-        <div style="font-weight:600">Партии — <span id="dTitle">${row.cells[1].textContent}</span></div>
+        <div style="font-weight:600">Партии — <span id="dTitle">${escapeHtml(row.cells[1].textContent)}</span> <span class="muted">(${sku})</span></div>
         <button class="btn secondary" id="btnRecount">Пересчитать списания (FIFO)</button>
       </div>
 
@@ -266,19 +598,25 @@ async function openDetail(row){
       <hr style="border:0;border-top:1px solid var(--line);margin:14px 0">
 
       <div class="row" style="align-items:center;gap:8px">
-        <b>Продажи SKU</b>
-        <span class="muted">KASPI_DELIVERY</span>
+        <b>История списаний (FIFO) по SKU</b>
         <label>за</label>
-        <input type="number" id="salesDays" min="1" step="1" value="7" style="width:80px">
-        <span>дн.</span>
-        <button class="btn secondary" id="btnLoadSales">Показать</button>
-        <button class="btn" id="btnSyncSales">Списать по продажам</button>
-        <span id="salesSummary" class="muted"></span>
+        <select id="histDays" style="width:120px">
+          <option value="7">7 дней</option>
+          <option value="14">14 дней</option>
+          <option value="30" selected>30 дней</option>
+          <option value="90">90 дней</option>
+        </select>
+        <button class="btn secondary" id="btnLoadHistory">Показать</button>
+        <span id="histSummary" class="muted"></span>
       </div>
 
-      <div style="overflow:auto;max-height:260px;margin-top:6px">
-        <table class="table" id="salesTable">
-          <thead><tr><th>№</th><th>Дата</th><th>Сумма</th></tr></thead>
+      <div style="overflow:auto;max-height:280px;margin-top:6px">
+        <table class="table" id="histTable">
+          <thead>
+            <tr>
+              <th>Дата</th><th>Заказ</th><th>Кол-во</th><th>Выручка</th><th>Комиссия</th><th>Себестоимость</th><th>Прибыль</th><th>Партия</th>
+            </tr>
+          </thead>
           <tbody></tbody>
         </table>
       </div>
@@ -360,7 +698,6 @@ async function openDetail(row){
     }catch(e){ setNote('Сохранение партий не удалось: ' + e.message); }
   };
 
-  // Пересчёт списаний из продаж
   qs('#btnRecount', mount).onclick = async ()=>{
     try{
       const res = await fetchJSON('/products/batches/recount-sold', {method:'POST'});
@@ -369,79 +706,69 @@ async function openDetail(row){
     }catch(e){ setNote('Пересчёт не удался: ' + e.message); }
   };
 
-  // ---- Продажи по SKU + списание FIFO ----
-  function isoToday(){ return new Date().toISOString().slice(0,10); }
-  function isoDaysAgo(d){
-    const dt = new Date(); dt.setDate(dt.getDate() - d);
-    return dt.toISOString().slice(0,10);
-  }
-
-  async function loadSalesForSku(sku, days){
-    const start = isoDaysAgo(days);
-    const end   = isoToday();
-    const params = new URLSearchParams({
+  // История списаний по SKU
+  async function loadHistory(days){
+    const end = isoDay(new Date());
+    const start = addDays(end, -(Number(days)-1));
+    // получим заказы, где встречался этот SKU
+    const p = new URLSearchParams({
       start, end, tz:'Asia/Almaty', date_field:'creationDate',
-      states:'KASPI_DELIVERY', exclude_states:'CANCELED',
+      order:'asc', grouped:'0', limit:'100000', with_items:'1',
       use_bd:'1', business_day_start:'20:00',
-      order:'desc', grouped:'0', limit:'100000', with_items:'1'
+      assign_mode:'smart', store_accept_until:'17:00',
+      items_mode:'all', exclude_states:'CANCELED',
     });
-    const data = await fetchJSON('/orders/ids?' + params.toString());
+    const data = await fetchJSON('/orders/ids?' + p.toString());
     const rows = (data.items||[]).filter(x => String(x.sku) === String(sku));
-    // таблица
-    const tb = qs('#salesTable tbody', mount); tb.innerHTML = '';
-    rows.slice(0,200).forEach(it=>{
+    const codes = [...new Set(rows.map(r=>r.order_code||r.number).filter(Boolean).map(String))];
+    if (!codes.length){
+      qs('#histSummary', mount).textContent = 'нет списаний';
+      qs('#histTable tbody', mount).innerHTML = '';
+      return;
+    }
+    const ledger = await getLedgerByCodes(codes, 50, 10000);
+    const startTs = dayStartTs(start), endTs = dayEndTs(end);
+    const list = ledger.filter(x => x.sku===sku && x.date_utc_ms>=startTs && x.date_utc_ms<=endTs)
+                       .sort((a,b)=>a.date_utc_ms-b.date_utc_ms);
+    const tb = qs('#histTable tbody', mount); tb.innerHTML='';
+    let sumQty=0,sumRev=0,sumComm=0,sumCost=0,sumProfit=0;
+    list.forEach(r=>{
+      sumQty += (r.qty||0);
+      sumRev += (r.total_price||0);
+      sumComm+= (r.commission_amount||0);
+      sumCost+= (r.cost_amount||0);
+      sumProfit += (r.profit_amount||0);
+      const dt = new Date(Number(r.date_utc_ms||0));
       const tr = document.createElement('tr');
-      tr.innerHTML = `<td>${it.number}</td><td>${it.date.slice(0,16).replace('T',' ')}</td><td>${fmt(it.amount)} KZT</td>`;
+      tr.innerHTML = `
+        <td>${dt.toLocaleDateString()} ${dt.toLocaleTimeString()}</td>
+        <td>${r.order_code||''}</td>
+        <td>${fmt(r.qty)}</td>
+        <td>${fmt(r.total_price)} KZT</td>
+        <td>${fmt(r.commission_amount)} KZT</td>
+        <td>${fmt(r.cost_amount)} KZT</td>
+        <td>${fmt(r.profit_amount)} KZT</td>
+        <td>${r.batch_id ? ('#'+r.batch_id) : ''}</td>
+      `;
       tb.appendChild(tr);
     });
-    qs('#salesSummary', mount).textContent = rows.length
-      ? `найдено: ${rows.length} шт., сумма: ${fmt(rows.reduce((a,r)=>a+(r.amount||0),0))} KZT`
-      : 'нет продаж за выбранный период';
-    return { rows, start, end };
+    qs('#histSummary', mount).innerHTML = list.length
+      ? `строк: <b>${fmt(list.length)}</b>, qty: <b>${fmt(sumQty)}</b>, выручка: <b>${fmt(sumRev)} KZT</b>, прибыль: <b>${fmt(sumProfit)} KZT</b>`
+      : 'нет списаний';
   }
 
-  qs('#btnLoadSales', mount).onclick = async ()=>{
+  qs('#btnLoadHistory', mount).onclick = async ()=>{
     try{
-      await loadSalesForSku(sku, Number(qs('#salesDays', mount).value||7));
-    }catch(e){ setNote('Загрузка продаж не удалась: ' + e.message); }
+      await loadHistory(Number(qs('#histDays', mount).value||30));
+    }catch(e){ setNote('История не загрузилась: ' + e.message); }
   };
-
-  qs('#btnSyncSales', mount).onclick = async ()=>{
-    try{
-      const days = Number(qs('#salesDays', mount).value||7);
-      const { rows, start, end } = await loadSalesForSku(sku, days);
-      if(!rows.length){ setNote('Нет продаж для списания.'); return; }
-
-      // 1) апсертом в FIFO-продажи
-      const orders = rows.map(x => ({
-        id: x.id,
-        date: x.date,
-        customer: null,
-        items: [{ sku: String(x.sku), qty: 1, unit_price: Number(x.amount||0) }]
-      }));
-      await fetchJSON('/profit/orders/upsert-bulk', {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ orders })
-      });
-
-      // 2) пересчитать леджер за период
-      await fetchJSON(`/profit/rebuild-ledger?date_from=${start}&date_to=${end}`, { method:'POST' });
-
-      // 3) протянуть qty_sold/left в партии
-      await fetchJSON('/products/batches/recount-sold', { method:'POST' });
-
-      setNote('Продажи синхронизированы и списания применены.', true);
-
-      // обновим детали и список
-      await loadDB();
-      openDetail(row);
-    }catch(e){
-      setNote('Списание по продажам не удалось: ' + e.message);
-    }
-  };
+  // автозагрузка 30 дней
+  try{ await loadHistory(30); }catch(_){}
 }
 
+/* ──────────────────────────────────────────────────────────────────
+   table capture & buttons
+────────────────────────────────────────────────────────────────── */
 function tableToRows(){
   return qsa('#tbl tbody tr').map(tr=>{
     const t = tr.children;
@@ -457,7 +784,7 @@ function tableToRows(){
 }
 
 document.addEventListener('DOMContentLoaded', async ()=>{
-  // ping: показываем безопасный драйвер, без подробностей урла
+  // ping
   try{
     const ping = await fetchJSON('/products/db/ping');
     const backend = ping?.driver ? ('db=' + ping.driver) : (ping?.db_path || '');
@@ -466,15 +793,20 @@ document.addEventListener('DOMContentLoaded', async ()=>{
     setNote('Не найден /products/db/ping. Проверь main.py -> include_router(..., prefix="/products").');
   }
 
+  // dates & keys
+  setDefaultDates();
+
   qs('#btnLoadApi').onclick = loadAPI;
-  qs('#btnLoadDb').onclick = loadDB;
+  qs('#btnLoadDb').onclick  = loadDB;
+  qs('#fifo-run').onclick   = runFIFO;
+  qs('#fifo-refresh').onclick = refreshSignals;
 
   // быстрый поиск/открытие SKU
   qs('#btnFindSku').onclick = ()=>{
     const sku = qs('#findSku').value.trim();
     if(!sku) return;
     const row = qsa('#tbl tbody tr').find(tr => (tr.dataset.sku||tr.cells[0].textContent.trim()) === sku);
-    if(!row){ setNote('SKU не найден в таблице. Попробуй «Загрузить из БД» или общий поиск.'); return; }
+    if(!row){ setNote('SKU не найден в таблице. Нажми «Загрузить из БД» или общий поиск.'); return; }
     row.scrollIntoView({behavior:'smooth', block:'center'});
     openDetail(row);
   };
@@ -500,8 +832,10 @@ document.addEventListener('DOMContentLoaded', async ()=>{
   if(backupBtn) backupBtn.onclick = ()=> { window.location = '/products/db/backup.sqlite3'; };
 
   qs('#tbl').addEventListener('click', (e)=>{
-    const btn = e.target.closest('.btn-parties'); if(!btn) return;
-    openDetail(btn.closest('tr'));
+    const btn1 = e.target.closest('.btn-parties');
+    if(btn1) { openDetail(btn1.closest('tr')); return; }
+    const btn2 = e.target.closest('.btn-history');
+    if(btn2) { openDetail(btn2.closest('tr')); return; }
   });
 
   qs('#btnSaveDb').onclick = async ()=>{
@@ -523,12 +857,13 @@ document.addEventListener('DOMContentLoaded', async ()=>{
     window.location = '/products/db/export.csv?' + p.toString();
   };
 
-  // авто-загрузка из БД
+  // авто-загрузка из БД и первичный пересчёт сигналов
   loadDB();
+  refreshSignals();
 });
 </script>
 
-<!-- Автоподстановка X-API-Key ко всем запросам /products/* и /profit/* + статус ключа -->
+<!-- ГЛОБАЛЬНАЯ подстановка X-API-Key к /products/* и /profit/* -->
 <script>
 (() => {
   const KEY = "KASPI_API_KEY";
@@ -538,13 +873,8 @@ document.addEventListener('DOMContentLoaded', async ()=>{
     const v = localStorage.getItem(KEY) || "";
     const el = badge(); if(!el) return;
     const dot = el.querySelector('.dot'); const text = el.querySelector('span:last-child');
-    if(v){
-      dot.classList.add('on');
-      text.textContent = 'ключ установлен';
-    }else{
-      dot.classList.remove('on');
-      text.textContent = 'ключ не задан';
-    }
+    if(v){ dot.classList.add('on'); text.textContent = 'ключ установлен'; }
+    else { dot.classList.remove('on'); text.textContent = 'ключ не задан'; }
   }
 
   window.KASPI_API_KEY = localStorage.getItem(KEY) || "";
@@ -557,28 +887,20 @@ document.addEventListener('DOMContentLoaded', async ()=>{
       if (urlStr.startsWith("/products/") || urlStr.startsWith("/profit/")) {
         init = init || {};
         const k = window.KASPI_API_KEY || "";
-
-        // Заголовок
         let headers = init.headers instanceof Headers ? init.headers : new Headers(init.headers || {});
         if (k) headers.set("X-API-Key", k);
         init.headers = headers;
-
-        // Fallback: подпишем ?api_key=... (на тот же ключ)
         if (k) {
           const u = new URL(urlStr, location.origin);
           if (!u.searchParams.has("api_key")) u.searchParams.set("api_key", k);
-          if (typeof input === "string") {
-            input = u.pathname + u.search;
-          } else {
-            input = new Request(u.toString(), init);
-          }
+          if (typeof input === "string") input = u.pathname + u.search;
+          else input = new Request(u.toString(), init);
         }
       }
     } catch (e) { /* no-op */ }
     return _origFetch(input, init);
   };
 
-  // Удобный setter (сохранит ключ и тут же начнёт подставлять)
   window.setApiKey = function(k) {
     localStorage.setItem(KEY, k || "");
     window.KASPI_API_KEY = k || "";
@@ -586,7 +908,6 @@ document.addEventListener('DOMContentLoaded', async ()=>{
     console.log("API key set");
   };
 
-  // Кнопка "API-Key": спросить и сохранить
   document.addEventListener("DOMContentLoaded", () => {
     const btn = document.getElementById("btnApiKey");
     if (btn) {
@@ -600,28 +921,17 @@ document.addEventListener('DOMContentLoaded', async ()=>{
 })();
 </script>
 
-<!-- Скрыть элементы с data-sqlite-only в режиме Postgres -->
+<!-- Скрыть sqlite-only в режиме Postgres -->
 <script>
 document.addEventListener("DOMContentLoaded", async () => {
   let isPG = false;
   try {
-    const r = await fetch("/products/db/ping");
-    const j = await r.json();
-    if (j && typeof j.driver === "string") {
-      isPG = (j.driver === "pg");
-    } else if (j && j.db_path) {
-      isPG = String(j.db_path).startsWith("postgres");
-    }
+    const j = await (await fetch("/products/db/ping")).json();
+    if (j && typeof j.driver === "string") isPG = (j.driver === "pg");
+    else if (j && j.db_path) isPG = String(j.db_path).startsWith("postgres");
   } catch (e) {}
-
   if (!isPG) return;
-
   const hide = (el) => { if (el) el.style.display = "none"; };
-
-  hide(document.querySelector('a[href$="/products/db/backup.sqlite3"]'));
-  hide(document.querySelector('button[data-action="backup"]'));
-  document.querySelectorAll('form[action$="/products/db/restore"]').forEach(hide);
-  document.querySelectorAll('button[data-action="restore"]').forEach(hide);
   document.querySelectorAll("[data-sqlite-only]").forEach(hide);
   // Fallback по тексту
   document.querySelectorAll("button, a, form, div, section").forEach((el) => {
