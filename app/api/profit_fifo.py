@@ -3,39 +3,36 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set
 
 from fastapi import APIRouter, HTTPException, Query
 import psycopg
 from psycopg.rows import dict_row
 
 # ──────────────────────────────────────────────────────────────────────────────
-# DB
+# DB: нормализация URL для прямого psycopg
 # ──────────────────────────────────────────────────────────────────────────────
-DB_URL = os.getenv("DATABASE_URL") or os.getenv("DB_URL")
-RAW_DB_URL = os.getenv("DATABASE_URL") or os.getenv("DB_URL")
+_RAW_URL = os.getenv("DATABASE_URL") or os.getenv("DB_URL")
 
 def _normalize_pg_url(u: str | None) -> str:
     if not u:
         raise RuntimeError("DATABASE_URL/DB_URL is not set")
     u = u.strip()
-    # SQLAlchemy-style -> libpq
+    # SQLAlchemy style → libpq
     if u.startswith("postgresql+"):
         u = "postgresql://" + u.split("://", 1)[1]
-    # старые Heroku-подобные схемы
+    # устаревшее postgres:// → postgresql://
     if u.startswith("postgres://"):
         u = "postgresql://" + u.split("://", 1)[1]
     return u
 
 def _pg():
-    url = _normalize_pg_url(RAW_DB_URL)
+    url = _normalize_pg_url(_RAW_URL)
     return psycopg.connect(url, autocommit=False, row_factory=dict_row)
 
-def _pg():
-    if not DB_URL:
-        raise RuntimeError("DATABASE_URL is not set")
-    return psycopg.connect(DB_URL, autocommit=False, row_factory=dict_row)
-
+# ──────────────────────────────────────────────────────────────────────────────
+# SQL helpers
+# ──────────────────────────────────────────────────────────────────────────────
 def _fetchall(cur, sql: str, params: Iterable[Any] = ()) -> List[dict]:
     cur.execute(sql, tuple(params or []))
     return list(cur.fetchall())
@@ -44,21 +41,27 @@ def _fetchone(cur, sql: str, params: Iterable[Any] = ()) -> Optional[dict]:
     cur.execute(sql, tuple(params or []))
     return cur.fetchone()
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Schema bootstrap
+# ──────────────────────────────────────────────────────────────────────────────
 def _ensure_schema(con) -> None:
     """
     Гарантируем:
       - в batches есть qty_sold
-      - леджер profit_fifo_ledger создан и защищён уникальным индексом (order_code, line_index, batch_id)
-      - совместимость: создаём VIEW bridge_sales поверх bridge_lines (если его ещё нет)
+      - таблица profit_fifo_ledger и индексы
+      - уникальный индекс (order_code, line_index, batch_id) для идемпотентности
+      - VIEW bridge_sales поверх bridge_lines (если таблицы bridge_sales нет)
     """
     cur = con.cursor()
 
-    # qty_sold в партиях
+    # qty_sold в партиях (если нет)
     cur.execute("""
     DO $$
     BEGIN
-      IF NOT EXISTS (SELECT 1 FROM information_schema.columns
-                       WHERE table_name='batches' AND column_name='qty_sold') THEN
+      IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_name='batches' AND column_name='qty_sold'
+      ) THEN
         EXECUTE 'ALTER TABLE batches ADD COLUMN qty_sold INTEGER DEFAULT 0';
       END IF;
     END$$;
@@ -86,10 +89,11 @@ def _ensure_schema(con) -> None:
         created_at TIMESTAMPTZ DEFAULT now()
     );
     """)
-    # Индексы и идемпотентность
     cur.execute("CREATE INDEX IF NOT EXISTS idx_fifo_order ON profit_fifo_ledger(order_code)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_fifo_sku   ON profit_fifo_ledger(sku)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_fifo_batch ON profit_fifo_ledger(batch_id)")
+
+    # Уникальный индекс для UPSERT (идемпотентность)
     cur.execute("""
     DO $$
     BEGIN
@@ -102,30 +106,31 @@ def _ensure_schema(con) -> None:
     END$$;
     """)
 
-    # Совместимость: VIEW bridge_sales → bridge_lines (не обязательно, но удобно)
+    # Совместимость: если нет таблицы/вьюхи bridge_sales — создаём VIEW поверх bridge_lines
     cur.execute("""
     DO $$
     BEGIN
       IF NOT EXISTS (
-         SELECT 1 FROM information_schema.views
-          WHERE table_name = 'bridge_sales'
+        SELECT 1 FROM information_schema.tables WHERE table_name='bridge_sales'
+      ) AND NOT EXISTS (
+        SELECT 1 FROM information_schema.views  WHERE table_name='bridge_sales'
+      ) AND EXISTS (
+        SELECT 1 FROM information_schema.tables WHERE table_name='bridge_lines'
       ) THEN
-        IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='bridge_lines') THEN
-          EXECUTE $V$
-            CREATE VIEW bridge_sales AS
-            SELECT order_id,
-                   order_code,
-                   date_utc_ms,
-                   state,
-                   line_index,
-                   sku,
-                   title,
-                   qty,
-                   unit_price,
-                   total_price
+        EXECUTE $V$
+          CREATE VIEW bridge_sales AS
+          SELECT order_id,
+                 order_code,
+                 date_utc_ms,
+                 state,
+                 line_index,
+                 sku,
+                 title,
+                 qty,
+                 unit_price,
+                 total_price
             FROM bridge_lines
-          $V$;
-        END IF;
+        $V$;
       END IF;
     END$$;
     """)
@@ -133,12 +138,10 @@ def _ensure_schema(con) -> None:
     con.commit()
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Helpers
+# Misc helpers
 # ──────────────────────────────────────────────────────────────────────────────
 def _iso_to_day_ms(s: str, end: bool = False) -> int:
-    """
-    YYYY-MM-DD → ms (UTC). Если end=True — конец дня (23:59:59.999)
-    """
+    """YYYY-MM-DD → миллисекунды UTC. end=True → конец дня."""
     dt = datetime.fromisoformat(s).replace(tzinfo=timezone.utc)
     if end:
         return int((dt.timestamp() + 86399.999) * 1000)
@@ -165,13 +168,11 @@ def _batches_for_sku(cur, sku: str) -> List[dict]:
     """, [sku])
 
 def _sales_from_bridge_by_codes(cur, codes: List[str]) -> List[dict]:
-    """
-    Читаем строки продаж из bridge_lines (через VIEW или напрямую).
-    """
+    """Берём продажи из bridge_sales (view/table)."""
     if not codes:
         return []
     fmt = ",".join(["%s"] * len(codes))
-    # сначала пытаемся через view bridge_sales, если её нет — напрямую из bridge_lines
+    # сначала пробуем view/таблицу bridge_sales
     try:
         return _fetchall(cur, f"""
             SELECT order_id, order_code, date_utc_ms, state, line_index,
@@ -183,6 +184,7 @@ def _sales_from_bridge_by_codes(cur, codes: List[str]) -> List[dict]:
              ORDER BY date_utc_ms ASC, order_code ASC, line_index ASC
         """, codes)
     except Exception:
+        # fallback на bridge_lines (если нет view/table)
         return _fetchall(cur, f"""
             SELECT order_id, order_code, date_utc_ms, state, line_index,
                    sku, title, COALESCE(qty,1) AS qty,
@@ -232,15 +234,9 @@ def _update_qty_sold(cur, touched_batch_ids: Iterable[int]) -> None:
     """, ids)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Core FIFO apply (идемпотентно)
+# Core FIFO (идемпотентно с UPSERT)
 # ──────────────────────────────────────────────────────────────────────────────
 def _apply_fifo_for_sales(cur, sales: List[dict]) -> Dict[str, Any]:
-    """
-    Для каждой строки заказа:
-      need = qty_from_bridge - allocated_in_ledger(order_code, line_index)
-      затем распределяем need по партиям FIFO.
-      На запись в леджер — UPSERT по (order_code, line_index, batch_id).
-    """
     batches_cache: Dict[str, List[dict]] = {}
     touched_batches: Set[int] = set()
     inserted_rows = 0
@@ -262,17 +258,15 @@ def _apply_fifo_for_sales(cur, sales: List[dict]) -> Dict[str, Any]:
         if qty_total <= 0:
             continue
 
-        # уже списано ранее по этой строке
         already = _already_allocated(cur, order_code, line_index)
         need = qty_total - already
         if need <= 0:
-            continue  # идемпотентно
+            continue
 
         if sku not in batches_cache:
             batches_cache[sku] = _batches_for_sku(cur, sku)
         batches = batches_cache[sku]
 
-        # параметры строки
         unit_price = float(s.get("unit_price") or 0.0)
         line_total = float(s.get("total_price") or 0.0)
         revenue_per_piece = (line_total / max(1, qty_total)) if line_total > 0 else unit_price
@@ -281,7 +275,6 @@ def _apply_fifo_for_sales(cur, sales: List[dict]) -> Dict[str, Any]:
         for b in batches:
             if need <= 0:
                 break
-
             bid = int(b["id"])
             batch_qty = int(b.get("qty") or 0)
             batch_sold = int(b.get("qty_sold") or 0)
@@ -294,7 +287,6 @@ def _apply_fifo_for_sales(cur, sales: List[dict]) -> Dict[str, Any]:
             if take <= 0:
                 continue
 
-            # комиссия: приоритет партия → категория
             commission_pct = b.get("commission_pct")
             if commission_pct is None:
                 commission_pct = _category_commission_sum(cur, sku)
@@ -316,7 +308,7 @@ def _apply_fifo_for_sales(cur, sales: List[dict]) -> Dict[str, Any]:
                 ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT (order_code, line_index, batch_id) DO UPDATE
                    SET qty = profit_fifo_ledger.qty + EXCLUDED.qty,
-                       unit_price = EXCLUDED.unit_price,              -- актуализируем цену (на случай правок)
+                       unit_price = EXCLUDED.unit_price,
                        total_price = profit_fifo_ledger.total_price + EXCLUDED.total_price,
                        commission_pct = EXCLUDED.commission_pct,
                        commission_amount = profit_fifo_ledger.commission_amount + EXCLUDED.commission_amount,
@@ -370,15 +362,14 @@ def _clear_ledger_for_codes(cur, codes: List[str]) -> List[int]:
     return touched
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Router
+# FastAPI Router
 # ──────────────────────────────────────────────────────────────────────────────
 def get_profit_fifo_router() -> APIRouter:
     router = APIRouter(tags=["Profit FIFO"])
 
-    # Идемпотентное применение списаний (без предварительного удаления)
     @router.post("/bridge/fifo/apply")
     def fifo_apply(
-        codes: Optional[str] = Query(None, description="CSV номеров заказов (order_code)"),
+        codes: Optional[str] = Query(None, description="CSV order_code"),
         date_from: Optional[str] = Query(None, description="YYYY-MM-DD"),
         date_to: Optional[str] = Query(None, description="YYYY-MM-DD"),
     ):
@@ -413,13 +404,12 @@ def get_profit_fifo_router() -> APIRouter:
                 "gaps": stats.get("gaps", []),
             }
 
-    # Полный rebuild: сначала чистим по кодам, затем применяем
     @router.post("/bridge/fifo/rebuild")
     def fifo_rebuild(
         codes: Optional[str] = Query(None, description="CSV order_code; если задано — даты игнорируются"),
-        date_from: Optional[str] = Query(None, description="YYYY-MM-DD (включительно)"),
-        date_to: Optional[str] = Query(None, description="YYYY-MM-DD (включительно)"),
-        dry_run: int = Query(0, description="1 = транзакция откатится"),
+        date_from: Optional[str] = Query(None, description="YYYY-MM-DD"),
+        date_to: Optional[str] = Query(None, description="YYYY-MM-DD"),
+        dry_run: int = Query(0, description="1 = откатить транзакцию"),
     ):
         with _pg() as con:
             _ensure_schema(con)
@@ -432,7 +422,6 @@ def get_profit_fifo_router() -> APIRouter:
                     raise HTTPException(400, "Передайте codes=... или date_from/date_to")
                 codes_list = _codes_from_period(cur, date_from, date_to)
 
-            # очистка только по затронутым кодам
             touched = _clear_ledger_for_codes(cur, codes_list)
             if touched:
                 _update_qty_sold(cur, touched)
@@ -457,13 +446,11 @@ def get_profit_fifo_router() -> APIRouter:
                 "dry_run": int(dry_run),
             }
 
-    # Пересчитать qty_sold у партий целиком (без изменения леджера)
     @router.post("/bridge/fifo/recalc-batches")
     def fifo_recalc_batches():
         with _pg() as con:
             _ensure_schema(con)
             cur = con.cursor()
-            # пересчёт для всех партий
             cur.execute("""
                 UPDATE batches b
                    SET qty_sold = COALESCE(agg.sold,0)
@@ -478,7 +465,6 @@ def get_profit_fifo_router() -> APIRouter:
             con.commit()
             return {"ok": True}
 
-    # Просмотр леджера
     @router.get("/bridge/fifo/ledger")
     def fifo_ledger(
         codes: Optional[str] = Query(None, description="CSV order_code"),
@@ -506,13 +492,11 @@ def get_profit_fifo_router() -> APIRouter:
                 """, [limit])
             return {"items": rows}
 
-    # Очистка по заказам
     @router.post("/bridge/fifo/clear")
     def fifo_clear(codes: Optional[str] = Query(None, description="CSV order_code")):
         lst = [c.strip() for c in (codes or "").split(",") if c.strip()]
         if not lst:
             return {"ok": True, "deleted_orders": 0}
-
         with _pg() as con:
             _ensure_schema(con)
             cur = con.cursor()
