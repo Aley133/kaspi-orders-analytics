@@ -144,6 +144,56 @@ def _to_int(v) -> int:
     except Exception:
         return 0
 
+def _maybe_float(v) -> Optional[float]:
+    if v is None:
+        return None
+    s = str(v).strip()
+    if s == "":
+        return None
+    try:
+        return float(s.replace(" ", "").replace(",", "."))
+    except Exception:
+        try:
+            return float(v)
+        except Exception:
+            return None
+
+def _maybe_int(v) -> Optional[int]:
+    if v is None:
+        return None
+    s = str(v).strip()
+    if s == "":
+        return None
+    try:
+        return int(float(s.replace(" ", "").replace(",", ".")))
+    except Exception:
+        try:
+            return int(v)
+        except Exception:
+            return None
+
+def _norm_key(s: str) -> str:
+    return "".join(ch for ch in str(s).lower() if ch.isalnum())
+
+_HEADER_ALIASES = {
+    "sku": {"sku", "code", "shopsku", "shop-sku", "vendorcode", "offerid", "id", "артикул", "код"},
+    "name": {"name", "model", "title", "productname", "offername", "наименование", "название", "товар"},
+    "brand": {"brand", "vendor", "producer", "manufacturer", "бренд", "производитель"},
+    "category": {"category", "categoryname", "group", "группа", "категория"},
+    "price": {"price", "baseprice", "saleprice", "currentprice", "totalprice", "cityprice", "цена"},
+    "quantity": {"qty", "quantity", "stock", "stockqty", "stockquantity", "stockcount", "availableamount", "остаток", "количество"},
+    "barcode": {"barcode", "ean", "штрихкод", "баркод"},
+    "active": {"active", "isactive", "ispublished", "visible", "isvisible", "status", "опубликован", "статус"},
+}
+
+def _alias_key(h: str) -> Optional[str]:
+    k = _norm_key(h)
+    for target, pool in _HEADER_ALIASES.items():
+        pool_norm = { _norm_key(x) for x in pool }
+        if k in pool_norm:
+            return target
+    return None
+
 def _avg_cost(sku: str) -> float | None:
     _ensure_schema()
     with _db() as c:
@@ -210,10 +260,8 @@ def _ensure_schema():
                 tax_percent DOUBLE PRECISION DEFAULT 0.0
             );
             """))
-            # safety
             c.execute(_q("CREATE INDEX IF NOT EXISTS idx_batches_sku ON batches(sku)"))
             c.execute(_q("CREATE INDEX IF NOT EXISTS idx_batches_date ON batches(date)"))
-            # migrations
             if not _has_column(c, "batches", "qty_sold"):
                 c.execute(_q("ALTER TABLE batches ADD COLUMN qty_sold INTEGER DEFAULT 0"))
     else:
@@ -256,7 +304,6 @@ def _ensure_schema():
             CREATE INDEX IF NOT EXISTS idx_batches_sku ON batches(sku);
             CREATE INDEX IF NOT EXISTS idx_batches_date ON batches(date);
             """)
-            # migrations
             cols = {r["name"] for r in c.execute("PRAGMA table_info(batches)")}
             if "commission_pct" not in cols:
                 c.execute("ALTER TABLE batches ADD COLUMN commission_pct REAL")
@@ -264,7 +311,6 @@ def _ensure_schema():
                 c.execute("ALTER TABLE batches ADD COLUMN batch_code TEXT")
             if "qty_sold" not in cols:
                 c.execute("ALTER TABLE batches ADD COLUMN qty_sold INTEGER DEFAULT 0")
-            # проставить недостающие batch_code
             for r in c.execute("SELECT id FROM batches WHERE batch_code IS NULL OR batch_code=''").fetchall():
                 c.execute("UPDATE batches SET batch_code=? WHERE id=?", (_gen_batch_code(), r["id"]))
 
@@ -296,9 +342,13 @@ def _seed_categories_if_empty():
                 )
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Upsert products
+# Upsert products (MERGE: не перезаписываем пустыми значениями)
 # ──────────────────────────────────────────────────────────────────────────────
-def _upsert_products(items: List[Dict[str, Any]]) -> Tuple[int,int]:
+def _upsert_products(items: List[Dict[str, Any]]) -> Tuple[int, int]:
+    """
+    Нормализованные ключи: sku, name, brand, category, price, qty/quantity, active, barcode.
+    Обновляет ТОЛЬКО непустые поля; пустые/отсутствующие — не трогают БД.
+    """
     _ensure_schema()
     inserted = updated = 0
     with _db() as c:
@@ -306,51 +356,53 @@ def _upsert_products(items: List[Dict[str, Any]]) -> Tuple[int,int]:
             sku = _sku_of(it)
             if not sku:
                 continue
-            name = it.get("name") or it.get("model") or it.get("title") or sku
-            brand = it.get("brand") or it.get("vendor")
-            category = it.get("category")
-            price = _to_float(it.get("price"))
-            qty = _to_int(it.get("qty") or it.get("quantity") or it.get("stock"))
-            barcode = it.get("barcode") or it.get("Barcode")
-            active = it.get("active")
-            if isinstance(active, str):
-                active = 1 if active.lower() in ("1","true","yes","on") else 0
-            elif isinstance(active, bool):
-                active = 1 if active else 0
-            else:
-                active = 1 if qty > 0 else 0
+
+            params = {
+                "sku": sku,
+                "name": (it.get("name") or None),
+                "brand": (it.get("brand") or None),
+                "category": (it.get("category") or None),
+                "price": _maybe_float(it.get("price")),
+                "quantity": _maybe_int(it.get("qty") or it.get("quantity") or it.get("stock")),
+                "active": (
+                    1 if str(it.get("active")).lower() in ("1", "true", "yes", "on", "published", "active") else
+                    0 if str(it.get("active")).lower() in ("0", "false", "no", "off") else
+                    None
+                ),
+                "barcode": (it.get("barcode") or it.get("Barcode") or None),
+            }
 
             if _USE_PG:
                 existed = c.execute(_q("SELECT 1 FROM products WHERE sku=:sku"), {"sku": sku}).first()
                 c.execute(_q("""
                     INSERT INTO products(sku,name,brand,category,price,quantity,active,barcode,updated_at)
-                    VALUES(:sku,:name,:brand,:category,:price,:qty,:active,:barcode,NOW())
+                    VALUES(:sku,:name,:brand,:category,:price,:quantity,:active,:barcode,NOW())
                     ON CONFLICT (sku) DO UPDATE SET
-                        name=EXCLUDED.name,
-                        brand=EXCLUDED.brand,
-                        category=EXCLUDED.category,
-                        price=EXCLUDED.price,
-                        quantity=EXCLUDED.quantity,
-                        active=EXCLUDED.active,
-                        barcode=EXCLUDED.barcode,
-                        updated_at=NOW()
-                """), {"sku": sku, "name": name, "brand": brand, "category": category,
-                       "price": price, "qty": qty, "active": active, "barcode": barcode})
+                        name     = CASE WHEN EXCLUDED.name     IS NOT NULL AND EXCLUDED.name     <> '' THEN EXCLUDED.name     ELSE products.name END,
+                        brand    = CASE WHEN EXCLUDED.brand    IS NOT NULL AND EXCLUDED.brand    <> '' THEN EXCLUDED.brand    ELSE products.brand END,
+                        category = CASE WHEN EXCLUDED.category IS NOT NULL AND EXCLUDED.category <> '' THEN EXCLUDED.category ELSE products.category END,
+                        price    = COALESCE(EXCLUDED.price,    products.price),
+                        quantity = COALESCE(EXCLUDED.quantity, products.quantity),
+                        active   = COALESCE(EXCLUDED.active,   products.active),
+                        barcode  = CASE WHEN EXCLUDED.barcode  IS NOT NULL AND EXCLUDED.barcode  <> '' THEN EXCLUDED.barcode  ELSE products.barcode END,
+                        updated_at = NOW()
+                """), params)
             else:
                 existed = c.execute("SELECT 1 FROM products WHERE sku=?", (sku,)).fetchone()
                 c.execute("""
                     INSERT INTO products(sku,name,brand,category,price,quantity,active,barcode,updated_at)
-                    VALUES(?,?,?,?,?,?,?,?,datetime('now'))
+                    VALUES(?,?,?,?,?,?,?, ?, datetime('now'))
                     ON CONFLICT(sku) DO UPDATE SET
-                        name=excluded.name,
-                        brand=excluded.brand,
-                        category=excluded.category,
-                        price=excluded.price,
-                        quantity=excluded.quantity,
-                        active=excluded.active,
-                        barcode=excluded.barcode,
-                        updated_at=excluded.updated_at
-                """, (sku, name, brand, category, price, qty, active, barcode))
+                        name     = CASE WHEN excluded.name     IS NOT NULL AND excluded.name     <> '' THEN excluded.name     ELSE name END,
+                        brand    = CASE WHEN excluded.brand    IS NOT NULL AND excluded.brand    <> '' THEN excluded.brand    ELSE brand END,
+                        category = CASE WHEN excluded.category IS NOT NULL AND excluded.category <> '' THEN excluded.category ELSE category END,
+                        price    = COALESCE(excluded.price,    price),
+                        quantity = COALESCE(excluded.quantity, quantity),
+                        active   = COALESCE(excluded.active,   active),
+                        barcode  = CASE WHEN excluded.barcode  IS NOT NULL AND excluded.barcode  <> '' THEN excluded.barcode  ELSE barcode END,
+                        updated_at = datetime('now')
+                """, (params["sku"], params["name"], params["brand"], params["category"],
+                      params["price"], params["quantity"], params["active"], params["barcode"]))
             if existed: updated += 1
             else: inserted += 1
     return inserted, updated
@@ -385,21 +437,21 @@ def _collect_products_from_kaspi(client: Any, active_only: Optional[bool]) -> Li
         seen.add(code)
         name = (attrs.get("name") or attrs.get("title") or attrs.get("productName")
                 or attrs.get("offerName") or code)
-        price = _to_float(attrs.get("price") or attrs.get("basePrice")
-                          or attrs.get("salePrice") or attrs.get("currentPrice") or attrs.get("totalPrice"))
-        qty = _to_int(attrs.get("quantity") or attrs.get("availableAmount")
-                      or attrs.get("stockQuantity") or attrs.get("qty"))
+        price = _maybe_float(attrs.get("price") or attrs.get("basePrice")
+                             or attrs.get("salePrice") or attrs.get("currentPrice") or attrs.get("totalPrice"))
+        qty = _maybe_int(attrs.get("quantity") or attrs.get("availableAmount")
+                         or attrs.get("stockQuantity") or attrs.get("qty"))
         brand = (attrs.get("brand") or attrs.get("producer") or attrs.get("manufacturer"))
         category = (attrs.get("category") or attrs.get("categoryName") or attrs.get("group"))
         barcode = (attrs.get("barcode") or attrs.get("ean"))
         active_val = attrs.get("active") or attrs.get("isActive") or attrs.get("isPublished") \
                      or attrs.get("visible") or attrs.get("isVisible") or attrs.get("status")
-        active: Optional[bool]
         if active_val is None:
             active = None
         else:
             s = str(active_val).strip().lower()
-            active = True if s in ("1","true","yes","on","published","active") else False if s in ("0","false","no","off") else None
+            active = True if s in ("1","true","yes","on","published","active") else \
+                     False if s in ("0","false","no","off") else None
         if active_only and active is False:
             return
         items.append({
@@ -409,7 +461,6 @@ def _collect_products_from_kaspi(client: Any, active_only: Optional[bool]) -> Li
         })
 
     try:
-        # большинство реализаций поддерживают active_only
         try:
             for it in iter_fn(active_only=bool(active_only) if active_only is not None else True):
                 add_row(it)
@@ -419,6 +470,138 @@ def _collect_products_from_kaspi(client: Any, active_only: Optional[bool]) -> Li
     except Exception as e:
         raise HTTPException(502, f"Ошибка при чтении каталога Kaspi: {e}")
     return items
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Парсеры XML/XLSX (умные)
+# ──────────────────────────────────────────────────────────────────────────────
+def _parse_xml_smart(raw: bytes) -> List[Dict[str, Any]]:
+    from xml.etree import ElementTree as ET
+    try:
+        root = ET.fromstring(raw)
+    except ET.ParseError as e:
+        raise HTTPException(400, f"Некорректный XML: {e}")
+
+    def strip(tag: str) -> str:
+        return tag.split("}", 1)[-1] if "}" in tag else tag
+
+    def child_text(parent: ET.Element, *names: str) -> str:
+        for el in parent.iter():
+            if strip(el.tag) in names:
+                t = (el.text or "").strip()
+                if t:
+                    return t
+        return ""
+
+    rows: List[Dict[str, Any]] = []
+    offers = [el for el in root.iter() if strip(el.tag) == "offer"]
+    for off in offers:
+        code = (off.get("sku") or off.get("shop-sku") or off.get("code") or off.get("id") or "").strip()
+        if not code:
+            continue
+        name = child_text(off, "model", "name", "title") or code
+        brand = child_text(off, "brand")
+        price = _maybe_float(child_text(off, "cityprice") or child_text(off, "price"))
+
+        qty, active = None, None
+        for el in off.iter():
+            if strip(el.tag) == "availability":
+                sc = el.get("stockCount")
+                qty = _maybe_int(sc) if sc is not None else None
+                av = (el.get("available") or "").strip().lower()
+                active = True if av in ("yes","true","1") else False if av in ("no","false","0") else None
+                break
+
+        rows.append({
+            "sku": code, "code": code, "name": name,
+            "brand": brand or None, "price": price, "qty": qty, "active": active,
+        })
+    return rows
+
+def _parse_excel_smart(raw: bytes) -> List[Dict[str, Any]]:
+    if not _OPENPYXL_AVAILABLE:
+        raise HTTPException(500, "openpyxl не установлен на сервере.")
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+    except Exception as e:
+        raise HTTPException(400, f"Не удалось открыть Excel: {e}")
+    ws = wb.active
+    headers = [str(c.value or '').strip() for c in ws[1]]
+
+    # карта: индекс колонки -> целевой ключ
+    col_to_key: Dict[int, str] = {}
+    for idx, h in enumerate(headers):
+        k = _alias_key(h)
+        if k:
+            col_to_key[idx] = k
+
+    out: List[Dict[str, Any]] = []
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        if all(v in (None, "", []) for v in row):
+            continue
+        item: Dict[str, Any] = {}
+        for idx, val in enumerate(row):
+            key = col_to_key.get(idx)
+            if not key:
+                continue
+            if key == "price":
+                item[key] = _maybe_float(val)
+            elif key in ("quantity", "qty"):
+                item["qty"] = _maybe_int(val)
+            elif key == "active":
+                if val is None:
+                    item[key] = None
+                else:
+                    s = str(val).strip().lower()
+                    item[key] = True if s in ("1","true","yes","on","да","+","опубликован") else \
+                                False if s in ("0","false","no","off","нет","-") else None
+            else:
+                item[key] = (str(val).strip() if val is not None else None)
+
+        sku = _sku_of(item)
+        if not sku:
+            continue
+
+        if item.get("active") is None and item.get("qty") is not None:
+            try:
+                item["active"] = True if int(item["qty"]) > 0 else None
+            except Exception:
+                pass
+
+        norm = {
+            "sku": sku,
+            "code": sku,
+            "name": item.get("name"),
+            "brand": item.get("brand"),
+            "category": item.get("category"),
+            "price": item.get("price"),
+            "qty": item.get("qty"),
+            "active": item.get("active"),
+            "barcode": item.get("barcode"),
+        }
+        out.append(norm)
+    return out
+
+def _smart_import_bytes(filename: str, content: bytes) -> Dict[str, Any]:
+    fn = (filename or "").lower()
+    if fn.endswith(".xml"):
+        items = _parse_xml_smart(content)
+    elif fn.endswith(".xlsx") or fn.endswith(".xls"):
+        items = _parse_excel_smart(content)
+    else:
+        raise HTTPException(400, "Поддерживаются только XML или Excel (.xlsx/.xls).")
+
+    # дедуп по SKU
+    seen: Dict[str, Dict[str, Any]] = {}
+    for r in items:
+        sku = _sku_of(r)
+        if not sku:
+            continue
+        seen[sku] = r
+    items = list(seen.values())
+
+    inserted, updated = _upsert_products(items)
+    items.sort(key=lambda x: (x.get("name") or x.get("sku") or "").lower())
+    return {"count": len(items), "inserted": inserted, "updated": updated, "items": items}
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Pydantic
@@ -467,7 +650,6 @@ def _recount_qty_sold_from_ledger() -> int:
                     "UPDATE batches SET qty_sold=:v WHERE id=:bid AND COALESCE(qty_sold,0) <> :v"
                 ), {"v": int(val), "bid": int(bid)})
                 updated += (r.rowcount or 0)
-            # защита
             c.execute(_q("UPDATE batches SET qty_sold = qty WHERE qty_sold > qty"))
         else:
             rows = c.execute(
@@ -504,7 +686,7 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
             return {"ok": ok == "ok", "driver": "sqlite"}
 
     # ──────────────────────────────────────────────────────────────────────
-    # DB: список товаров (+ мета по партиям) — под твой HTML
+    # DB: список товаров (+ мета по партиям) — под HTML «Мой склад»
     # ──────────────────────────────────────────────────────────────────────
     @router.get("/db/list")
     async def db_list(active_only: int = Query(1), search: str = Query("", alias="q")):
@@ -651,100 +833,23 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
                         media_type="text/csv; charset=utf-8",
                         headers={"Content-Disposition": 'attachment; filename="products-db.csv"'})
 
-    # Ручная загрузка (XML/XLSX) → в БД
+    # Универсальный УМНЫЙ импорт (XML/XLSX) → merge-upsert (не перетирает пустыми)
+    @router.post("/import", dependencies=[Depends(_require_api_key)])
+    async def import_products(file: UploadFile = File(...)):
+        content = await file.read()
+        try:
+            res = _smart_import_bytes(file.filename or "", content)
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(400, f"Не удалось обработать файл: {e}")
+        return res
+
+    # Совместимость: старый маршрут проксирует на новый
     @router.post("/manual-upload", dependencies=[Depends(_require_api_key)])
     async def manual_upload(file: UploadFile = File(...)):
-        filename = (file.filename or "").lower()
         content = await file.read()
-
-        def _parse_xml(raw: bytes) -> List[Dict[str, Any]]:
-            from xml.etree import ElementTree as ET
-            try:
-                root = ET.fromstring(raw)
-            except ET.ParseError as e:
-                raise HTTPException(400, f"Некорректный XML: {e}")
-            def strip(tag: str) -> str:
-                return tag.split("}", 1)[-1] if "}" in tag else tag
-            def child_text(parent: ET.Element, *names: str) -> str:
-                for el in parent.iter():
-                    if strip(el.tag) in names:
-                        t = (el.text or "").strip()
-                        if t:
-                            return t
-                return ""
-            rows: List[Dict[str, Any]] = []
-            offers = [el for el in root.iter() if strip(el.tag) == "offer"]
-            for off in offers:
-                code = (off.get("sku") or off.get("shop-sku") or off.get("code") or off.get("id") or "").strip()
-                name = child_text(off, "model", "name", "title") or code
-                brand = child_text(off, "brand")
-                # availability
-                qty, active = 0, None
-                for el in off.iter():
-                    if strip(el.tag) == "availability":
-                        sc = el.get("stockCount")
-                        if sc:
-                            try: qty = int(float(sc))
-                            except Exception: qty = 0
-                        av = (el.get("available") or "").strip().lower()
-                        if av in ("yes","true","1"): active = True
-                        elif av in ("no","false","0"): active = False
-                        break
-                # price
-                price = 0.0
-                for el in off.iter():
-                    if strip(el.tag) == "cityprice":
-                        txt = (el.text or "").strip()
-                        if txt:
-                            try: price = float(txt.replace(" ", "").replace(",", "."))
-                            except Exception: price = 0.0
-                        break
-                rows.append({
-                    "id": code, "code": code, "sku": code,
-                    "name": name, "brand": brand or None, "qty": qty, "price": price, "active": active,
-                })
-            return rows
-
-        def _parse_excel(raw: bytes) -> List[Dict[str, Any]]:
-            if not _OPENPYXL_AVAILABLE:
-                raise HTTPException(500, "openpyxl не установлен на сервере.")
-            try:
-                wb = openpyxl.load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
-            except Exception as e:
-                raise HTTPException(400, f"Не удалось открыть Excel: {e}")
-            ws = wb.active
-            headers = [str(c.value or '').strip() for c in ws[1]]
-            out: List[Dict[str, Any]] = []
-            for row in ws.iter_rows(min_row=2, values_only=True):
-                item = {h: v for h, v in zip(headers, row)}
-                if any(v not in (None, "", []) for v in item.values()):
-                    out.append(item)
-            return out
-
-        if filename.endswith(".xml"):
-            raw_rows = _parse_xml(content)
-        elif filename.endswith(".xlsx") or filename.endswith(".xls"):
-            raw_rows = _parse_excel(content)
-        else:
-            raise HTTPException(400, "Поддерживаются только XML или Excel (.xlsx/.xls).")
-
-        normalized: List[Dict[str, Any]] = []
-        for r in raw_rows:
-            d = dict(r)
-            d.setdefault("code", (d.get("sku") or d.get("vendorCode") or d.get("barcode") or d.get("id") or ""))
-            d["code"] = str(d["code"]).strip()
-            d.setdefault("id", d["code"])
-            d.setdefault("name", d.get("model") or d.get("title") or d.get("Name") or d.get("name") or d["code"])
-            d["name"] = str(d["name"]).strip()
-            d["qty"] = _to_int(d.get("qty") or d.get("quantity") or d.get("stock"))
-            d["price"] = _to_float(d.get("price"))
-            d["brand"] = d.get("brand") or d.get("vendor")
-            d["barcode"] = d.get("barcode") or d.get("Barcode")
-            normalized.append(d)
-
-        inserted, updated = _upsert_products(normalized)
-        normalized.sort(key=lambda x: (x.get("name") or x.get("Name") or x.get("model") or x.get("title") or '').lower())
-        return {"count": len(normalized), "items": normalized, "inserted": inserted, "updated": updated}
+        return _smart_import_bytes(file.filename or "", content)
 
     # ──────────────────────────────────────────────────────────────────────
     # Партии (просмотр/добавление/редактирование/удаление)
@@ -825,7 +930,6 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
     async def delete_batch(sku: str, bid: int):
         _ensure_schema()
         with _db() as c:
-            # запрет удаления, если уже есть списания
             if _USE_PG:
                 r = c.execute(_q("SELECT COALESCE(qty_sold,0) AS s FROM batches WHERE id=:bid AND sku=:sku"),
                               {"bid": bid, "sku": sku}).first()
@@ -919,7 +1023,7 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
         return {"ok": True, "sku": sku, "batches": rows}
 
     # ──────────────────────────────────────────────────────────────────────
-    # Простая ensure-sku (под API вызовы, когда нужно завести SKU «вручную»)
+    # Простая ensure-sku (по API)
     # ──────────────────────────────────────────────────────────────────────
     @router.post("/db/ensure-sku/{sku}", dependencies=[Depends(_require_api_key)])
     async def ensure_sku(
@@ -943,7 +1047,7 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
         return {"ok": True, "inserted": ins, "updated": upd}
 
     # ──────────────────────────────────────────────────────────────────────
-    # Синхронизация цен/остатков из Kaspi (новое под твою просьбу)
+    # Синхронизация цен/остатков из Kaspi
     # ──────────────────────────────────────────────────────────────────────
     @router.post("/sync/kaspi", dependencies=[Depends(_require_api_key)])
     async def sync_from_kaspi(active_only: int = Query(1), limit: int = Query(0, ge=0, le=20000)):
@@ -956,7 +1060,7 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
         return {"ok": True, "received": len(items), "inserted": ins, "updated": upd}
 
     # ──────────────────────────────────────────────────────────────────────
-    # Бэкап/восстановление (SQLite only — элементы скрываются в UI под PG)
+    # Бэкап/восстановление (SQLite only)
     # ──────────────────────────────────────────────────────────────────────
     @router.get("/db/backup.sqlite3")
     async def backup_db():
