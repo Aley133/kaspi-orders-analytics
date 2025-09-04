@@ -1,1 +1,163 @@
+<!-- app/static/catalog.html -->
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <title>Catalog Debug — Kaspi</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 24px; }
+    h1 { margin: 0 0 12px; }
+    .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin: 12px 0; }
+    input[type="number"] { width: 96px; }
+    table { border-collapse: collapse; width: 100%; margin-top: 16px; }
+    th, td { border: 1px solid #ddd; padding: 6px 8px; font-size: 14px; }
+    th { background: #f7f7f7; position: sticky; top: 0; }
+    code { background: #f3f3f3; padding: 2px 6px; border-radius: 4px; }
+    .muted { color: #777; }
+    .ok { color: #128a12; }
+    .err { color: #b00020; }
+    .pill { padding: 2px 6px; border-radius: 999px; font-size: 12px; }
+    .pill.on { background: #e7f7e7; color: #116611; }
+    .pill.off { background: #fbeaea; color: #a11; }
+    .topbar { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+    .card { border: 1px solid #eee; padding: 12px; border-radius: 8px; }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <h1>Kaspi Catalog Debug</h1>
+    <div class="card">
+      <div><b>API-ключ (для записи в БД)</b></div>
+      <div class="row">
+        <input id="apiKey" type="text" placeholder="X-API-Key" />
+        <button onclick="saveKey()">Сохранить</button>
+        <span class="muted">Хранится в <code>localStorage</code></span>
+      </div>
+    </div>
+  </div>
+
+  <div class="row">
+    <button onclick="ping()">Пинг</button>
+    <label><input id="activeOnly" type="checkbox" checked /> Только активные</label>
+    <label>Лимит: <input id="limit" type="number" min="1" max="20000" value="50" /></label>
+    <button onclick="sample()">Сэмпл каталога</button>
+    <button onclick="sync()">Синхронизировать в БД</button>
+    <span id="status" class="muted"></span>
+  </div>
+
+  <div id="summary" class="muted"></div>
+  <div style="max-height: 70vh; overflow: auto;">
+    <table id="tbl" style="display:none">
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>SKU</th>
+          <th>Название</th>
+          <th>Цена</th>
+          <th>Остаток</th>
+          <th>Активен</th>
+          <th>Бренд</th>
+          <th>Категория</th>
+          <th>Штрихкод</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const apiKeyStorageKey = "KASPI_API_KEY";
+
+function saveKey() {
+  localStorage.setItem(apiKeyStorageKey, $("apiKey").value.trim());
+  $("status").textContent = "API-ключ сохранён";
+}
+
+function loadKey() {
+  $("apiKey").value = localStorage.getItem(apiKeyStorageKey) || "";
+}
+loadKey();
+
+function setStatus(msg, ok=true) {
+  const el = $("status");
+  el.textContent = msg;
+  el.className = ok ? "ok" : "err";
+}
+
+async function ping() {
+  setStatus("Проверка…", true);
+  try {
+    const r = await fetch("/debug/catalog/ping");
+    const j = await r.json();
+    $("summary").textContent = JSON.stringify(j, null, 2);
+    setStatus("OK");
+  } catch (e) {
+    setStatus("Ошибка пинга: " + e, false);
+  }
+}
+
+function render(items) {
+  const tbl = $("tbl");
+  const tb = tbl.querySelector("tbody");
+  tb.innerHTML = "";
+  items.forEach((it, i) => {
+    const tr = document.createElement("tr");
+    const active = it.active ?? (it.qty > 0);
+    tr.innerHTML = `
+      <td>${i+1}</td>
+      <td><code>${it.code || it.sku || ""}</code></td>
+      <td>${it.name || ""}</td>
+      <td>${it.price ?? ""}</td>
+      <td>${it.qty ?? ""}</td>
+      <td><span class="pill ${active ? "on":"off"}">${active ? "да" : "нет"}</span></td>
+      <td>${it.brand || ""}</td>
+      <td>${it.category || ""}</td>
+      <td>${it.barcode || ""}</td>
+    `;
+    tb.appendChild(tr);
+  });
+  tbl.style.display = items.length ? "" : "none";
+  $("summary").textContent = `Получено: ${items.length}`;
+}
+
+async function sample() {
+  setStatus("Чтение каталога…", true);
+  const activeOnly = $("activeOnly").checked ? 1 : 0;
+  const limit = Number($("limit").value || 50);
+  try {
+    const r = await fetch(`/debug/catalog/sample?active_only=${activeOnly}&limit=${limit}`);
+    const j = await r.json();
+    render(j.items || []);
+    setStatus("OK");
+  } catch (e) {
+    setStatus("Ошибка выборки: " + e, false);
+  }
+}
+
+async function sync() {
+  setStatus("Синхронизация в БД…", true);
+  const activeOnly = $("activeOnly").checked ? 1 : 0;
+  const limit = Number($("limit").value || 0);
+  const key = (localStorage.getItem(apiKeyStorageKey) || "").trim();
+  if (!key) {
+    setStatus("Укажи X-API-Key для записи в БД", false);
+    return;
+  }
+  try {
+    const r = await fetch(`/products/sync/kaspi?active_only=${activeOnly}&limit=${limit}`, {
+      method: "POST",
+      headers: {"X-API-Key": key}
+    });
+    const j = await r.json();
+    $("summary").textContent = JSON.stringify(j, null, 2);
+    setStatus(j.ok ? "OK" : "Ошибка синхронизации", !!j.ok);
+  } catch (e) {
+    setStatus("Ошибка синхронизации: " + e, false);
+  }
+}
+</script>
+</body>
+</html>
 
