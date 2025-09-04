@@ -164,6 +164,14 @@
         <button class="btn secondary" id="btnBackup" data-sqlite-only>Бэкап БД</button>
         <label class="btn secondary" for="restoreFile" data-sqlite-only>Восстановить БД</label>
         <input type="file" id="restoreFile" accept=".sqlite3" style="display:none" data-sqlite-only>
+         <label class="row" style="gap:6px;margin-left:auto">
+    <input id="mergeMode" type="checkbox" checked>
+    <span class="muted">Merge-режим (не удалять старые)</span>
+  </label>
+  <label class="row" style="gap:6px">
+    <input id="priceOnly" type="checkbox" checked>
+    <span class="muted">Только цены (qty/активность не менять)</span>
+  </label>
       </div>
 
       <div id="note" class="note"></div>
@@ -365,6 +373,7 @@ async function loadAPI(){
     }
   }
 }
+  
 async function loadDB(){
   try{
     const p = new URLSearchParams();
@@ -375,6 +384,13 @@ async function loadDB(){
     renderProducts(data.items||[]);
   }catch(e){ setNote('Сеть: ' + e.message); }
 }
+
+async function getAllDbItems(){
+  const p = new URLSearchParams({ active_only:'0', page:'1', page_size:'20000' });
+  const data = await fetchJSON('/products/db/list?' + p.toString());
+  return Array.isArray(data.items) ? data.items : [];
+}
+  
 async function importFile(file){
   const fd = new FormData(); fd.append('file', file);
   try{
@@ -1036,16 +1052,72 @@ document.addEventListener('DOMContentLoaded', async ()=>{
 
   // сохранить в БД
   qs('#btnSaveDb').onclick = async ()=>{
-    const rows = tableToRows();
-    if(!rows.length){ setNote('Нет строк для сохранения. Сначала загрузите товары из API/файла.'); return; }
-    try{
-      const res = await fetchJSON('/products/db/bulk-upsert', {
-        method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(rows)
-      });
-      setNote(`Сохранено в БД: вставлено ${res.inserted||0}, обновлено ${res.updated||0}`, true);
-      await loadDB();
-    }catch(e){ setNote('Сохранение в БД не удалось: ' + e.message); }
-  };
+  const rows = tableToRows();
+  if(!rows.length){ setNote('Нет строк для сохранения. Сначала загрузите товары из API/файла.'); return; }
+
+  const merge = qs('#mergeMode')?.checked;
+  const priceOnly = qs('#priceOnly')?.checked;
+
+  try{
+    let payload = rows;
+    let msgExtra = '';
+
+    if (merge){
+      // 1) тянем все, что уже есть в БД
+      const dbAll = await getAllDbItems();
+      const map = new Map(dbAll.map(o => [String(o.code), {...o}]));
+
+      // 2) сливаем: обновляем цену (и метаданные), qty/active — по флажку
+      let added = 0, updated = 0;
+      for (const r of rows){
+        const key = String(r.code || '').trim();
+        if (!key) continue;
+
+        if (map.has(key)){
+          const o = map.get(key);
+          o.name     = r.name || o.name;
+          o.brand    = r.brand ?? o.brand;
+          o.category = r.category ?? o.category;
+          if (typeof r.price === 'number') o.price = r.price; // ОБНОВЛЯЕМ ЦЕНУ
+
+          if (!priceOnly){
+            if (typeof r.qty    === 'number')  o.qty    = r.qty;
+            if (typeof r.active === 'boolean') o.active = r.active;
+          }
+          map.set(key, o);
+          updated++;
+        } else {
+          map.set(key, {
+            code: key,
+            name: r.name || key,
+            brand: r.brand ?? null,
+            category: r.category ?? null,
+            price: typeof r.price === 'number' ? r.price : 0,
+            qty: 0,
+            active: true
+          });
+          added++;
+        }
+      }
+
+      payload = [...map.values()];
+      msgExtra = ` Режим MERGE: обновлено цен у ${nf.format(updated)}, добавлено новых ${nf.format(added)}, всего в БД станет ${nf.format(payload.length)}.`;
+    }
+
+    // 3) сохраняем объединённый список
+    const res = await fetchJSON('/products/db/bulk-upsert', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(payload)
+    });
+
+    setNote(`Сохранено в БД: вставлено ${fmt(res.inserted||0)}, обновлено ${fmt(res.updated||0)}.${msgExtra}`, true);
+    await loadDB();
+  }catch(e){
+    setNote('Сохранение в БД не удалось: ' + e.message);
+  }
+};
+
 
   // экспорт CSV
   qs('#btnExportDb').onclick = ()=>{
