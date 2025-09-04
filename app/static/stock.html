@@ -71,6 +71,7 @@
     .toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
     .grow{flex:1 1 auto}
     .pill{background:var(--pill-bg);color:var(--pill-fg);padding:4px 8px;border-radius:999px;font-weight:600}
+    .right{justify-content:flex-end}
   </style>
 </head>
 <body data-theme="light">
@@ -93,7 +94,7 @@
     <main class="content">
       <h1>Мой склад</h1>
 
-      <!-- СИГНАЛЫ СПИСАНИЙ -->
+      <!-- СИГНАЛЫ (только чтение, никаких авто-списаний) -->
       <div id="signals" class="statbar">
         <div class="stat" id="sig-today"><span class="badge">Сегодня:</span><span class="muted">—</span></div>
         <div class="stat" id="sig-7d"><span class="badge">7 дней:</span><span class="muted">—</span></div>
@@ -131,6 +132,10 @@
           </div>
           <button class="btn" id="fifo-run">Списать со склада</button>
           <button class="btn secondary" id="fifo-refresh">Пересчитать сигналы</button>
+          <button class="btn secondary" id="btnHistoryAll">История за период</button>
+        </div>
+        <div class="muted" style="margin-top:6px">
+          Внимание: автоматического списания нет — списание выполняется только по кнопке «Списать со склада».
         </div>
         <div id="fifo-log" class="log"></div>
       </div>
@@ -185,6 +190,37 @@
           </table>
         </div>
       </div>
+
+      <!-- ГЛОБАЛЬНАЯ ИСТОРИЯ СПИСАНИЙ -->
+      <div class="panel" id="history-all-panel" style="display:none">
+        <div class="row">
+          <h3 style="margin:0">История списаний за период</h3>
+          <div class="grow"></div>
+          <button class="btn secondary" id="btnHideHistory">Скрыть</button>
+        </div>
+        <div id="histAllSummary" class="statbar"></div>
+        <div style="overflow:auto; max-height:60vh; margin-top:6px">
+          <table id="histAllTable">
+            <thead>
+              <tr>
+                <th>Дата</th>
+                <th>Заказ</th>
+                <th>SKU</th>
+                <th>Название</th>
+                <th>Кол-во</th>
+                <th>Цена/шт</th>
+                <th>Выручка</th>
+                <th>Комиссия</th>
+                <th>Себестоимость</th>
+                <th>Прибыль</th>
+                <th>Партия</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
     </main>
   </div>
 
@@ -306,7 +342,7 @@ function renderProducts(items){
   sortTable(sortState.idx, /ШТ|Цена|Остаток|Кол-во|Маржа/i.test(th?.textContent||'')?'num':'str');
 }
 
-/* Загрузка каталога: сначала пробуем /products/list, если нет — /products/db/list */
+/* Загрузка каталога */
 async function loadAPI(){
   const p = new URLSearchParams();
   p.set('active', qs('#onlyActive').checked ? '1' : '0');
@@ -384,7 +420,7 @@ async function getOrderCodes(start, end){
 /* Читать леджер порциями по кодам заказов */
 async function getLedgerByCodes(orderCodes, chunk=30, perLimit=10000){
   const res = [];
-  for (let i=0; i<orderCodes.length; i+=chunk){
+  for (let i=0; i<iorderCodes.length; i+=chunk){
     const part = orderCodes.slice(i, i+chunk).map(encodeURIComponent).join(',');
     const url = `/profit/bridge/fifo/ledger?codes=${part}&limit=${perLimit}`;
     const j = await fetchJSON(url);
@@ -401,7 +437,8 @@ function calcSignalsFromLedger(items, startTs, endTs){
   const qtySum    = rows.reduce((a,r)=>a+(Number(r.qty)||0),0);
   const profitSum = rows.reduce((a,r)=>a+(Number(r.profit_amount)||0),0);
   const costSum   = rows.reduce((a,r)=>a+(Number(r.cost_amount)||0),0);
-  return { rows, orders: orders.size, skus: skus.size, qty: qtySum, profit: profitSum, cost: costSum };
+  const revSum    = rows.reduce((a,r)=>a+(Number(r.total_price)||0),0);
+  return { rows, orders: orders.size, skus: skus.size, qty: qtySum, profit: profitSum, cost: costSum, revenue: revSum };
 }
 
 function paintSignal(elId, label){
@@ -434,10 +471,9 @@ async function refreshSignals(){
 
     const start30 = addDays(today, -29);
     const led30 = (await getLedgerByCodes(await getOrderCodes(start30, today))).filter(Boolean);
-    paintSignal('#sig-30д','30 дней:'); // safeguard (id ниже настоящий)
+    paintSignal('#sig-30д','30 дней:'); // safety
     paintSignal('#sig-30d','30 дней:')(calcSignalsFromLedger(led30, dayStartTs(start30), dayEndTs(today)));
 
-    // Отдельная крупная цифра — себестоимость сегодня
     const elCogs = qs('#sig-cogs-today');
     if (elCogs){
       elCogs.classList.remove('ok','err');
@@ -446,9 +482,8 @@ async function refreshSignals(){
         <span class="kpi">${fmt(stToday.cost)} KZT</span>`;
     }
 
-    // Последнее списание
     const pick = (arr)=>arr.reduce((acc,r)=>{
-      const ts = Date.parse(r.created_at || '');
+      const ts = Number(r.date_utc_ms || r.created_at || 0);
       return (!isNaN(ts) && (!acc || ts>acc)) ? ts : acc;
     }, null);
     const lastCreated = pick(led30.length ? led30 : (led7.length ? led7 : ledToday));
@@ -456,7 +491,7 @@ async function refreshSignals(){
     elLast.classList.remove('ok','warn','err');
     if(lastCreated){
       elLast.classList.add('ok');
-      const dt = new Date(lastCreated);
+      const dt = new Date(Number(lastCreated));
       elLast.innerHTML = `<span class="badge">Последнее списание:</span>
         <span>${dt.toLocaleDateString()} ${dt.toLocaleTimeString()}</span>`;
     }else{
@@ -470,16 +505,15 @@ async function refreshSignals(){
 }
 
 /* ──────────────────────────────────────────────────────────────────
-   BRIDGE: правильная синхронизация (посылаем строки заказов)
+   BRIDGE: синхронизация строк заказов (ручная)
 ────────────────────────────────────────────────────────────────── */
-// Собираем ПОЛНЫЕ строки заказов за период (не сгруппированные)
 async function getBridgeLinesForPeriod(FROM, TO){
   const p = new URLSearchParams({
     start: FROM, end: TO,
     tz: 'Asia/Almaty',
     date_field: 'creationDate',
     order: 'asc',
-    grouped: '0',         // ВАЖНО: нужны строки, а не агрегат по заказу
+    grouped: '0',
     limit: '100000',
     with_items: '1',
     use_bd: '1',
@@ -492,8 +526,7 @@ async function getBridgeLinesForPeriod(FROM, TO){
   const j = await fetchJSON('/orders/ids?' + p.toString());
   const rows = Array.isArray(j.items) ? j.items : [];
 
-  // Нумеруем позиции в пределах заказа — для line_index
-  const counters = new Map(); // order_id -> last_index
+  const counters = new Map();
   const lines = [];
 
   for (const r of rows){
@@ -520,7 +553,6 @@ async function getBridgeLinesForPeriod(FROM, TO){
   return lines;
 }
 
-// Отправка в bridge: массив объектов (BridgeLineIn[])
 async function syncBridgeLines(BKEY, lines){
   let synced=0, codes=[];
   for (let i=0; i<lines.length; i+=200){
@@ -538,7 +570,7 @@ async function syncBridgeLines(BKEY, lines){
 }
 
 /* ──────────────────────────────────────────────────────────────────
-   FIFO pipeline
+   FIFO pipeline (ручной запуск)
 ────────────────────────────────────────────────────────────────── */
 function logFIFO(msg, obj){
   const el = qs("#fifo-log");
@@ -600,7 +632,6 @@ async function runFIFO(){
     if (!ping.ok) throw new Error('DB ping failed');
     logFIFO('OK', ping);
 
-    // Сбор строк → sync bridge
     logFIFO(`Получаю строки заказов ${FROM}..${TO}…`);
     const lines = await getBridgeLinesForPeriod(FROM, TO);
     logFIFO(`Найдено строк: ${lines.length}`);
@@ -610,13 +641,11 @@ async function runFIFO(){
       logFIFO('Bridge sync', syncRes);
     }
 
-    // первичный apply (по периоду)
     logFIFO('FIFO apply #1…');
     const apply1 = await fetchJSON(`/profit/bridge/fifo/apply?date_from=${FROM}&date_to=${TO}`, { method:'POST' });
     logFIFO('Apply #1 результат', apply1);
     let gaps = Array.isArray(apply1.gaps) ? apply1.gaps : [];
 
-    // добивка партий по дефициту
     if (gaps.length && FILL && APIKEY) {
       const agg = {};
       gaps.forEach(g => {
@@ -630,7 +659,6 @@ async function runFIFO(){
         logFIFO('OK', r);
         await sleep(40);
       }
-      // повторный apply только по этим заказам
       const affectedCodes = [...new Set(gaps.map(g => g.order_code).filter(Boolean))];
       if (affectedCodes.length){
         logFIFO('FIFO apply #2 по заказам:', affectedCodes);
@@ -640,7 +668,6 @@ async function runFIFO(){
       }
     }
 
-    // пересчёт qty_sold
     logFIFO('Пересчитываю qty_sold по партиям…');
     const rec = await fetchJSON('/profit/bridge/fifo/recalc-batches', { method:'POST' });
     logFIFO('recalc-batches', rec);
@@ -657,7 +684,7 @@ async function runFIFO(){
 }
 
 /* ──────────────────────────────────────────────────────────────────
-   SKU details (batches + history)
+   SKU details (batches + history per SKU)
 ────────────────────────────────────────────────────────────────── */
 async function openDetail(row){
   clearDetails();
@@ -789,7 +816,7 @@ async function openDetail(row){
         body: JSON.stringify({entries})
       });
       setNote('Партии сохранены.', true);
-      openDetail(row); // перезагрузка секции
+      openDetail(row);
     }catch(e){ setNote('Сохранение партий не удалось: ' + e.message); }
   };
 
@@ -859,6 +886,67 @@ async function openDetail(row){
 }
 
 /* ──────────────────────────────────────────────────────────────────
+   Глобальная история списаний за период (по кнопке)
+────────────────────────────────────────────────────────────────── */
+async function showGlobalHistory(){
+  const FROM = qs('#fifo-from').value;
+  const TO   = qs('#fifo-to').value;
+  const box  = qs('#history-all-panel');
+  const sum  = qs('#histAllSummary');
+  const tbody= qs('#histAllTable tbody');
+  box.style.display = 'block';
+  sum.innerHTML = '<div class="muted">Загрузка…</div>';
+  tbody.innerHTML = '';
+
+  try{
+    const codes = await getOrderCodes(FROM, TO);
+    if(!codes.length){
+      sum.innerHTML = '<div class="muted">За выбранный период заказов не найдено.</div>';
+      return;
+    }
+    const ledger = await getLedgerByCodes(codes, 50, 10000);
+    const startTs = dayStartTs(FROM), endTs = dayEndTs(TO);
+    const list = ledger
+      .filter(x => typeof x.date_utc_ms==='number' && x.date_utc_ms>=startTs && x.date_utc_ms<=endTs)
+      .sort((a,b)=>a.date_utc_ms-b.date_utc_ms);
+
+    // Сводка
+    const st = calcSignalsFromLedger(list, startTs, endTs);
+    sum.innerHTML = `
+      <div class="stat"><span class="badge">Строк:</span> ${fmt(st.rows.length)}</div>
+      <div class="stat"><span class="badge">Заказов:</span> ${fmt(st.orders)}</div>
+      <div class="stat"><span class="badge">SKU:</span> ${fmt(st.skus)}</div>
+      <div class="stat"><span class="badge">qty:</span> ${fmt(st.qty)}</div>
+      <div class="stat"><span class="badge">Выручка:</span> ${fmt(st.revenue)} KZT</div>
+      <div class="stat"><span class="badge">Себестоимость:</span> ${fmt(st.cost)} KZT</div>
+      <div class="stat"><span class="badge">Прибыль:</span> ${fmt(st.profit)} KZT</div>
+    `;
+
+    // Таблица
+    list.forEach(r=>{
+      const tr = document.createElement('tr');
+      const dt = new Date(Number(r.date_utc_ms||0));
+      tr.innerHTML = `
+        <td>${dt.toLocaleDateString()} ${dt.toLocaleTimeString()}</td>
+        <td>${escapeHtml(r.order_code||'')}</td>
+        <td>${escapeHtml(r.sku||'')}</td>
+        <td>${escapeHtml(r.title||'')}</td>
+        <td>${fmt(r.qty)}</td>
+        <td>${fmt(r.unit_price)} KZT</td>
+        <td>${fmt(r.total_price)} KZT</td>
+        <td>${fmt(r.commission_amount)} KZT</td>
+        <td>${fmt(r.cost_amount)} KZT</td>
+        <td>${fmt(r.profit_amount)} KZT</td>
+        <td>${r.batch_id ? ('#'+r.batch_id) : ''}</td>
+      `;
+      tbody.appendChild(tr);
+    });
+  }catch(e){
+    sum.innerHTML = `<div class="muted">Ошибка: ${escapeHtml(e.message||e)}</div>`;
+  }
+}
+
+/* ──────────────────────────────────────────────────────────────────
    table capture & buttons
 ────────────────────────────────────────────────────────────────── */
 function tableToRows(){
@@ -891,13 +979,21 @@ document.addEventListener('DOMContentLoaded', async ()=>{
   // sorting
   attachSorting();
 
+  // поиск/фильтр
   qs('#btnSearch').onclick = loadDB;
   qs('#search').addEventListener('keydown', e=>{ if(e.key==='Enter') loadDB(); });
 
+  // загрузки
   qs('#btnLoadApi').onclick = loadAPI;
   qs('#btnLoadDb').onclick  = loadDB;
+
+  // FIFO
   qs('#fifo-run').onclick   = runFIFO;
   qs('#fifo-refresh').onclick = refreshSignals;
+
+  // Глобальная история
+  qs('#btnHistoryAll').onclick = showGlobalHistory;
+  qs('#btnHideHistory').onclick = ()=>{ qs('#history-all-panel').style.display='none'; };
 
   // быстрый поиск/открытие SKU
   qs('#btnFindSku').onclick = ()=>{
@@ -909,6 +1005,7 @@ document.addEventListener('DOMContentLoaded', async ()=>{
     openDetail(row);
   };
 
+  // импорт/восстановление
   qs('#fileInput').addEventListener('change', async (e)=>{
     const f = e.target.files?.[0]; if(!f) return;
     await importFile(f); e.target.value = '';
@@ -929,6 +1026,7 @@ document.addEventListener('DOMContentLoaded', async ()=>{
   const backupBtn = qs('#btnBackup');
   if(backupBtn) backupBtn.onclick = ()=> { window.location = '/products/db/backup.sqlite3'; };
 
+  // действия в таблице
   qs('#tbl').addEventListener('click', (e)=>{
     const btn1 = e.target.closest('.btn-parties');
     if(btn1) { openDetail(btn1.closest('tr')); return; }
@@ -936,6 +1034,7 @@ document.addEventListener('DOMContentLoaded', async ()=>{
     if(btn2) { openDetail(btn2.closest('tr')); return; }
   });
 
+  // сохранить в БД
   qs('#btnSaveDb').onclick = async ()=>{
     const rows = tableToRows();
     if(!rows.length){ setNote('Нет строк для сохранения. Сначала загрузите товары из API/файла.'); return; }
@@ -948,6 +1047,7 @@ document.addEventListener('DOMContentLoaded', async ()=>{
     }catch(e){ setNote('Сохранение в БД не удалось: ' + e.message); }
   };
 
+  // экспорт CSV
   qs('#btnExportDb').onclick = ()=>{
     const p = new URLSearchParams();
     p.set('active_only', qs('#onlyActive').checked ? '1' : '0');
@@ -955,9 +1055,9 @@ document.addEventListener('DOMContentLoaded', async ()=>{
     window.location = '/products/db/export.csv?' + p.toString();
   };
 
-  // авто-загрузка из БД и первичный пересчёт сигналов
-  loadDB();
-  refreshSignals();
+  // первичная загрузка (только чтение, без списаний)
+  await loadDB();
+  await refreshSignals();
 });
 </script>
 
