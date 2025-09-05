@@ -954,7 +954,7 @@ def get_products_router(*_, **__) -> APIRouter:
                     cc.execute("UPDATE batches SET qty_sold = MIN(qty_sold, qty) WHERE id=? AND sku=?", (bid, sku))
         return {"ok": True}
 
-    @router.delete("/db/price-batches/{sku}/{bid}", dependencies=[Depends(_require_api_key)])\
+    @router.delete("/db/price-batches/{sku}/{bid}", dependencies=[Depends(_require_api_key)])
     async def delete_batch(sku: str, bid: int):
         _ensure_schema()
         with _db() as c:
