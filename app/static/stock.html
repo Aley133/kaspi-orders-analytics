@@ -327,40 +327,27 @@ function recomputeStockTotals(items){
   qs('#sig-stock').classList.add(totalQty>0 ? 'ok':'err');
 }
 
-async function computeCostBasedStockValue(items){
-  const span = qs('#stockCost');
+async function computeStockValueFromApi(){
+  const spanCost = qs('#stockCost');
+  const spanRetail = qs('#stockRetail');
   const btn = qs('#btnCalcCost');
-  if (!items?.length){ span.textContent = 'себестоим.: —'; return; }
-  const leftList = items
-    .filter(it => Number(it.left_total ?? it.qty ?? 0) > 0)
-    .map(it => ({ sku: String(it.code||it.id||''), left: Number(it.left_total ?? it.qty ?? 0) }));
-  if (!leftList.length){ span.textContent = 'себестоим.: 0 KZT'; return; }
+  btn.disabled = true;
+  spanCost.textContent = 'себестоим.: считаю…';
 
-  btn.disabled = true; const totalN = leftList.length;
-  let done=0, total=0;
-
-  // мягкий лимит параллелизма
-  const limit = 10;
-  let idx = 0;
-  async function worker(){
-    while (idx < leftList.length){
-      const me = leftList[idx++]; // взять задачу
-      try{
-        const data = await fetchJSON('/products/db/price-batches/'+encodeURIComponent(me.sku));
-        const avg = Number(data?.avg_cost || 0);
-        total += avg * me.left;
-      }catch(_){ /* пропуск проблемных SKU */ }
-      done++;
-      if (done % 10 === 0 || done === totalN){
-        span.textContent = `себестоим.: ${fmt(Math.round(total))} KZT  (${fmt(done)}/${fmt(totalN)})`;
-        await sleep(10);
-      }
+  try{
+    const data = await fetchJSON('/products/db/stock-value?with_retail=1&details=0');
+    const totalCost = Math.round(Number(data.total_cost || 0));
+    const totalRetail = Math.round(Number(data.total_retail || 0));
+    spanCost.textContent = `себестоим.: ${fmt(totalCost)} KZT`;
+    if (!isNaN(totalRetail) && totalRetail>0) {
+      spanRetail.textContent = `${fmt(totalRetail)} KZT`;
     }
+  }catch(e){
+    spanCost.textContent = 'себестоим.: ошибка';
+    setNote('Расчёт себестоимости не удался: ' + e.message);
+  }finally{
+    btn.disabled = false;
   }
-  const pool = Array.from({length:Math.min(limit,totalN)}, worker);
-  await Promise.all(pool);
-  span.textContent = `себестоим.: ${fmt(Math.round(total))} KZT`;
-  btn.disabled = false;
 }
 
 /* ─────────────── загрузка БД / импорт ─────────────── */
@@ -893,7 +880,7 @@ document.addEventListener('DOMContentLoaded', async ()=>{
   qs('#fifo-run').onclick = runFIFO;
 
   // расчёт стоимости остатков по себестоимости
-  qs('#btnCalcCost').onclick = ()=> computeCostBasedStockValue(window._productsCache||[]);
+  qs('#btnCalcCost').onclick = computeStockValueFromApi;
 
   await loadDB();
   await refreshSignals();
