@@ -1,44 +1,28 @@
 # app/api/products.py
 from __future__ import annotations
 
-from typing import Callable, Optional, List, Dict, Any, Tuple
-from fastapi import (
-    APIRouter, HTTPException, Query, UploadFile, File, Body, Depends, Request
-)
+from typing import Optional, List, Dict, Any, Tuple
+from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Body, Depends, Request
 from fastapi.responses import Response, FileResponse
 from pydantic import BaseModel
 from contextlib import contextmanager
-import secrets
 import io
 import os
 import shutil
 import sqlite3
+import secrets
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Optional deps (Excel)
+# optional Excel
 # ──────────────────────────────────────────────────────────────────────────────
 try:
     import openpyxl
-    _OPENPYXL_AVAILABLE = True
+    _OPENPYXL_OK = True
 except Exception:
-    _OPENPYXL_AVAILABLE = False
+    _OPENPYXL_OK = False
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Kaspi client (optional)
-# ──────────────────────────────────────────────────────────────────────────────
-def _safe_import_kaspi():
-    for path in ("app.kaspi_client", "..kaspi_client", "kaspi_client"):
-        try:
-            mod = __import__(path.replace("..", "").replace(".", ""), fromlist=["KaspiClient"])
-            return getattr(mod, "KaspiClient", None)
-        except Exception:
-            continue
-    return None
-
-KaspiClient = _safe_import_kaspi()
-
-# ──────────────────────────────────────────────────────────────────────────────
-# DB backend switch (PG via SQLAlchemy / fallback SQLite)
+# DB backends (PG via SQLAlchemy / fallback SQLite)
 # ──────────────────────────────────────────────────────────────────────────────
 try:
     from sqlalchemy import create_engine, text
@@ -51,14 +35,13 @@ _USE_PG = bool(DATABASE_URL and _SQLA_OK)
 
 def _resolve_db_path() -> str:
     target = os.getenv("DB_PATH", "/data/kaspi-orders.sqlite3")
-    tdir = os.path.dirname(target)
+    d = os.path.dirname(target)
     try:
-        os.makedirs(tdir, exist_ok=True)
-        if os.access(tdir, os.W_OK):
+        os.makedirs(d, exist_ok=True)
+        if os.access(d, os.W_OK):
             return target
     except Exception:
         pass
-    # fallback — рядом с кодом
     return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data.sqlite3"))
 
 DB_PATH = _resolve_db_path()
@@ -95,7 +78,7 @@ def _rows_to_dicts(rows):
     return [dict(r) for r in rows]
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Auth
+# Auth (X-API-Key)
 # ──────────────────────────────────────────────────────────────────────────────
 def _require_api_key(req: Request) -> bool:
     api_key = os.getenv("API_KEY") or os.getenv("KASPI_API_KEY") or os.getenv("PRODUCTS_API_KEY")
@@ -111,7 +94,8 @@ def _require_api_key(req: Request) -> bool:
 # ──────────────────────────────────────────────────────────────────────────────
 def _gen_batch_code() -> str:
     alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-    return "".join(secrets.choice(alphabet) for _ in range(6))
+    import random as _r
+    return "".join(_r.choice(alphabet) for _ in range(6))
 
 def _table_exists(c, name: str) -> bool:
     if _USE_PG:
@@ -132,23 +116,11 @@ def _has_column(c, table: str, col: str) -> bool:
         rows = c.execute(f"PRAGMA table_info({table})").fetchall()
         return col in {row["name"] for row in rows}
 
-def _to_float(v) -> float:
-    try:
-        return float(str(v).replace(" ", "").replace(",", "."))
-    except Exception:
-        return 0.0
-
-def _to_int(v) -> int:
-    try:
-        return int(float(str(v).replace(" ", "").replace(",", ".")))
-    except Exception:
-        return 0
-
 def _maybe_float(v) -> Optional[float]:
     if v is None:
         return None
     s = str(v).strip()
-    if s == "":
+    if not s:
         return None
     try:
         return float(s.replace(" ", "").replace(",", "."))
@@ -162,7 +134,7 @@ def _maybe_int(v) -> Optional[int]:
     if v is None:
         return None
     s = str(v).strip()
-    if s == "":
+    if not s:
         return None
     try:
         return int(float(s.replace(" ", "").replace(",", ".")))
@@ -172,55 +144,22 @@ def _maybe_int(v) -> Optional[int]:
         except Exception:
             return None
 
-def _norm_key(s: str) -> str:
-    return "".join(ch for ch in str(s).lower() if ch.isalnum())
-
-_HEADER_ALIASES = {
-    "sku": {"sku", "code", "shopsku", "shop-sku", "vendorcode", "offerid", "id", "артикул", "код"},
-    "name": {"name", "model", "title", "productname", "offername", "наименование", "название", "товар"},
-    "brand": {"brand", "vendor", "producer", "manufacturer", "бренд", "производитель"},
-    "category": {"category", "categoryname", "group", "группа", "категория"},
-    "price": {"price", "baseprice", "saleprice", "currentprice", "totalprice", "cityprice", "цена"},
-    "quantity": {"qty", "quantity", "stock", "stockqty", "stockquantity", "stockcount", "availableamount", "остаток", "количество"},
-    "barcode": {"barcode", "ean", "штрихкод", "баркод"},
-    "active": {"active", "isactive", "ispublished", "visible", "isvisible", "status", "опубликован", "статус"},
-}
-
-def _alias_key(h: str) -> Optional[str]:
-    k = _norm_key(h)
-    for target, pool in _HEADER_ALIASES.items():
-        pool_norm = { _norm_key(x) for x in pool }
-        if k in pool_norm:
-            return target
-    return None
-
-def _avg_cost(sku: str) -> float | None:
-    _ensure_schema()
-    with _db() as c:
-        if _USE_PG:
-            r = c.execute(_q(
-                "SELECT SUM(qty*unit_cost) AS tc, SUM(qty) AS tq FROM batches WHERE sku=:sku"
-            ), {"sku": sku}).first()
-            if not r or not r._mapping["tq"]:
-                return None
-            return float(r._mapping["tc"]) / float(r._mapping["tq"])
-        else:
-            r = c.execute(
-                "SELECT SUM(qty*unit_cost) AS tc, SUM(qty) AS tq FROM batches WHERE sku=?",
-                (sku,)
-            ).fetchone()
-            if not r or not r["tq"]:
-                return None
-            return float(r["tc"]) / float(r["tq"])
+def _norm_sku(s: str) -> str:
+    """нормализуем SKU: трим, убираем все whitespace/невидимые пробелы"""
+    if s is None:
+        return ""
+    s = "".join(ch for ch in str(s).strip() if not ch.isspace())
+    return s
 
 def _sku_of(row: dict) -> str:
-    return str(
-        row.get("sku") or row.get("code") or row.get("vendorCode") or
-        row.get("barcode") or row.get("id") or ""
-    ).strip()
+    raw = (
+        row.get("sku") or row.get("code") or row.get("vendorCode")
+        or row.get("barcode") or row.get("id") or ""
+    )
+    return _norm_sku(raw)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Schema & migrations
+# Schema & migrations (включая зачистку дублей)
 # ──────────────────────────────────────────────────────────────────────────────
 def _ensure_schema():
     if _USE_PG:
@@ -264,6 +203,21 @@ def _ensure_schema():
             c.execute(_q("CREATE INDEX IF NOT EXISTS idx_batches_date ON batches(date)"))
             if not _has_column(c, "batches", "qty_sold"):
                 c.execute(_q("ALTER TABLE batches ADD COLUMN qty_sold INTEGER DEFAULT 0"))
+
+            # зачистка дублей перед гарантией уникальности (на всякий)
+            dup = c.execute(_q("""
+                SELECT sku, COUNT(*) AS c FROM products GROUP BY sku HAVING COUNT(*)>1
+            """)).all()
+            if dup:
+                # оставляем первую запись по времени, удаляем остальные
+                c.execute(_q("""
+                    DELETE FROM products p USING (
+                        SELECT ctid, sku, row_number() OVER (PARTITION BY sku ORDER BY updated_at NULLS LAST) AS rn
+                        FROM products
+                    ) t
+                    WHERE p.ctid=t.ctid AND t.rn>1
+                """))
+            # уникальность уже обеспечена PK
     else:
         with _db() as c:
             c.executescript("""
@@ -289,7 +243,7 @@ def _ensure_schema():
                 unit_cost REAL NOT NULL,
                 note TEXT,
                 commission_pct REAL,
-                batch_code TEXT,
+                batch_code TEXT UNIQUE,
                 qty_sold INTEGER DEFAULT 0,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             );
@@ -304,15 +258,22 @@ def _ensure_schema():
             CREATE INDEX IF NOT EXISTS idx_batches_sku ON batches(sku);
             CREATE INDEX IF NOT EXISTS idx_batches_date ON batches(date);
             """)
+            # миграции
             cols = {r["name"] for r in c.execute("PRAGMA table_info(batches)")}
             if "commission_pct" not in cols:
                 c.execute("ALTER TABLE batches ADD COLUMN commission_pct REAL")
-            if "batch_code" not in cols:
-                c.execute("ALTER TABLE batches ADD COLUMN batch_code TEXT")
             if "qty_sold" not in cols:
                 c.execute("ALTER TABLE batches ADD COLUMN qty_sold INTEGER DEFAULT 0")
+            if "batch_code" not in cols:
+                c.execute("ALTER TABLE batches ADD COLUMN batch_code TEXT")
+            # сгенерировать коды партиям без кода
             for r in c.execute("SELECT id FROM batches WHERE batch_code IS NULL OR batch_code=''").fetchall():
                 c.execute("UPDATE batches SET batch_code=? WHERE id=?", (_gen_batch_code(), r["id"]))
+            # зачистка дублей по products.sku
+            c.executescript("""
+                DELETE FROM products
+                 WHERE rowid NOT IN (SELECT MIN(rowid) FROM products GROUP BY sku);
+            """)
 
 def _seed_categories_if_empty():
     _ensure_schema()
@@ -342,13 +303,9 @@ def _seed_categories_if_empty():
                 )
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Upsert products (MERGE: не перезаписываем пустыми значениями)
+# UPSERT products (price_only — не трогаем qty/active)
 # ──────────────────────────────────────────────────────────────────────────────
-def _upsert_products(items: List[Dict[str, Any]]) -> Tuple[int, int]:
-    """
-    Нормализованные ключи: sku, name, brand, category, price, qty/quantity, active, barcode.
-    Обновляет ТОЛЬКО непустые поля; пустые/отсутствующие — не трогают БД.
-    """
+def _upsert_products(items: List[Dict[str, Any]], *, price_only: bool = True) -> Tuple[int, int]:
     _ensure_schema()
     inserted = updated = 0
     with _db() as c:
@@ -365,11 +322,11 @@ def _upsert_products(items: List[Dict[str, Any]]) -> Tuple[int, int]:
                 "price": _maybe_float(it.get("price")),
                 "quantity": _maybe_int(it.get("qty") or it.get("quantity") or it.get("stock")),
                 "active": (
-                    1 if str(it.get("active")).lower() in ("1", "true", "yes", "on", "published", "active") else
-                    0 if str(it.get("active")).lower() in ("0", "false", "no", "off") else
+                    1 if str(it.get("active")).lower() in ("1","true","yes","on","published","active") else
+                    0 if str(it.get("active")).lower() in ("0","false","no","off") else
                     None
                 ),
-                "barcode": (it.get("barcode") or it.get("Barcode") or None),
+                "barcode": (it.get("barcode") or None),
             }
 
             if _USE_PG:
@@ -382,11 +339,17 @@ def _upsert_products(items: List[Dict[str, Any]]) -> Tuple[int, int]:
                         brand    = CASE WHEN EXCLUDED.brand    IS NOT NULL AND EXCLUDED.brand    <> '' THEN EXCLUDED.brand    ELSE products.brand END,
                         category = CASE WHEN EXCLUDED.category IS NOT NULL AND EXCLUDED.category <> '' THEN EXCLUDED.category ELSE products.category END,
                         price    = COALESCE(EXCLUDED.price,    products.price),
-                        quantity = COALESCE(EXCLUDED.quantity, products.quantity),
-                        active   = COALESCE(EXCLUDED.active,   products.active),
+                        quantity = CASE
+                                     WHEN :price_only::int=1 THEN products.quantity
+                                     ELSE COALESCE(EXCLUDED.quantity, products.quantity)
+                                   END,
+                        active   = CASE
+                                     WHEN :price_only::int=1 THEN products.active
+                                     ELSE COALESCE(EXCLUDED.active, products.active)
+                                   END,
                         barcode  = CASE WHEN EXCLUDED.barcode  IS NOT NULL AND EXCLUDED.barcode  <> '' THEN EXCLUDED.barcode  ELSE products.barcode END,
                         updated_at = NOW()
-                """), params)
+                """), {**params, "price_only": 1 if price_only else 0})
             else:
                 existed = c.execute("SELECT 1 FROM products WHERE sku=?", (sku,)).fetchone()
                 c.execute("""
@@ -397,84 +360,22 @@ def _upsert_products(items: List[Dict[str, Any]]) -> Tuple[int, int]:
                         brand    = CASE WHEN excluded.brand    IS NOT NULL AND excluded.brand    <> '' THEN excluded.brand    ELSE brand END,
                         category = CASE WHEN excluded.category IS NOT NULL AND excluded.category <> '' THEN excluded.category ELSE category END,
                         price    = COALESCE(excluded.price,    price),
-                        quantity = COALESCE(excluded.quantity, quantity),
-                        active   = COALESCE(excluded.active,   active),
+                        quantity = CASE WHEN ?=1 THEN quantity ELSE COALESCE(excluded.quantity, quantity) END,
+                        active   = CASE WHEN ?=1 THEN active   ELSE COALESCE(excluded.active,   active)   END,
                         barcode  = CASE WHEN excluded.barcode  IS NOT NULL AND excluded.barcode  <> '' THEN excluded.barcode  ELSE barcode END,
                         updated_at = datetime('now')
                 """, (params["sku"], params["name"], params["brand"], params["category"],
-                      params["price"], params["quantity"], params["active"], params["barcode"]))
+                      params["price"], params["quantity"], params["active"], params["barcode"],
+                      1 if price_only else 0, 1 if price_only else 0))
             if existed: updated += 1
             else: inserted += 1
     return inserted, updated
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Kaspi fetch helpers (подкачка каталога)
+# Parsers (Kaspi XML / Excel)
 # ──────────────────────────────────────────────────────────────────────────────
-def _find_iter_fn(client: Any) -> Optional[Callable]:
-    for name in ("iter_products", "iter_offers", "iter_catalog"):
-        if hasattr(client, name):
-            return getattr(client, name)
-    return None
-
-def _collect_products_from_kaspi(client: Any, active_only: Optional[bool]) -> List[Dict[str, Any]]:
-    iter_fn = _find_iter_fn(client)
-    if iter_fn is None:
-        raise HTTPException(501, "В kaspi_client нет метода каталога (iter_products/iter_offers/iter_catalog).")
-    items: List[Dict[str, Any]] = []
-    seen = set()
-
-    def add_row(item: Dict[str, Any]):
-        attrs = item.get("attributes", {}) or {}
-        pid = (item.get("id")
-               or attrs.get("id") or attrs.get("sku") or attrs.get("code")
-               or attrs.get("offerId") or attrs.get("name"))
-        if not pid:
-            return
-        code = (attrs.get("code") or attrs.get("sku") or attrs.get("offerId")
-                or attrs.get("article") or attrs.get("barcode") or pid)
-        if code in seen:
-            return
-        seen.add(code)
-        name = (attrs.get("name") or attrs.get("title") or attrs.get("productName")
-                or attrs.get("offerName") or code)
-        price = _maybe_float(attrs.get("price") or attrs.get("basePrice")
-                             or attrs.get("salePrice") or attrs.get("currentPrice") or attrs.get("totalPrice"))
-        qty = _maybe_int(attrs.get("quantity") or attrs.get("availableAmount")
-                         or attrs.get("stockQuantity") or attrs.get("qty"))
-        brand = (attrs.get("brand") or attrs.get("producer") or attrs.get("manufacturer"))
-        category = (attrs.get("category") or attrs.get("categoryName") or attrs.get("group"))
-        barcode = (attrs.get("barcode") or attrs.get("ean"))
-        active_val = attrs.get("active") or attrs.get("isActive") or attrs.get("isPublished") \
-                     or attrs.get("visible") or attrs.get("isVisible") or attrs.get("status")
-        if active_val is None:
-            active = None
-        else:
-            s = str(active_val).strip().lower()
-            active = True if s in ("1","true","yes","on","published","active") else \
-                     False if s in ("0","false","no","off") else None
-        if active_only and active is False:
-            return
-        items.append({
-            "id": code, "code": code, "sku": code,
-            "name": name, "price": price, "qty": qty, "active": active,
-            "brand": brand, "category": category, "barcode": barcode,
-        })
-
-    try:
-        try:
-            for it in iter_fn(active_only=bool(active_only) if active_only is not None else True):
-                add_row(it)
-        except TypeError:
-            for it in iter_fn():
-                add_row(it)
-    except Exception as e:
-        raise HTTPException(502, f"Ошибка при чтении каталога Kaspi: {e}")
-    return items
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Парсеры XML/XLSX (умные)
-# ──────────────────────────────────────────────────────────────────────────────
-def _parse_xml_smart(raw: bytes) -> List[Dict[str, Any]]:
+def _parse_xml_smart(raw: bytes, *, city_id: str) -> List[Dict[str, Any]]:
+    """Kaspi XML: берём цену по нужному city_id (если нет — первый <cityprice>)."""
     from xml.etree import ElementTree as ET
     try:
         root = ET.fromstring(raw)
@@ -484,7 +385,7 @@ def _parse_xml_smart(raw: bytes) -> List[Dict[str, Any]]:
     def strip(tag: str) -> str:
         return tag.split("}", 1)[-1] if "}" in tag else tag
 
-    def child_text(parent: ET.Element, *names: str) -> str:
+    def first_text(parent: ET.Element, *names: str) -> str:
         for el in parent.iter():
             if strip(el.tag) in names:
                 t = (el.text or "").strip()
@@ -492,15 +393,28 @@ def _parse_xml_smart(raw: bytes) -> List[Dict[str, Any]]:
                     return t
         return ""
 
-    rows: List[Dict[str, Any]] = []
-    offers = [el for el in root.iter() if strip(el.tag) == "offer"]
-    for off in offers:
-        code = (off.get("sku") or off.get("shop-sku") or off.get("code") or off.get("id") or "").strip()
+    rows: Dict[str, Dict[str, Any]] = {}
+    for off in [el for el in root.iter() if strip(el.tag) == "offer"]:
+        code = _norm_sku(off.get("sku") or off.get("shop-sku") or off.get("code") or off.get("id") or "")
         if not code:
             continue
-        name = child_text(off, "model", "name", "title") or code
-        brand = child_text(off, "brand")
-        price = _maybe_float(child_text(off, "cityprice") or child_text(off, "price"))
+        name = first_text(off, "model", "name", "title") or code
+        brand = first_text(off, "brand") or None
+
+        # цена — prefer city_id
+        price = None
+        for el in off.iter():
+            if strip(el.tag) == "cityprice" and (el.get("cityId") or "") == city_id:
+                price = _maybe_float(el.text)
+                break
+        if price is None:
+            for el in off.iter():
+                if strip(el.tag) == "cityprice":
+                    price = _maybe_float(el.text)
+                    break
+        if price is None:
+            p = first_text(off, "price")
+            price = _maybe_float(p)
 
         qty, active = None, None
         for el in off.iter():
@@ -511,14 +425,15 @@ def _parse_xml_smart(raw: bytes) -> List[Dict[str, Any]]:
                 active = True if av in ("yes","true","1") else False if av in ("no","false","0") else None
                 break
 
-        rows.append({
-            "sku": code, "code": code, "name": name,
-            "brand": brand or None, "price": price, "qty": qty, "active": active,
-        })
-    return rows
+        rows[code] = {
+            "sku": code, "code": code,
+            "name": name, "brand": brand,
+            "price": price, "qty": qty, "active": active,
+        }
+    return list(rows.values())
 
 def _parse_excel_smart(raw: bytes) -> List[Dict[str, Any]]:
-    if not _OPENPYXL_AVAILABLE:
+    if not _OPENPYXL_OK:
         raise HTTPException(500, "openpyxl не установлен на сервере.")
     try:
         wb = openpyxl.load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
@@ -527,35 +442,49 @@ def _parse_excel_smart(raw: bytes) -> List[Dict[str, Any]]:
     ws = wb.active
     headers = [str(c.value or '').strip() for c in ws[1]]
 
-    # карта: индекс колонки -> целевой ключ
-    col_to_key: Dict[int, str] = {}
-    for idx, h in enumerate(headers):
-        k = _alias_key(h)
-        if k:
-            col_to_key[idx] = k
+    # лёгкий маппинг заголовков
+    def norm(h: str) -> str:
+        return "".join(ch for ch in h.lower() if ch.isalnum())
 
-    out: List[Dict[str, Any]] = []
+    aliases = {
+        "sku": {"sku","code","shopsku","shopski","vendorcode","offerid","id","артикул","код"},
+        "name": {"name","model","title","productname","offername","наименование","название","товар"},
+        "brand":{"brand","vendor","producer","manufacturer","бренд","производитель"},
+        "category":{"category","categoryname","group","группа","категория"},
+        "price":{"price","baseprice","saleprice","currentprice","totalprice","cityprice","цена"},
+        "qty":{"qty","quantity","stock","stockqty","stockquantity","stockcount","availableamount","остаток","количество"},
+        "barcode":{"barcode","ean","штрихкод","баркод"},
+        "active":{"active","isactive","ispublished","visible","isvisible","status","опубликован","статус"},
+    }
+    rev = {k:{norm(x) for x in v} for k,v in aliases.items()}
+    col2key: Dict[int,str] = {}
+    for i,h in enumerate(headers):
+        nh = norm(h)
+        for tgt, pool in rev.items():
+            if nh in pool:
+                col2key[i] = tgt
+                break
+
+    out: Dict[str, Dict[str, Any]] = {}
     for row in ws.iter_rows(min_row=2, values_only=True):
         if all(v in (None, "", []) for v in row):
             continue
         item: Dict[str, Any] = {}
-        for idx, val in enumerate(row):
-            key = col_to_key.get(idx)
-            if not key:
-                continue
-            if key == "price":
-                item[key] = _maybe_float(val)
-            elif key in ("quantity", "qty"):
+        for i,val in enumerate(row):
+            k = col2key.get(i)
+            if not k: continue
+            if k == "price":
+                item[k] = _maybe_float(val)
+            elif k == "qty":
                 item["qty"] = _maybe_int(val)
-            elif key == "active":
-                if val is None:
-                    item[key] = None
+            elif k == "active":
+                if val is None: item[k] = None
                 else:
                     s = str(val).strip().lower()
-                    item[key] = True if s in ("1","true","yes","on","да","+","опубликован") else \
-                                False if s in ("0","false","no","off","нет","-") else None
+                    item[k] = True if s in ("1","true","yes","on","да","+","опубликован") else \
+                              False if s in ("0","false","no","off","нет","-") else None
             else:
-                item[key] = (str(val).strip() if val is not None else None)
+                item[k] = (str(val).strip() if val is not None else None)
 
         sku = _sku_of(item)
         if not sku:
@@ -567,9 +496,8 @@ def _parse_excel_smart(raw: bytes) -> List[Dict[str, Any]]:
             except Exception:
                 pass
 
-        norm = {
-            "sku": sku,
-            "code": sku,
+        out[sku] = {
+            "sku": sku, "code": sku,
             "name": item.get("name"),
             "brand": item.get("brand"),
             "category": item.get("category"),
@@ -578,33 +506,30 @@ def _parse_excel_smart(raw: bytes) -> List[Dict[str, Any]]:
             "active": item.get("active"),
             "barcode": item.get("barcode"),
         }
-        out.append(norm)
-    return out
+    return list(out.values())
 
-def _smart_import_bytes(filename: str, content: bytes) -> Dict[str, Any]:
+def _smart_import_bytes(filename: str, content: bytes, *, city_id: str, price_only: bool) -> Dict[str, Any]:
     fn = (filename or "").lower()
     if fn.endswith(".xml"):
-        items = _parse_xml_smart(content)
+        items = _parse_xml_smart(content, city_id=city_id)
     elif fn.endswith(".xlsx") or fn.endswith(".xls"):
         items = _parse_excel_smart(content)
     else:
-        raise HTTPException(400, "Поддерживаются только XML или Excel (.xlsx/.xls).")
+        raise HTTPException(400, "Поддерживаются XML и Excel (.xlsx/.xls).")
 
-    # дедуп по SKU
-    seen: Dict[str, Dict[str, Any]] = {}
+    # дедуп по SKU (на всякий случай)
+    unique: Dict[str, Dict[str, Any]] = {}
     for r in items:
         sku = _sku_of(r)
-        if not sku:
-            continue
-        seen[sku] = r
-    items = list(seen.values())
+        if sku: unique[sku] = r
+    items = list(unique.values())
 
-    inserted, updated = _upsert_products(items)
+    inserted, updated = _upsert_products(items, price_only=price_only)
     items.sort(key=lambda x: (x.get("name") or x.get("sku") or "").lower())
     return {"count": len(items), "inserted": inserted, "updated": updated, "items": items}
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Pydantic
+# Pydantic models (batches)
 # ──────────────────────────────────────────────────────────────────────────────
 class BatchIn(BaseModel):
     date: str
@@ -617,14 +542,8 @@ class BatchIn(BaseModel):
 class BatchListIn(BaseModel):
     entries: List[BatchIn]
 
-class CategoryIn(BaseModel):
-    name: str
-    base_percent: float = 0.0
-    extra_percent: float = 3.0
-    tax_percent: float = 0.0
-
 # ──────────────────────────────────────────────────────────────────────────────
-# FIFO recount helper — обновляет batches.qty_sold из леджера
+# FIFO recount helper
 # ──────────────────────────────────────────────────────────────────────────────
 def _recount_qty_sold_from_ledger() -> int:
     _ensure_schema()
@@ -634,8 +553,8 @@ def _recount_qty_sold_from_ledger() -> int:
         ledger = next((t for t in ledgers if _table_exists(c, t)), None)
         if not ledger:
             return 0
-        batch_col = next((col for col in ("batch_id", "bid", "batch") if _has_column(c, ledger, col)), None)
-        qty_col   = next((col for col in ("qty", "quantity", "qty_used") if _has_column(c, ledger, col)), None)
+        batch_col = next((col for col in ("batch_id","bid","batch") if _has_column(c, ledger, col)), None)
+        qty_col   = next((col for col in ("qty","quantity","qty_used") if _has_column(c, ledger, col)), None)
         if not batch_col or not qty_col:
             return 0
 
@@ -669,7 +588,7 @@ def _recount_qty_sold_from_ledger() -> int:
 # ──────────────────────────────────────────────────────────────────────────────
 # Router
 # ──────────────────────────────────────────────────────────────────────────────
-def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
+def get_products_router() -> APIRouter:
     router = APIRouter(tags=["products"])
 
     # Ping
@@ -685,21 +604,18 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
                 ok = c.execute("PRAGMA integrity_check").fetchone()[0]
             return {"ok": ok == "ok", "driver": "sqlite"}
 
-    # ──────────────────────────────────────────────────────────────────────
-    # DB: список товаров (+ мета по партиям) — под HTML «Мой склад»
-    # ──────────────────────────────────────────────────────────────────────
+    # Список из БД (для таблицы «Мой склад»)
     @router.get("/db/list")
     async def db_list(active_only: int = Query(1), search: str = Query("", alias="q")):
         _ensure_schema()
         _seed_categories_if_empty()
         with _db() as c:
-            # категории (для комиссий)
+            # категории (комиссии)
             if _USE_PG:
                 cats_rows = c.execute(_q(
                     "SELECT name, base_percent, extra_percent, tax_percent FROM categories ORDER BY name"
                 )).all()
                 cats = {r._mapping["name"]: dict(r._mapping) for r in cats_rows}
-                # продукты
                 sql = "SELECT sku,name,brand,category,price,quantity,active FROM products"
                 conds, params = [], {}
                 if active_only:
@@ -710,23 +626,26 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
                 if conds:
                     sql += " WHERE " + " AND ".join(conds)
                 sql += " ORDER BY name"
-                rows = c.execute(_q(sql), params).all()
+                rows = _rows_to_dicts(c.execute(_q(sql), params).all())
             else:
-                cats = {r["name"]: dict(r) for r in c.execute("SELECT * FROM categories")}
-                sql = "SELECT sku,name,brand,category,price,quantity,active FROM products"
-                conds, params = [], []
-                if active_only:
-                    conds.append("active=1")
-                if search:
-                    conds.append("(sku LIKE ? OR name LIKE ?)")
-                    params += [f"%{search}%", f"%{search}%"]
-                if conds:
-                    sql += " WHERE " + " AND ".join(conds)
-                sql += " ORDER BY name COLLATE NOCASE"
-                rows = c.execute(sql, params).fetchall()
-            rows = _rows_to_dicts(rows)
+                cats = {r["name"]: dict(r) for r in _rows_to_dicts(
+                    _db().__enter__().execute("SELECT name,base_percent,extra_percent,tax_percent FROM categories").fetchall()
+                )} if False else {r["name"]: dict(r) for r in _db().__enter__().cursor().execute("SELECT name,base_percent,extra_percent,tax_percent FROM categories").fetchall()}  # noqa
+                with _db() as cc:
+                    sql = "SELECT sku,name,brand,category,price,quantity,active FROM products"
+                    conds, params = [], []
+                    if active_only:
+                        conds.append("active=1")
+                    if search:
+                        conds.append("(sku LIKE ? OR name LIKE ?)")
+                        params += [f"%{search}%", f"%{search}%"]
+                    if conds:
+                        sql += " WHERE " + " AND ".join(conds)
+                    sql += " ORDER BY name COLLATE NOCASE"
+                    rows = [dict(r) for r in cc.execute(sql, params).fetchall()]
 
             # мета по партиям
+        with _db() as c:
             if _USE_PG:
                 bc_rows = c.execute(_q("SELECT sku, COUNT(*) AS cnt FROM batches GROUP BY sku")).all()
                 bc = {r._mapping["sku"]: r._mapping["cnt"] for r in bc_rows}
@@ -739,18 +658,19 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
                 )).all()
                 left_by_sku = {r._mapping["sku"]: int(r._mapping["left"] or 0) for r in left_rows}
             else:
-                bc = {r["sku"]: r["cnt"] for r in c.execute(
-                    "SELECT sku, COUNT(*) AS cnt FROM batches GROUP BY sku"
-                )}
-                last = {}
-                for r in c.execute(
-                    "SELECT sku, unit_cost, commission_pct FROM batches ORDER BY sku, date DESC, id DESC"
-                ):
-                    if r["sku"] not in last:
-                        last[r["sku"]] = (r["unit_cost"], r["commission_pct"])
-                left_by_sku = {r["sku"]: int(r["left"] or 0) for r in c.execute(
-                    "SELECT sku, SUM(qty - COALESCE(qty_sold,0)) AS left FROM batches GROUP BY sku"
-                ).fetchall()}
+                with _db() as cc:
+                    bc = {r["sku"]: r["cnt"] for r in cc.execute(
+                        "SELECT sku, COUNT(*) AS cnt FROM batches GROUP BY sku"
+                    )}
+                    last = {}
+                    for r in cc.execute(
+                        "SELECT sku, unit_cost, commission_pct FROM batches ORDER BY sku, date DESC, id DESC"
+                    ):
+                        if r["sku"] not in last:
+                            last[r["sku"]] = (r["unit_cost"], r["commission_pct"])
+                    left_by_sku = {r["sku"]: int(r["left"] or 0) for r in cc.execute(
+                        "SELECT sku, SUM(qty - COALESCE(qty_sold,0)) AS left FROM batches GROUP BY sku"
+                    ).fetchall()}
 
         items: List[Dict[str, Any]] = []
         for r in rows:
@@ -776,15 +696,18 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
             })
         return {"count": len(items), "items": items}
 
-    # Массовый upsert из таблицы (кнопка «Сохранить таблицу в БД»)
+    # Массовый upsert (кнопка «Сохранить таблицу в БД»)
     @router.post("/db/bulk-upsert", dependencies=[Depends(_require_api_key)])
-    async def bulk_upsert(rows: List[Dict[str, Any]] = Body(...)):
+    async def bulk_upsert(
+        rows: List[Dict[str, Any]] = Body(...),
+        price_only: int = Query(1, description="1 — обновлять только цены/мету, qty/active не трогать")
+    ):
         if not isinstance(rows, list):
             raise HTTPException(400, "Body должен быть списком объектов")
-        inserted, updated = _upsert_products(rows)
+        inserted, updated = _upsert_products(rows, price_only=bool(price_only))
         return {"ok": True, "inserted": inserted, "updated": updated}
 
-    # Экспорт CSV именно из БД (под кнопку «Экспорт CSV (БД)»)
+    # Экспорт CSV (из БД)
     @router.get("/db/export.csv")
     async def export_db_csv(active_only: int = Query(1), q: str = Query("", alias="search")):
         _ensure_schema()
@@ -800,8 +723,7 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
                 if conds:
                     sql += " WHERE " + " AND ".join(conds)
                 sql += " ORDER BY name"
-                rows = c.execute(_q(sql), params).all()
-                rows = _rows_to_dicts(rows)
+                rows = _rows_to_dicts(c.execute(_q(sql), params).all())
             else:
                 sql = "SELECT sku,name,brand,category,price,quantity,active,barcode FROM products"
                 conds, params = [], []
@@ -833,45 +755,61 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
                         media_type="text/csv; charset=utf-8",
                         headers={"Content-Disposition": 'attachment; filename="products-db.csv"'})
 
-    # Универсальный УМНЫЙ импорт (XML/XLSX) → merge-upsert (не перетирает пустыми)
+    # Импорт (XML/XLSX) → умный upsert с дедупом
     @router.post("/import", dependencies=[Depends(_require_api_key)])
-    async def import_products(file: UploadFile = File(...)):
+    async def import_products(
+        file: UploadFile = File(...),
+        price_only: int = Query(1),
+        city_id: str = Query(os.getenv("KASPI_CITY_ID", "196220100"))
+    ):
         content = await file.read()
         try:
-            res = _smart_import_bytes(file.filename or "", content)
+            res = _smart_import_bytes(file.filename or "", content, city_id=city_id, price_only=bool(price_only))
         except HTTPException:
             raise
         except Exception as e:
             raise HTTPException(400, f"Не удалось обработать файл: {e}")
         return res
 
-    # Совместимость: старый маршрут проксирует на новый
+    # Совместимость
     @router.post("/manual-upload", dependencies=[Depends(_require_api_key)])
-    async def manual_upload(file: UploadFile = File(...)):
+    async def manual_upload(
+        file: UploadFile = File(...),
+        price_only: int = Query(1),
+        city_id: str = Query(os.getenv("KASPI_CITY_ID", "196220100"))
+    ):
         content = await file.read()
-        return _smart_import_bytes(file.filename or "", content)
+        return _smart_import_bytes(file.filename or "", content, city_id=city_id, price_only=bool(price_only))
 
     # ──────────────────────────────────────────────────────────────────────
-    # Партии (просмотр/добавление/редактирование/удаление)
+    # Партии
     # ──────────────────────────────────────────────────────────────────────
     @router.get("/db/price-batches/{sku}")
     async def get_batches(sku: str):
         _ensure_schema()
         with _db() as c:
             if _USE_PG:
-                rows = c.execute(_q(
+                rows = _rows_to_dicts(c.execute(_q(
                     "SELECT id, date, qty, qty_sold, (qty - COALESCE(qty_sold,0)) AS left, "
                     "unit_cost, commission_pct, batch_code, note "
                     "FROM batches WHERE sku=:sku ORDER BY date, id"
-                ), {"sku": sku}).all()
-                rows = _rows_to_dicts(rows)
+                ), {"sku": sku}).all())
             else:
                 rows = [dict(r) for r in c.execute(
                     "SELECT id, date, qty, qty_sold, (qty - COALESCE(qty_sold,0)) AS left, "
                     "unit_cost, commission_pct, batch_code, note "
                     "FROM batches WHERE sku=? ORDER BY date, id", (sku,)
                 )]
-        avgc = _avg_cost(sku)
+        # avg cost
+        with _db() as c:
+            if _USE_PG:
+                r = c.execute(_q(
+                    "SELECT SUM(qty*unit_cost) AS tc, SUM(qty) AS tq FROM batches WHERE sku=:s"
+                ), {"s": sku}).first()
+                avgc = None if not r or not r._mapping["tq"] else float(r._mapping["tc"])/float(r._mapping["tq"])
+            else:
+                r = c.execute("SELECT SUM(qty*unit_cost) AS tc, SUM(qty) AS tq FROM batches WHERE sku=?", (sku,)).fetchone()
+                avgc = None if not r or not r["tq"] else float(r["tc"])/float(r["tq"])
         return {"batches": rows, "avg_cost": round(avgc, 2) if avgc is not None else None}
 
     @router.post("/db/price-batches/{sku}", dependencies=[Depends(_require_api_key)])
@@ -895,8 +833,7 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
                         (sku, e.date, int(e.qty), float(e.unit_cost), e.note,
                          float(e.commission_pct) if e.commission_pct is not None else None, code)
                     )
-        avgc = _avg_cost(sku)
-        return {"ok": True, "avg_cost": round(avgc, 2) if avgc is not None else None}
+        return {"ok": True}
 
     @router.put("/db/price-batches/{sku}/{bid}", dependencies=[Depends(_require_api_key)])
     async def update_batch(sku: str, bid: int, payload: Dict[str, Any] = Body(...)):
@@ -922,8 +859,9 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
             else:
                 parts = [f"{k}=?" for k in sets.keys()]
                 params = list(sets.values()) + [bid, sku]
-                c.execute(f"UPDATE batches SET {', '.join(parts)} WHERE id=? AND sku=?", params)
-                c.execute("UPDATE batches SET qty_sold = MIN(qty_sold, qty) WHERE id=? AND sku=?", (bid, sku))
+                with _db() as cc:
+                    cc.execute(f"UPDATE batches SET {', '.join(parts)} WHERE id=? AND sku=?", params)
+                    cc.execute("UPDATE batches SET qty_sold = MIN(qty_sold, qty) WHERE id=? AND sku=?", (bid, sku))
         return {"ok": True}
 
     @router.delete("/db/price-batches/{sku}/{bid}", dependencies=[Depends(_require_api_key)])
@@ -939,21 +877,21 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
                     raise HTTPException(400, "Cannot delete: batch has sales")
                 c.execute(_q("DELETE FROM batches WHERE id=:bid AND sku=:sku"), {"bid": bid, "sku": sku})
             else:
-                r = c.execute("SELECT COALESCE(qty_sold,0) AS s FROM batches WHERE id=? AND sku=?", (bid, sku)).fetchone()
-                if not r:
-                    raise HTTPException(404, "Batch not found")
-                if int(r["s"]) > 0:
-                    raise HTTPException(400, "Cannot delete: batch has sales")
-                c.execute("DELETE FROM batches WHERE id=? AND sku=?", (bid, sku))
+                with _db() as cc:
+                    r = cc.execute("SELECT COALESCE(qty_sold,0) AS s FROM batches WHERE id=? AND sku=?", (bid, sku)).fetchone()
+                    if not r:
+                        raise HTTPException(404, "Batch not found")
+                    if int(r["s"]) > 0:
+                        raise HTTPException(400, "Cannot delete: batch has sales")
+                    cc.execute("DELETE FROM batches WHERE id=? AND sku=?", (bid, sku))
         return {"ok": True}
 
-    # Пересчитать qty_sold из леджера (кнопка «Пересчитать списания (FIFO)»)
     @router.post("/batches/recount-sold", dependencies=[Depends(_require_api_key)])
     async def batches_recount_sold():
         changed = _recount_qty_sold_from_ledger()
         return {"ok": True, "updated_batches": int(changed)}
 
-    # История списаний по SKU (для блока «история под товаром»)
+    # История по SKU из profit_fifo_ledger (если есть)
     @router.get("/db/ledger/{sku}")
     async def ledger_by_sku(sku: str, limit: int = Query(200, ge=1, le=2000)):
         _ensure_schema()
@@ -961,15 +899,14 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
             if not _table_exists(c, "profit_fifo_ledger"):
                 return {"ok": True, "items": []}
             if _USE_PG:
-                rows = c.execute(_q("""
+                rows = _rows_to_dicts(c.execute(_q("""
                     SELECT id, order_code, date_utc_ms, line_index, qty, unit_price, total_price,
                            batch_id, unit_cost, commission_pct, commission_amount, cost_amount, profit_amount
                       FROM profit_fifo_ledger
                      WHERE sku=:sku
                      ORDER BY date_utc_ms DESC, id DESC
                      LIMIT :lim
-                """), {"sku": sku, "lim": limit}).all()
-                rows = _rows_to_dicts(rows)
+                """), {"sku": sku, "lim": limit}).all())
             else:
                 rows = [dict(r) for r in c.execute("""
                     SELECT id, order_code, date_utc_ms, line_index, qty, unit_price, total_price,
@@ -981,50 +918,7 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
                 """, (sku, limit)).fetchall()]
         return {"ok": True, "items": rows}
 
-    # Партии + продано из леджера
-    @router.get("/db/price-batches-with-sold/{sku}")
-    async def price_batches_with_sold(sku: str):
-        _ensure_schema()
-        with _db() as c:
-            if not _table_exists(c, "profit_fifo_ledger"):
-                if _USE_PG:
-                    rows = c.execute(_q(
-                        "SELECT id, date, qty, 0 AS sold_qty, unit_cost, note, commission_pct, batch_code "
-                        "FROM batches WHERE sku=:s ORDER BY date, id"
-                    ), {"s": sku}).all()
-                    rows = _rows_to_dicts(rows)
-                else:
-                    rows = [dict(r) for r in c.execute(
-                        "SELECT id, date, qty, 0 AS sold_qty, unit_cost, note, commission_pct, batch_code "
-                        "FROM batches WHERE sku=? ORDER BY date, id", (sku,)
-                    ).fetchall()]
-                return {"ok": True, "sku": sku, "batches": rows}
-            if _USE_PG:
-                rows = c.execute(_q(
-                    "SELECT b.id, b.date, b.qty, COALESCE(l.sold,0) AS sold_qty, "
-                    "       b.unit_cost, b.note, b.commission_pct, b.batch_code "
-                    "  FROM batches b "
-                    "  LEFT JOIN (SELECT batch_id, SUM(qty) AS sold FROM profit_fifo_ledger GROUP BY batch_id) l "
-                    "    ON l.batch_id = b.id "
-                    " WHERE b.sku=:s "
-                    " ORDER BY b.date, b.id"
-                ), {"s": sku}).all()
-                rows = _rows_to_dicts(rows)
-            else:
-                rows = [dict(r) for r in c.execute(
-                    "SELECT b.id, b.date, b.qty, COALESCE(l.sold,0) AS sold_qty, "
-                    "       b.unit_cost, b.note, b.commission_pct, b.batch_code "
-                    "  FROM batches b "
-                    "  LEFT JOIN (SELECT batch_id, SUM(qty) AS sold FROM profit_fifo_ledger GROUP BY batch_id) l "
-                    "    ON l.batch_id = b.id "
-                    " WHERE b.sku=? "
-                    " ORDER BY b.date, b.id", (sku,)
-                ).fetchall()]
-        return {"ok": True, "sku": sku, "batches": rows}
-
-    # ──────────────────────────────────────────────────────────────────────
-    # Простая ensure-sku (по API)
-    # ──────────────────────────────────────────────────────────────────────
+    # Ensure SKU (на лету создать/обновить)
     @router.post("/db/ensure-sku/{sku}", dependencies=[Depends(_require_api_key)])
     async def ensure_sku(
         sku: str,
@@ -1036,32 +930,16 @@ def get_products_router(client: Optional["KaspiClient"]) -> APIRouter:
         category: Optional[str] = None,
         barcode: Optional[str] = None,
     ):
-        _ensure_schema()
         payload = [{
-            "sku": sku, "code": sku, "name": name,
+            "sku": _norm_sku(sku), "code": _norm_sku(sku), "name": name,
             "price": float(price), "qty": int(qty),
             "active": int(active), "brand": brand,
             "category": category, "barcode": barcode,
         }]
-        ins, upd = _upsert_products(payload)
+        ins, upd = _upsert_products(payload, price_only=False)
         return {"ok": True, "inserted": ins, "updated": upd}
 
-    # ──────────────────────────────────────────────────────────────────────
-    # Синхронизация цен/остатков из Kaspi
-    # ──────────────────────────────────────────────────────────────────────
-    @router.post("/sync/kaspi", dependencies=[Depends(_require_api_key)])
-    async def sync_from_kaspi(active_only: int = Query(1), limit: int = Query(0, ge=0, le=20000)):
-        if client is None or KaspiClient is None:
-            raise HTTPException(501, "KaspiClient не сконфигурирован на сервере.")
-        items = _collect_products_from_kaspi(client, active_only=bool(active_only))
-        if limit > 0:
-            items = items[:limit]
-        ins, upd = _upsert_products(items)
-        return {"ok": True, "received": len(items), "inserted": ins, "updated": upd}
-
-    # ──────────────────────────────────────────────────────────────────────
     # Бэкап/восстановление (SQLite only)
-    # ──────────────────────────────────────────────────────────────────────
     @router.get("/db/backup.sqlite3")
     async def backup_db():
         _ensure_schema()
