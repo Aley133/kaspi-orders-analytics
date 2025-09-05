@@ -41,7 +41,7 @@
     .btn.secondary{background:var(--pri-weak);color:var(--fg)}
     .btn-link{background:transparent;border:0;color:var(--pri);cursor:pointer;padding:0}
     .btn:disabled{opacity:.6;cursor:not-allowed}
-    input[type="text"],input[type="number"],input[type="date"],input[type="password"],select{
+    input[type="text"],input[type="number"],input[type="date"],select{
       height:34px;padding:6px 8px;border:1px solid var(--line);border-radius:10px;background:transparent;color:var(--fg);outline:none
     }
     input:focus,select:focus{box-shadow:0 0 0 3px var(--focus)}
@@ -63,7 +63,6 @@
     .stat{display:flex;align-items:center;gap:8px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 10px}
     .stat .badge{font-weight:700}
     .stat.ok .badge{color:var(--success)}
-    .stat.warn .badge{color:var(--warn)}
     .stat.err .badge{color:var(--danger)}
     .panel{border:1px solid var(--line);border-radius:12px;background:var(--card);padding:12px;margin:12px 0}
     .log{margin-top:8px;max-height:260px;overflow:auto;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
@@ -71,7 +70,6 @@
     .toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
     .grow{flex:1 1 auto}
     .pill{background:var(--pill-bg);color:var(--pill-fg);padding:4px 8px;border-radius:999px;font-weight:600}
-    .right{justify-content:flex-end}
   </style>
 </head>
 <body data-theme="light">
@@ -81,9 +79,6 @@
       <nav class="nav">
         <a href="#" style="background:var(--card)">Мой склад</a>
         <a href="/ui/index.html">Аналитика</a>
-        <a href="#">Предзаказ</a>
-        <a href="#">Демпинг</a>
-        <a href="#">WhatsApp-рассылка</a>
       </nav>
       <div class="switch">
         <input id="themeToggle" type="checkbox" />
@@ -94,30 +89,19 @@
     <main class="content">
       <h1>Мой склад</h1>
 
-      <!-- СИГНАЛЫ (только чтение, никаких авто-списаний) -->
+      <!-- СИГНАЛЫ: только нужные -->
       <div id="signals" class="statbar">
-        <div class="stat" id="sig-today"><span class="badge">Сегодня:</span><span class="muted">—</span></div>
-        <div class="stat" id="sig-7d"><span class="badge">7 дней:</span><span class="muted">—</span></div>
-        <div class="stat" id="sig-30d"><span class="badge">30 дней:</span><span class="muted">—</span></div>
         <div class="stat" id="sig-last"><span class="badge">Последнее списание:</span><span class="muted">—</span></div>
         <div class="stat" id="sig-cogs-today"><span class="badge">Себестоимость сегодня:</span><span class="muted">—</span></div>
       </div>
 
-      <!-- ПАНЕЛЬ FIFO -->
+      <!-- ПАНЕЛЬ FIFO (ключи скрыты, но используются автоматически) -->
       <div class="panel" id="fifo-panel">
         <div class="row" style="align-items:end">
           <div>
             <div class="muted">Период</div>
             <input type="date" id="fifo-from"> —
             <input type="date" id="fifo-to">
-          </div>
-          <div>
-            <div class="muted">BRIDGE API key (/profit/*)</div>
-            <input id="fifo-bkey" type="password" placeholder="kaspi_live_***" style="width:280px">
-          </div>
-          <div>
-            <div class="muted">Products API key (/products/*)</div>
-            <input id="fifo-apikey" type="password" placeholder="API_KEY из env" style="width:240px">
           </div>
           <label class="row" title="Если включить — для пропусков создадим товар и добавим партию на недостающее кол-во.">
             <input id="fifo-fill-missing" type="checkbox"><span>Добить партии для пропусков</span>
@@ -131,7 +115,6 @@
             <input id="fifo-default-comm" type="number" min="0" step="0.1" value="15" style="width:120px">
           </div>
           <button class="btn" id="fifo-run">Списать со склада</button>
-          <button class="btn secondary" id="fifo-refresh">Пересчитать сигналы</button>
           <button class="btn secondary" id="btnHistoryAll">История за период</button>
         </div>
         <div class="muted" style="margin-top:6px">
@@ -140,38 +123,27 @@
         <div id="fifo-log" class="log"></div>
       </div>
 
-      <!-- ПАНЕЛЬ УПРАВЛЕНИЯ ТОВАРАМИ -->
+      <!-- УПРАВЛЕНИЕ ТОВАРАМИ (коротко) -->
       <div class="toolbar">
-        <label><input id="onlyActive" type="checkbox" checked> Только активные</label>
-        <input id="search" type="text" placeholder="Название, код, бренд..." style="min-width:260px">
-        <button class="btn secondary" id="btnSearch">Найти</button>
-        <div class="grow"></div>
         <input id="findSku" type="text" placeholder="SKU" style="width:160px">
         <button class="btn secondary" id="btnFindSku">Открыть SKU</button>
+        <div class="grow"></div>
         <span class="pill" id="rowsBadge" title="Строк в таблице">0 позиций</span>
       </div>
 
       <div class="toolbar">
-        <button class="btn" id="btnLoadApi">Загрузить</button>
         <label class="btn secondary" for="fileInput">Импорт XML/XLSX</label>
         <input type="file" id="fileInput" accept=".xml,.xlsx,.xls" style="display:none">
-        <button class="btn secondary" id="btnSaveDb">Сохранить таблицу в БД</button>
-        <button class="btn secondary" id="btnExportDb">Экспорт CSV (БД)</button>
+        <button class="btn" id="btnSaveDb">Сохранить таблицу в БД</button>
         <button class="btn secondary" id="btnLoadDb">Загрузить из БД</button>
-        <button class="btn secondary" id="btnApiKey">API-Key</button>
-        <span id="apiKeyBadge" class="chip"><span class="dot"></span><span>ключ не задан</span></span>
-
-        <button class="btn secondary" id="btnBackup" data-sqlite-only>Бэкап БД</button>
-        <label class="btn secondary" for="restoreFile" data-sqlite-only>Восстановить БД</label>
-        <input type="file" id="restoreFile" accept=".sqlite3" style="display:none" data-sqlite-only>
-         <label class="row" style="gap:6px;margin-left:auto">
-    <input id="mergeMode" type="checkbox" checked>
-    <span class="muted">Merge-режим (не удалять старые)</span>
-  </label>
-  <label class="row" style="gap:6px">
-    <input id="priceOnly" type="checkbox" checked>
-    <span class="muted">Только цены (qty/активность не менять)</span>
-  </label>
+        <label class="row" style="gap:6px;margin-left:auto">
+          <input id="mergeMode" type="checkbox" checked>
+          <span class="muted">Merge-режим (не удалять старые)</span>
+        </label>
+        <label class="row" style="gap:6px">
+          <input id="priceOnly" type="checkbox" checked>
+          <span class="muted">Только цены (qty/активность не менять)</span>
+        </label>
       </div>
 
       <div id="note" class="note"></div>
@@ -233,9 +205,7 @@
   </div>
 
 <script type="module">
-/* ──────────────────────────────────────────────────────────────────
-   helpers / UI
-────────────────────────────────────────────────────────────────── */
+/* ───────────────── helpers ───────────────── */
 const qs=(s,el=document)=>el.querySelector(s);
 const qsa=(s,el=document)=>[...el.querySelectorAll(s)];
 const nf = new Intl.NumberFormat('ru-RU');
@@ -244,11 +214,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 const escapeHtml = (s) => String(s||'').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]));
 const parseNum = (txt) => Number(String(txt||'0').replace(/\s/g,'').replace(',', '.'))||0;
 
-function setNote(msg, ok=false){
-  const el = qs('#note');
-  el.textContent = msg;
-  el.className = 'note ' + (ok ? 'ok':'err');
-}
+function setNote(msg, ok=false){ const el = qs('#note'); el.textContent = msg; el.className = 'note ' + (ok ? 'ok':'err'); }
 
 (function initTheme(){
   const saved = localStorage.getItem('theme') || 'light';
@@ -261,9 +227,6 @@ function setNote(msg, ok=false){
   });
 })();
 
-/* ──────────────────────────────────────────────────────────────────
-   fetchJSON (+401 prompt)
-────────────────────────────────────────────────────────────────── */
 async function fetchJSON(url, opts, _retry){
   const r = await fetch(url, opts||{});
   if(r.status===401 || r.status===403){
@@ -275,36 +238,25 @@ async function fetchJSON(url, opts, _retry){
     const txt = await r.text();
     throw new Error(txt || 'Unauthorized');
   }
-  if(!r.ok){
-    const txt = await r.text();
-    throw new Error(txt || r.statusText || ('HTTP ' + r.status));
-  }
+  if(!r.ok){ const txt = await r.text(); throw new Error(txt || r.statusText || ('HTTP ' + r.status)); }
   const ct = r.headers.get('content-type')||'';
   return ct.includes('application/json') ? r.json() : r.text();
 }
 
-/* ──────────────────────────────────────────────────────────────────
-   table + sorting
-────────────────────────────────────────────────────────────────── */
-function updateRowsBadge(){
-  const n = qsa('#tbl tbody tr').length;
-  const b = qs('#rowsBadge'); if(b) b.textContent = nf.format(n) + ' позиций';
-}
+/* ─────────────── table + sorting ─────────────── */
+function updateRowsBadge(){ const n = qsa('#tbl tbody tr').length; const b = qs('#rowsBadge'); if(b) b.textContent = nf.format(n) + ' позиций'; }
 
-let sortState = { idx: 1, dir: 1 }; // по названию по возрастанию
+let sortState = { idx: 1, dir: 1 };
 function sortTable(idx, type='str'){
   const tb = qs('#tbl tbody'); if(!tb) return;
   const rows = qsa('tr', tb);
   rows.sort((a,b)=>{
     const ax = a.children[idx]?.textContent?.trim() ?? '';
     const bx = b.children[idx]?.textContent?.trim() ?? '';
-    if(type==='num'){
-      return (parseNum(ax)-parseNum(bx))*sortState.dir;
-    }
+    if(type==='num'){ return (parseNum(ax)-parseNum(bx))*sortState.dir; }
     return ax.localeCompare(bx,'ru')*sortState.dir;
   });
-  tb.innerHTML = '';
-  rows.forEach(r=>tb.appendChild(r));
+  tb.innerHTML = ''; rows.forEach(r=>tb.appendChild(r));
 }
 function attachSorting(){
   const ths = qsa('#tbl thead th');
@@ -314,12 +266,10 @@ function attachSorting(){
       const txt = th.textContent || '';
       const type = /ШТ|Цена|Остаток|Кол-во|Маржа/i.test(txt) ? 'num' : 'str';
       sortState.dir = (sortState.idx === i) ? -sortState.dir : 1;
-      sortState.idx = i;
-      sortTable(i, type);
+      sortState.idx = i; sortTable(i, type);
     });
   });
 }
-
 function renderProducts(items){
   const tb = qs('#tbl tbody'); tb.innerHTML = '';
   (items||[]).forEach(it=>{
@@ -341,8 +291,7 @@ function renderProducts(items){
         <button class="btn-link btn-parties">Партии</button>
         <span class="muted"> · </span>
         <button class="btn-link btn-history">История списаний</button>
-      </td>
-    `;
+      </td>`;
     tb.appendChild(tr);
   });
   updateRowsBadge();
@@ -350,47 +299,15 @@ function renderProducts(items){
   sortTable(sortState.idx, /ШТ|Цена|Остаток|Кол-во|Маржа/i.test(th?.textContent||'')?'num':'str');
 }
 
-/* Загрузка каталога */
-async function loadAPI(){
-  const p = new URLSearchParams();
-  p.set('active', qs('#onlyActive').checked ? '1' : '0');
-  const qv = qs('#search').value.trim(); if(qv) p.set('q', qv);
-  p.set('page','1'); p.set('page_size','2000');
-  try{
-    const data = await fetchJSON('/products/list?'+p.toString());
-    setNote('Каталог из API загружен: ' + (data.items?.length||0) + ' поз.', true);
-    renderProducts(data.items||[]);
-  }catch(e){
-    try{
-      const alt = new URLSearchParams();
-      alt.set('active_only', qs('#onlyActive').checked ? '1' : '0');
-      if(qv) alt.set('search', qv);
-      const data = await fetchJSON('/products/db/list?'+alt.toString());
-      setNote('API недоступно. Показаны данные из БД: ' + (data.items?.length||0), false);
-      renderProducts(data.items||[]);
-    }catch(e2){
-      setNote('Ошибка загрузки: ' + e.message);
-    }
-  }
-}
-  
+/* ─────────────── загрузка БД / импорт ─────────────── */
 async function loadDB(){
   try{
-    const p = new URLSearchParams();
-    p.set('active_only', qs('#onlyActive').checked ? '1' : '0');
-    const qv = qs('#search').value.trim(); if(qv) p.set('search', qv);
+    const p = new URLSearchParams({ active_only:'0', page:'1', page_size:'20000' });
     const data = await fetchJSON('/products/db/list?'+p.toString());
     setNote('Загружено строк из БД: ' + (data.items?.length||0), true);
     renderProducts(data.items||[]);
   }catch(e){ setNote('Сеть: ' + e.message); }
 }
-
-async function getAllDbItems(){
-  const p = new URLSearchParams({ active_only:'0', page:'1', page_size:'20000' });
-  const data = await fetchJSON('/products/db/list?' + p.toString());
-  return Array.isArray(data.items) ? data.items : [];
-}
-  
 async function importFile(file){
   const fd = new FormData(); fd.append('file', file);
   try{
@@ -400,21 +317,11 @@ async function importFile(file){
   }catch(e){ setNote('Импорт не удался: ' + e.message); }
 }
 
-function clearDetails(){ qsa('tr.detail').forEach(tr => tr.remove()); }
-function makeDetailRow(colspan){
-  const tr = document.createElement('tr'); tr.className='detail';
-  const td = document.createElement('td'); td.colSpan = colspan; tr.appendChild(td); return tr;
-}
-
-/* ──────────────────────────────────────────────────────────────────
-   FIFO signals / ledger helpers
-────────────────────────────────────────────────────────────────── */
+/* ─────────────── FIFO helpers ─────────────── */
 function isoDay(d){ return d.toISOString().slice(0,10); }
 function dayStartTs(dateStr){ return new Date(dateStr+'T00:00:00.000Z').getTime(); }
 function dayEndTs(dateStr){   return new Date(dateStr+'T23:59:59.999Z').getTime(); }
-function addDays(dateStr, d){
-  const dt = new Date(dateStr+'T00:00:00Z'); dt.setUTCDate(dt.getUTCDate()+d); return isoDay(dt);
-}
+function addDays(dateStr, d){ const dt = new Date(dateStr+'T00:00:00Z'); dt.setUTCDate(dt.getUTCDate()+d); return isoDay(dt); }
 
 async function getOrderCodes(start, end){
   const qs1 = new URLSearchParams({
@@ -432,11 +339,9 @@ async function getOrderCodes(start, end){
   }
   return [];
 }
-
-/* Читать леджер порциями по кодам заказов */
 async function getLedgerByCodes(orderCodes, chunk=30, perLimit=10000){
   const res = [];
-  for (let i=0; i<iorderCodes.length; i+=chunk){
+  for (let i=0; i<orderCodes.length; i+=chunk){
     const part = orderCodes.slice(i, i+chunk).map(encodeURIComponent).join(',');
     const url = `/profit/bridge/fifo/ledger?codes=${part}&limit=${perLimit}`;
     const j = await fetchJSON(url);
@@ -445,135 +350,101 @@ async function getLedgerByCodes(orderCodes, chunk=30, perLimit=10000){
   }
   return res;
 }
-
 function calcSignalsFromLedger(items, startTs, endTs){
   const rows = items.filter(x => typeof x.date_utc_ms==='number' && x.date_utc_ms>=startTs && x.date_utc_ms<=endTs);
-  const orders = new Set(rows.map(x => x.order_code));
-  const skus   = new Set(rows.map(x => x.sku));
   const qtySum    = rows.reduce((a,r)=>a+(Number(r.qty)||0),0);
   const profitSum = rows.reduce((a,r)=>a+(Number(r.profit_amount)||0),0);
   const costSum   = rows.reduce((a,r)=>a+(Number(r.cost_amount)||0),0);
   const revSum    = rows.reduce((a,r)=>a+(Number(r.total_price)||0),0);
+  const orders = new Set(rows.map(x => x.order_code));
+  const skus   = new Set(rows.map(x => x.sku));
   return { rows, orders: orders.size, skus: skus.size, qty: qtySum, profit: profitSum, cost: costSum, revenue: revSum };
 }
-
-function paintSignal(elId, label){
-  const el = qs(elId); if(!el) return (st)=>{};
-  return (st)=>{
-    el.classList.remove('ok','warn','err');
-    el.classList.add(st.rows.length>0 ? 'ok' : 'err');
-    el.innerHTML = `<span class="badge">${label}</span>
-      <span>${st.rows.length} леджер-стр.</span>
-      <span class="muted"> · заказов:</span> <span class="kpi">${st.orders}</span>
-      <span class="muted"> · SKU:</span> <span class="kpi">${st.skus}</span>
-      <span class="muted"> · qty:</span> <span class="kpi">${fmt(st.qty)}</span>
-      <span class="muted"> · себест.:</span> <span class="kpi">${fmt(st.cost)} KZT</span>
-      <span class="muted"> · прибыль:</span> <span class="kpi">${fmt(st.profit)} KZT</span>`;
-  };
-}
-
 async function refreshSignals(){
   try{
     const today = isoDay(new Date());
-
     const codesToday = await getOrderCodes(today, today);
     const ledToday = codesToday.length ? await getLedgerByCodes(codesToday) : [];
     const stToday = calcSignalsFromLedger(ledToday, dayStartTs(today), dayEndTs(today));
-    paintSignal('#sig-today','Сегодня:')(stToday);
-
-    const start7 = addDays(today, -6);
-    const led7 = (await getLedgerByCodes(await getOrderCodes(start7, today))).filter(Boolean);
-    paintSignal('#sig-7d','7 дней:')(calcSignalsFromLedger(led7, dayStartTs(start7), dayEndTs(today)));
-
-    const start30 = addDays(today, -29);
-    const led30 = (await getLedgerByCodes(await getOrderCodes(start30, today))).filter(Boolean);
-    paintSignal('#sig-30д','30 дней:'); // safety
-    paintSignal('#sig-30d','30 дней:')(calcSignalsFromLedger(led30, dayStartTs(start30), dayEndTs(today)));
 
     const elCogs = qs('#sig-cogs-today');
-    if (elCogs){
-      elCogs.classList.remove('ok','err');
-      elCogs.classList.add(stToday.cost > 0 ? 'ok' : 'err');
-      elCogs.innerHTML = `<span class="badge">Себестоимость сегодня:</span>
-        <span class="kpi">${fmt(stToday.cost)} KZT</span>`;
-    }
+    elCogs.classList.remove('ok','err');
+    elCogs.classList.add(stToday.cost > 0 ? 'ok' : 'err');
+    elCogs.innerHTML = `<span class="badge">Себестоимость сегодня:</span><span class="kpi">${fmt(stToday.cost)} KZT</span>`;
 
     const pick = (arr)=>arr.reduce((acc,r)=>{
       const ts = Number(r.date_utc_ms || r.created_at || 0);
       return (!isNaN(ts) && (!acc || ts>acc)) ? ts : acc;
     }, null);
-    const lastCreated = pick(led30.length ? led30 : (led7.length ? led7 : ledToday));
+    const lastCreated = pick(ledToday);
     const elLast = qs('#sig-last');
-    elLast.classList.remove('ok','warn','err');
+    elLast.classList.remove('ok','err');
     if(lastCreated){
       elLast.classList.add('ok');
       const dt = new Date(Number(lastCreated));
-      elLast.innerHTML = `<span class="badge">Последнее списание:</span>
-        <span>${dt.toLocaleDateString()} ${dt.toLocaleTimeString()}</span>`;
+      elLast.innerHTML = `<span class="badge">Последнее списание:</span><span>${dt.toLocaleDateString()} ${dt.toLocaleTimeString()}</span>`;
     }else{
       elLast.classList.add('err');
       elLast.innerHTML = `<span class="badge">Последнее списание:</span><span class="muted">не найдено</span>`;
     }
-  }catch(e){
-    const el = qs('#sig-today');
-    if (el) { el.classList.add('err'); el.innerHTML = `<span class="badge">Сегодня:</span><span class="muted">ошибка</span>`; }
+  }catch{
+    const el = qs('#sig-last'); el.classList.add('err'); el.innerHTML = `<span class="badge">Последнее списание:</span><span class="muted">ошибка</span>`;
   }
 }
 
-/* ──────────────────────────────────────────────────────────────────
-   BRIDGE: синхронизация строк заказов (ручная)
-────────────────────────────────────────────────────────────────── */
+/* ─────────────── BRIDGE / FIFO ─────────────── */
+function logFIFO(msg, obj){
+  const el = qs("#fifo-log"); const time = new Date().toLocaleTimeString();
+  el.innerHTML += `<div>[${time}] ${escapeHtml(msg)}</div>`;
+  if (obj) el.innerHTML += `<pre style="white-space:pre-wrap;margin:4px 0">${escapeHtml(JSON.stringify(obj, null, 2))}</pre>`;
+  el.scrollTop = el.scrollHeight;
+}
+function setDefaultDates(){
+  const today = new Date();
+  const y = new Date(Date.now()-24*3600*1000);
+  qs("#fifo-from").value = y.toISOString().slice(0,10);
+  qs("#fifo-to").value   = today.toISOString().slice(0,10);
+}
+async function ensureSkuAndBatch(sku, need, cost, comm){
+  try{
+    await fetchJSON(`/products/db/ensure-sku/${encodeURIComponent(sku)}?name=${encodeURIComponent(sku)}&price=0&qty=0&active=1`, { method:'POST' });
+  }catch(_){}
+  return fetchJSON(`/products/db/price-batches/${encodeURIComponent(sku)}`, {
+    method:'POST',
+    headers: { 'Content-Type':'application/json' },
+    body: JSON.stringify({ entries: [{ date: new Date().toISOString().slice(0,10), qty:Number(need), unit_cost:Number(cost), commission_pct:Number(comm), note:'auto-fill' }]})
+  });
+}
 async function getBridgeLinesForPeriod(FROM, TO){
   const p = new URLSearchParams({
-    start: FROM, end: TO,
-    tz: 'Asia/Almaty',
-    date_field: 'creationDate',
-    order: 'asc',
-    grouped: '0',
-    limit: '100000',
-    with_items: '1',
-    use_bd: '1',
-    business_day_start: '20:00',
-    assign_mode: 'smart',
-    store_accept_until: '17:00',
-    items_mode: 'all',
-    exclude_states: 'CANCELED',
+    start: FROM, end: TO, tz:'Asia/Almaty', date_field:'creationDate',
+    order: 'asc', grouped:'0', limit:'100000', with_items:'1',
+    use_bd:'1', business_day_start:'20:00', assign_mode:'smart',
+    store_accept_until:'17:00', items_mode:'all', exclude_states:'CANCELED',
   });
   const j = await fetchJSON('/orders/ids?' + p.toString());
   const rows = Array.isArray(j.items) ? j.items : [];
-
-  const counters = new Map();
-  const lines = [];
-
+  const counters = new Map(); const lines = [];
   for (const r of rows){
-    const orderId   = String(r.id || r.order_id || r.orderId || r.code || '').trim();
-    if (!orderId) continue;
+    const orderId   = String(r.id || r.order_id || r.orderId || r.code || '').trim(); if (!orderId) continue;
     const orderCode = String(r.order_code || r.number || r.code || '').trim();
     const idx = (counters.set(orderId, (counters.get(orderId)||0) + 1), counters.get(orderId));
-
     const qty  = Number(r.qty ?? r.quantity ?? 1) || 1;
     const unit = Number(r.unit_price ?? r.price ?? (Number(r.total_price || r.amount || 0) / qty)) || 0;
     const total = Number(r.total_price ?? r.amount ?? (unit * qty)) || 0;
-
-    lines.push({
-      id: orderId,
-      code: orderCode || null,
-      date: r.creationDate || r.date || null,
-      state: r.state || null,
-      sku: String(r.sku || r.vendorCode || r.barcode || r.code || '').trim() || null,
-      title: r.title || r.name || null,
-      qty, unit_price: unit, total_price: total,
-      line_index: idx
-    });
+    lines.push({ id: orderId, code: orderCode||null, date: r.creationDate || r.date || null, state: r.state || null,
+      sku: String(r.sku || r.vendorCode || r.barcode || r.code || '').trim() || null, title: r.title || r.name || null,
+      qty, unit_price: unit, total_price: total, line_index: idx });
   }
   return lines;
 }
-
-async function syncBridgeLines(BKEY, lines){
+async function syncBridgeLines(lines){
   let synced=0, codes=[];
+  const key = window.KASPI_API_KEY || null; // «зашитый» ключ
+  if (!key) { logFIFO('⚠ Нет KASPI_API_KEY — синхронизация bridge пропущена.'); return { synced:0, codes:[] }; }
   for (let i=0; i<lines.length; i+=200){
     const chunk = lines.slice(i, i+200);
-    const res = await fetchJSON('/profit/bridge/sync-by-ids?api_key='+encodeURIComponent(BKEY), {
+    const res = await fetchJSON('/profit/bridge/sync-by-ids', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify(chunk)
@@ -584,76 +455,27 @@ async function syncBridgeLines(BKEY, lines){
   }
   return { synced, codes:[...new Set(codes)] };
 }
-
-/* ──────────────────────────────────────────────────────────────────
-   FIFO pipeline (ручной запуск)
-────────────────────────────────────────────────────────────────── */
-function logFIFO(msg, obj){
-  const el = qs("#fifo-log");
-  const time = new Date().toLocaleTimeString();
-  el.innerHTML += `<div>[${time}] ${escapeHtml(msg)}</div>`;
-  if (obj) {
-    el.innerHTML += `<pre style="white-space:pre-wrap;margin:4px 0">${escapeHtml(JSON.stringify(obj, null, 2))}</pre>`;
-  }
-  el.scrollTop = el.scrollHeight;
-}
-
-function setDefaultDates(){
-  const today = new Date();
-  const y = new Date(Date.now()-24*3600*1000);
-  qs("#fifo-from").value = y.toISOString().slice(0,10);
-  qs("#fifo-to").value   = today.toISOString().slice(0,10);
-  qs("#fifo-bkey").value   = localStorage.getItem("BKEY")   || "";
-  qs("#fifo-apikey").value = localStorage.getItem("APIKEY") || "";
-}
-
-async function ensureSkuAndBatch(APIKEY, sku, need, cost, comm){
-  try{
-    await fetchJSON(`/products/db/ensure-sku/${encodeURIComponent(sku)}?name=${encodeURIComponent(sku)}&price=0&qty=0&active=1`, {
-      method:'POST', headers: { 'X-API-Key': APIKEY }
-    });
-  }catch(_){}
-  const j = await fetchJSON(`/products/db/price-batches/${encodeURIComponent(sku)}`, {
-    method:'POST',
-    headers: { 'Content-Type':'application/json', 'X-API-Key': APIKEY },
-    body: JSON.stringify({ entries: [{
-      date: new Date().toISOString().slice(0,10),
-      qty: Number(need),
-      unit_cost: Number(cost),
-      commission_pct: Number(comm),
-      note: 'auto-fill'
-    }]})
-  });
-  return j;
-}
-
 async function runFIFO(){
   const FROM = qs('#fifo-from').value;
   const TO   = qs('#fifo-to').value;
-  const BKEY = (qs('#fifo-bkey').value||"").trim();
-  const APIKEY = (qs('#fifo-apikey').value||"").trim();
   const FILL = qs('#fifo-fill-missing').checked;
   const DEFAULT_COST = Number(qs('#fifo-default-cost').value||0);
   const DEFAULT_COMM = Number(qs('#fifo-default-comm').value||0);
-
-  localStorage.setItem("BKEY", BKEY);
-  localStorage.setItem("APIKEY", APIKEY);
 
   const btn = qs('#fifo-run'); btn.disabled = true; btn.textContent = 'Работаю…';
   qs('#fifo-log').innerHTML = '';
 
   try{
-    logFIFO('Пинг БД…');
-    const ping = await fetchJSON('/products/db/ping');
-    if (!ping.ok) throw new Error('DB ping failed');
-    logFIFO('OK', ping);
+    logFIFO('Пинг БД…'); const ping = await fetchJSON('/products/db/ping');
+    if (!ping.ok) throw new Error('DB ping failed'); logFIFO('OK', ping);
 
     logFIFO(`Получаю строки заказов ${FROM}..${TO}…`);
     const lines = await getBridgeLinesForPeriod(FROM, TO);
     logFIFO(`Найдено строк: ${lines.length}`);
-    if (lines.length && BKEY){
+
+    if (lines.length){
       logFIFO('Синхронизация bridge…');
-      const syncRes = await syncBridgeLines(BKEY, lines);
+      const syncRes = await syncBridgeLines(lines);
       logFIFO('Bridge sync', syncRes);
     }
 
@@ -662,7 +484,7 @@ async function runFIFO(){
     logFIFO('Apply #1 результат', apply1);
     let gaps = Array.isArray(apply1.gaps) ? apply1.gaps : [];
 
-    if (gaps.length && FILL && APIKEY) {
+    if (gaps.length && FILL) {
       const agg = {};
       gaps.forEach(g => {
         const s=String(g.sku||'').trim(); const n=Number(g.not_covered_qty||0);
@@ -671,9 +493,8 @@ async function runFIFO(){
       logFIFO('Дефицит по SKU:', agg);
       for (const [sku, need] of Object.entries(agg)) {
         logFIFO(`Добавляю партию: ${sku} → ${need}шт по ${DEFAULT_COST} KZT, комиссия ${DEFAULT_COMM}%`);
-        const r = await ensureSkuAndBatch(APIKEY, sku, need, DEFAULT_COST, DEFAULT_COMM);
-        logFIFO('OK', r);
-        await sleep(40);
+        const r = await ensureSkuAndBatch(sku, need, DEFAULT_COST, DEFAULT_COMM);
+        logFIFO('OK', r); await sleep(40);
       }
       const affectedCodes = [...new Set(gaps.map(g => g.order_code).filter(Boolean))];
       if (affectedCodes.length){
@@ -699,16 +520,16 @@ async function runFIFO(){
   }
 }
 
-/* ──────────────────────────────────────────────────────────────────
-   SKU details (batches + history per SKU)
-────────────────────────────────────────────────────────────────── */
+/* ─────────────── SKU details ─────────────── */
+function clearDetails(){ qsa('tr.detail').forEach(tr => tr.remove()); }
+function makeDetailRow(colspan){ const tr = document.createElement('tr'); tr.className='detail'; const td=document.createElement('td'); td.colSpan=colspan; tr.appendChild(td); return tr; }
+
 async function openDetail(row){
   clearDetails();
   const sku = row?.dataset?.sku || row.cells?.[0]?.textContent?.trim();
   if(!sku){ setNote('У товара нет кода/sku — некуда сохранять партии.'); return; }
 
-  const tr = makeDetailRow(row.children.length);
-  row.insertAdjacentElement('afterend', tr);
+  const tr = makeDetailRow(row.children.length); row.insertAdjacentElement('afterend', tr);
   const mount = tr.firstChild;
 
   mount.innerHTML = `
@@ -758,20 +579,17 @@ async function openDetail(row){
           <tbody></tbody>
         </table>
       </div>
-    </div>
-  `;
+    </div>`;
 
   const tbody = qs('#btBody', mount);
   const priceKZT = parseNum(row.cells[5].textContent);
 
   function recalc(tr){
     const inputs = tr.querySelectorAll('input');
-    const uc = Number(inputs[2].value||0);
-    const comm = Number(inputs[3].value||0);
+    const uc = Number(inputs[2].value||0), comm = Number(inputs[3].value||0);
     const net = priceKZT - (priceKZT * comm/100) - uc;
     tr.querySelector('.net').textContent = isFinite(net) ? fmt(net) : '—';
   }
-
   function addRow(data={}){
     const tr = document.createElement('tr');
     const codeCell = (data && data.batch_code) ? escapeHtml(data.batch_code) : '<span class="muted">— генерируется</span>';
@@ -788,26 +606,19 @@ async function openDetail(row){
       <td>${left != null ? fmt(left) : '—'}</td>
       <td class="code">${codeCell}</td>
       <td><input type="text" value="${escapeHtml(data.note ?? '')}"></td>
-      <td>${delBtn}</td>
-    `;
-    tbody.appendChild(tr);
-    recalc(tr);
+      <td>${delBtn}</td>`;
+    tbody.appendChild(tr); recalc(tr);
   }
 
-  try{
-    const data = await fetchJSON('/products/db/price-batches/'+encodeURIComponent(sku));
-    (data.batches||[]).forEach(addRow);
-  }catch(e){ setNote('Не удалось загрузить партии: ' + e.message); }
+  try{ const data = await fetchJSON('/products/db/price-batches/'+encodeURIComponent(sku)); (data.batches||[]).forEach(addRow); }
+  catch(e){ setNote('Не удалось загрузить партии: ' + e.message); }
 
   qs('#btnAddRow', mount).onclick = ()=> addRow({});
   tbody.addEventListener('input', e=>{ const tr = e.target.closest('tr'); if(tr) recalc(tr); });
   tbody.addEventListener('click', async (e)=>{
     const btn = e.target.closest('.btnDel'); if(!btn) return;
-    try{
-      await fetchJSON('/products/db/price-batches/'+encodeURIComponent(sku)+'/'+btn.dataset.id, {method:'DELETE'});
-      btn.closest('tr').remove();
-      setNote('Партия удалена.', true);
-    }catch(err){ setNote('Удаление не удалось: ' + err.message); }
+    try{ await fetchJSON('/products/db/price-batches/'+encodeURIComponent(sku)+'/'+btn.dataset.id, {method:'DELETE'}); btn.closest('tr').remove(); setNote('Партия удалена.', true); }
+    catch(err){ setNote('Удаление не удалось: ' + err.message); }
   });
 
   qs('#btnSaveRows', mount).onclick = async ()=>{
@@ -815,36 +626,23 @@ async function openDetail(row){
       const ins = tr.querySelectorAll('input');
       const codeText = tr.querySelector('.code')?.textContent?.trim() || '';
       const gen = codeText.startsWith('—') ? null : codeText;
-      return {
-        date: ins[0].value,
-        qty: Number(ins[1].value||0),
-        unit_cost: Number(ins[2].value||0),
-        commission_pct: Number(ins[3].value||0) || null,
-        note: ins[4].value || null,
-        batch_code: gen
-      };
+      return { date: ins[0].value, qty:Number(ins[1].value||0), unit_cost:Number(ins[2].value||0),
+        commission_pct:Number(ins[3].value||0)||null, note: ins[4].value||null, batch_code: gen };
     }).filter(e => e.qty>0 && e.unit_cost>0);
     if(!entries.length){ setNote('Добавьте хотя бы одну строку партии.'); return; }
     try{
       await fetchJSON('/products/db/price-batches/'+encodeURIComponent(sku), {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({entries})
+        method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({entries})
       });
-      setNote('Партии сохранены.', true);
-      openDetail(row);
+      setNote('Партии сохранены.', true); openDetail(row);
     }catch(e){ setNote('Сохранение партий не удалось: ' + e.message); }
   };
 
   qs('#btnRecount', mount).onclick = async ()=>{
-    try{
-      const res = await fetchJSON('/products/batches/recount-sold', {method:'POST'});
-      setNote(`Пересчёт списаний выполнен (затронуто партий: ${res.updated_batches||0}).`, true);
-      openDetail(row);
-    }catch(e){ setNote('Пересчёт не удался: ' + e.message); }
+    try{ const res = await fetchJSON('/products/batches/recount-sold', {method:'POST'}); setNote(`Пересчёт списаний выполнен (затронуто партий: ${res.updated_batches||0}).`, true); openDetail(row); }
+    catch(e){ setNote('Пересчёт не удался: ' + e.message); }
   };
 
-  // История списаний по SKU
   async function loadHistory(days){
     const end = isoDay(new Date());
     const start = addDays(end, -(Number(days)-1));
@@ -859,21 +657,13 @@ async function openDetail(row){
     const rows = (data.items||[]).filter(x => String(x.sku) === String(sku));
     const codes = [...new Set(rows.map(r=>r.order_code||r.number).filter(Boolean).map(String))];
     const tb = qs('#histTable tbody', mount); tb.innerHTML = '';
-    if (!codes.length){
-      qs('#histSummary', mount).textContent = 'нет списаний';
-      return;
-    }
+    if (!codes.length){ qs('#histSummary', mount).textContent = 'нет списаний'; return; }
     const ledger = await getLedgerByCodes(codes, 50, 10000);
     const startTs = dayStartTs(start), endTs = dayEndTs(end);
-    const list = ledger.filter(x => x.sku===sku && x.date_utc_ms>=startTs && x.date_utc_ms<=endTs)
-                       .sort((a,b)=>a.date_utc_ms-b.date_utc_ms);
+    const list = ledger.filter(x => x.sku===sku && x.date_utc_ms>=startTs && x.date_utc_ms<=endTs).sort((a,b)=>a.date_utc_ms-b.date_utc_ms);
     let sumQty=0,sumRev=0,sumComm=0,sumCost=0,sumProfit=0;
     list.forEach(r=>{
-      sumQty += (r.qty||0);
-      sumRev += (r.total_price||0);
-      sumComm+= (r.commission_amount||0);
-      sumCost+= (r.cost_amount||0);
-      sumProfit += (r.profit_amount||0);
+      sumQty += (r.qty||0); sumRev += (r.total_price||0); sumComm+= (r.commission_amount||0); sumCost+= (r.cost_amount||0); sumProfit += (r.profit_amount||0);
       const dt = new Date(Number(r.date_utc_ms||0));
       const tr = document.createElement('tr');
       tr.innerHTML = `
@@ -884,275 +674,166 @@ async function openDetail(row){
         <td>${fmt(r.commission_amount)} KZT</td>
         <td>${fmt(r.cost_amount)} KZT</td>
         <td>${fmt(r.profit_amount)} KZT</td>
-        <td>${r.batch_id ? ('#'+r.batch_id) : ''}</td>
-      `;
+        <td>${r.batch_id ? ('#'+r.batch_id) : ''}</td>`;
       tb.appendChild(tr);
     });
     qs('#histSummary', mount).innerHTML = list.length
       ? `строк: <b>${fmt(list.length)}</b>, qty: <b>${fmt(sumQty)}</b>, выручка: <b>${fmt(sumRev)} KZT</b>, себестоимость: <b>${fmt(sumCost)} KZT</b>, прибыль: <b>${fmt(sumProfit)} KZT</b>`
       : 'нет списаний';
   }
-
-  qs('#btnLoadHistory', mount).onclick = async ()=>{
-    try{
-      await loadHistory(Number(qs('#histDays', mount).value||30));
-    }catch(e){ setNote('История не загрузилась: ' + e.message); }
-  };
+  qs('#btnLoadHistory', mount).onclick = async ()=>{ try{ await loadHistory(Number(qs('#histDays', mount).value||30)); }catch(e){ setNote('История не загрузилась: ' + e.message); } };
   try{ await loadHistory(30); }catch(_){}
 }
 
-/* ──────────────────────────────────────────────────────────────────
-   Глобальная история списаний за период (по кнопке)
-────────────────────────────────────────────────────────────────── */
+/* ─────────────── Глобальная история ─────────────── */
+let histAbortCtrl = null;
 async function showGlobalHistory(){
   const FROM = qs('#fifo-from').value;
   const TO   = qs('#fifo-to').value;
   const box  = qs('#history-all-panel');
   const sum  = qs('#histAllSummary');
   const tbody= qs('#histAllTable tbody');
-  box.style.display = 'block';
-  sum.innerHTML = '<div class="muted">Загрузка…</div>';
-  tbody.innerHTML = '';
+  box.style.display = 'block'; sum.innerHTML = '<div class="muted">Собираю коды заказов…</div>'; tbody.innerHTML = '';
+  if (histAbortCtrl) histAbortCtrl.abort(); histAbortCtrl = new AbortController(); const { signal } = histAbortCtrl;
 
   try{
-    const codes = await getOrderCodes(FROM, TO);
-    if(!codes.length){
-      sum.innerHTML = '<div class="muted">За выбранный период заказов не найдено.</div>';
-      return;
-    }
-    const ledger = await getLedgerByCodes(codes, 50, 10000);
+    const orderCodes = await getOrderCodes(FROM, TO);
+    if (signal.aborted) throw new Error('Отменено');
+    if(!orderCodes.length){ sum.innerHTML = '<div class="muted">За выбранный период заказов не найдено.</div>'; return; }
+
     const startTs = dayStartTs(FROM), endTs = dayEndTs(TO);
-    const list = ledger
-      .filter(x => typeof x.date_utc_ms==='number' && x.date_utc_ms>=startTs && x.date_utc_ms<=endTs)
-      .sort((a,b)=>a.date_utc_ms-b.date_utc_ms);
+    const chunk = 50; let done = 0;
+    const totals = {rows:0, orders:new Set(), skus:new Set(), qty:0, revenue:0, cost:0, profit:0};
 
-    // Сводка
-    const st = calcSignalsFromLedger(list, startTs, endTs);
-    sum.innerHTML = `
-      <div class="stat"><span class="badge">Строк:</span> ${fmt(st.rows.length)}</div>
-      <div class="stat"><span class="badge">Заказов:</span> ${fmt(st.orders)}</div>
-      <div class="stat"><span class="badge">SKU:</span> ${fmt(st.skus)}</div>
-      <div class="stat"><span class="badge">qty:</span> ${fmt(st.qty)}</div>
-      <div class="stat"><span class="badge">Выручка:</span> ${fmt(st.revenue)} KZT</div>
-      <div class="stat"><span class="badge">Себестоимость:</span> ${fmt(st.cost)} KZT</div>
-      <div class="stat"><span class="badge">Прибыль:</span> ${fmt(st.profit)} KZT</div>
-    `;
+    const paintProgress = () => {
+      sum.innerHTML = `
+        <div class="stat"><span class="badge">Прогресс:</span> ${Math.round(done/orderCodes.length*100)}% (${fmt(done)}/${fmt(orderCodes.length)})</div>
+        <div class="stat"><span class="badge">Строк:</span> ${fmt(totals.rows)}</div>
+        <div class="stat"><span class="badge">Заказов:</span> ${fmt(totals.orders.size)}</div>
+        <div class="stat"><span class="badge">SKU:</span> ${fmt(totals.skus.size)}</div>
+        <div class="stat"><span class="badge">qty:</span> ${fmt(totals.qty)}</div>
+        <div class="stat"><span class="badge">Выручка:</span> ${fmt(totals.revenue)} KZT</div>
+        <div class="stat"><span class="badge">Себестоимость:</span> ${fmt(totals.cost)} KZT</div>
+        <div class="stat"><span class="badge">Прибыль:</span> ${fmt(totals.profit)} KZT</div>`;
+    };
+    paintProgress();
 
-    // Таблица
-    list.forEach(r=>{
-      const tr = document.createElement('tr');
-      const dt = new Date(Number(r.date_utc_ms||0));
-      tr.innerHTML = `
-        <td>${dt.toLocaleDateString()} ${dt.toLocaleTimeString()}</td>
-        <td>${escapeHtml(r.order_code||'')}</td>
-        <td>${escapeHtml(r.sku||'')}</td>
-        <td>${escapeHtml(r.title||'')}</td>
-        <td>${fmt(r.qty)}</td>
-        <td>${fmt(r.unit_price)} KZT</td>
-        <td>${fmt(r.total_price)} KZT</td>
-        <td>${fmt(r.commission_amount)} KZT</td>
-        <td>${fmt(r.cost_amount)} KZT</td>
-        <td>${fmt(r.profit_amount)} KZT</td>
-        <td>${r.batch_id ? ('#'+r.batch_id) : ''}</td>
-      `;
-      tbody.appendChild(tr);
-    });
+    for (let i=0; i<orderCodes.length; i+=chunk){
+      if (signal.aborted) throw new Error('Отменено');
+      const part = orderCodes.slice(i, i+chunk).map(encodeURIComponent).join(',');
+      const j = await fetchJSON(`/profit/bridge/fifo/ledger?codes=${part}&limit=10000`);
+      const items = Array.isArray(j.items) ? j.items : [];
+      for (const r of items){
+        const ms = Number(r.date_utc_ms||0); if (ms<startTs || ms>endTs) continue;
+        totals.rows++; if (r.order_code) totals.orders.add(String(r.order_code)); if (r.sku) totals.skus.add(String(r.sku));
+        totals.qty+=(r.qty||0); totals.revenue+=(r.total_price||0); totals.cost+=(r.cost_amount||0); totals.profit+=(r.profit_amount||0);
+        const tr = document.createElement('tr'); const dt = new Date(ms);
+        tr.innerHTML = `
+          <td>${dt.toLocaleDateString()} ${dt.toLocaleTimeString()}</td>
+          <td>${escapeHtml(r.order_code||'')}</td>
+          <td>${escapeHtml(r.sku||'')}</td>
+          <td>${escapeHtml(r.title||'')}</td>
+          <td>${fmt(r.qty)}</td>
+          <td>${fmt(r.unit_price)} KZT</td>
+          <td>${fmt(r.total_price)} KZT</td>
+          <td>${fmt(r.commission_amount)} KZT</td>
+          <td>${fmt(r.cost_amount)} KZT</td>
+          <td>${fmt(r.profit_amount)} KZT</td>
+          <td>${r.batch_id ? ('#'+r.batch_id) : ''}</td>`;
+        tbody.appendChild(tr);
+      }
+      done += Math.min(chunk, orderCodes.length - i); paintProgress(); await sleep(30);
+    }
   }catch(e){
-    sum.innerHTML = `<div class="muted">Ошибка: ${escapeHtml(e.message||e)}</div>`;
+    sum.innerHTML = `<div class="muted">${escapeHtml(e.message||e)}</div>`;
   }
 }
 
-/* ──────────────────────────────────────────────────────────────────
-   table capture & buttons
-────────────────────────────────────────────────────────────────── */
+/* ─────────────── misc ─────────────── */
 function tableToRows(){
   return qsa('#tbl tbody tr').map(tr=>{
     const t = tr.children;
-    const code = t[0].textContent.trim();
-    const name = t[1].textContent.trim();
-    const brand = t[2].textContent.trim() || null;
-    const category = t[3].textContent.trim() || null;
-    const qty = parseNum(t[4].textContent);
-    const price = parseNum(t[5].textContent);
+    const code = t[0].textContent.trim(); const name = t[1].textContent.trim();
+    const brand = t[2].textContent.trim() || null; const category = t[3].textContent.trim() || null;
+    const qty = parseNum(t[4].textContent); const price = parseNum(t[5].textContent);
     const active = t[6].querySelector('.dot')?.classList.contains('on') || false;
     return { code, name, brand, category, qty, price, active };
   });
 }
 
+/* ─────────────── init ─────────────── */
 document.addEventListener('DOMContentLoaded', async ()=>{
-  // ping
   try{
     const ping = await fetchJSON('/products/db/ping');
     const backend = ping?.driver ? ('db=' + ping.driver) : (ping?.db_path || '');
     setNote('Бэкенд OK (integrity=' + (ping.ok ? 'ok':'fail') + '; ' + backend + ')', true);
-  }catch(e){
-    setNote('Не найден /products/db/ping. Проверь main.py -> include_router(..., prefix="/products").');
-  }
+  }catch(e){ setNote('Не найден /products/db/ping. Проверь main.py -> include_router(..., prefix="/products").'); }
 
-  // dates & keys
-  setDefaultDates();
+  setDefaultDates(); attachSorting();
 
-  // sorting
-  attachSorting();
-
-  // поиск/фильтр
-  qs('#btnSearch').onclick = loadDB;
-  qs('#search').addEventListener('keydown', e=>{ if(e.key==='Enter') loadDB(); });
-
-  // загрузки
-  qs('#btnLoadApi').onclick = loadAPI;
   qs('#btnLoadDb').onclick  = loadDB;
-
-  // FIFO
-  qs('#fifo-run').onclick   = runFIFO;
-  qs('#fifo-refresh').onclick = refreshSignals;
-
-  // Глобальная история
-  qs('#btnHistoryAll').onclick = showGlobalHistory;
-  qs('#btnHideHistory').onclick = ()=>{ qs('#history-all-panel').style.display='none'; };
-
-  // быстрый поиск/открытие SKU
   qs('#btnFindSku').onclick = ()=>{
-    const sku = qs('#findSku').value.trim();
-    if(!sku) return;
+    const sku = qs('#findSku').value.trim(); if(!sku) return;
     const row = qsa('#tbl tbody tr').find(tr => (tr.dataset.sku||tr.cells[0].textContent.trim()) === sku);
-    if(!row){ setNote('SKU не найден в таблице. Нажми «Загрузить из БД» или общий поиск.'); return; }
-    row.scrollIntoView({behavior:'smooth', block:'center'});
-    openDetail(row);
+    if(!row){ setNote('SKU не найден в таблице. Нажми «Загрузить из БД».'); return; }
+    row.scrollIntoView({behavior:'smooth', block:'center'}); openDetail(row);
   };
+  qs('#fileInput').addEventListener('change', async (e)=>{ const f = e.target.files?.[0]; if(!f) return; await importFile(f); e.target.value = ''; });
 
-  // импорт/восстановление
-  qs('#fileInput').addEventListener('change', async (e)=>{
-    const f = e.target.files?.[0]; if(!f) return;
-    await importFile(f); e.target.value = '';
-  });
-
-  qs('#restoreFile').addEventListener('change', async (e)=>{
-    const f = e.target.files?.[0]; if(!f) return;
-    const fd = new FormData(); fd.append('file', f);
-    try{
-      const res = await fetchJSON('/products/db/restore', {method:'POST', body:fd});
-      if(res?.integrity === 'ok') setNote('БД восстановлена (integrity=ok).', true);
-      else setNote('БД загружена, но integrity_check != ok.');
-      await loadDB();
-    }catch(err){ setNote('Восстановление БД не удалось: ' + err.message); }
-    e.target.value = '';
-  });
-
-  const backupBtn = qs('#btnBackup');
-  if(backupBtn) backupBtn.onclick = ()=> { window.location = '/products/db/backup.sqlite3'; };
-
-  // действия в таблице
   qs('#tbl').addEventListener('click', (e)=>{
-    const btn1 = e.target.closest('.btn-parties');
-    if(btn1) { openDetail(btn1.closest('tr')); return; }
-    const btn2 = e.target.closest('.btn-history');
-    if(btn2) { openDetail(btn2.closest('tr')); return; }
+    const btn1 = e.target.closest('.btn-parties'); if(btn1) { openDetail(btn1.closest('tr')); return; }
+    const btn2 = e.target.closest('.btn-history'); if(btn2) { openDetail(btn2.closest('tr')); return; }
   });
 
-  // сохранить в БД
   qs('#btnSaveDb').onclick = async ()=>{
-  const rows = tableToRows();
-  if(!rows.length){ setNote('Нет строк для сохранения. Сначала загрузите товары из API/файла.'); return; }
-
-  const merge = qs('#mergeMode')?.checked;
-  const priceOnly = qs('#priceOnly')?.checked;
-
-  try{
-    let payload = rows;
-    let msgExtra = '';
-
-    if (merge){
-      // 1) тянем все, что уже есть в БД
-      const dbAll = await getAllDbItems();
-      const map = new Map(dbAll.map(o => [String(o.code), {...o}]));
-
-      // 2) сливаем: обновляем цену (и метаданные), qty/active — по флажку
-      let added = 0, updated = 0;
-      for (const r of rows){
-        const key = String(r.code || '').trim();
-        if (!key) continue;
-
-        if (map.has(key)){
-          const o = map.get(key);
-          o.name     = r.name || o.name;
-          o.brand    = r.brand ?? o.brand;
-          o.category = r.category ?? o.category;
-          if (typeof r.price === 'number') o.price = r.price; // ОБНОВЛЯЕМ ЦЕНУ
-
-          if (!priceOnly){
-            if (typeof r.qty    === 'number')  o.qty    = r.qty;
-            if (typeof r.active === 'boolean') o.active = r.active;
+    const rows = tableToRows(); if(!rows.length){ setNote('Нет строк для сохранения. Сначала импортируйте файл или загрузите БД.'); return; }
+    const merge = qs('#mergeMode')?.checked; const priceOnly = qs('#priceOnly')?.checked;
+    try{
+      let payload = rows, msgExtra = '';
+      if (merge){
+        const p = new URLSearchParams({ active_only:'0', page:'1', page_size:'20000' });
+        const dbAll = await fetchJSON('/products/db/list?'+p.toString()).then(x=>x.items||[]);
+        const map = new Map(dbAll.map(o => [String(o.code), {...o}]));
+        let added=0, updated=0;
+        for (const r of rows){
+          const key = String(r.code || '').trim(); if (!key) continue;
+          if (map.has(key)){
+            const o = map.get(key);
+            o.name = r.name || o.name; o.brand = r.brand ?? o.brand; o.category = r.category ?? o.category;
+            if (typeof r.price === 'number') o.price = r.price;
+            if (!priceOnly){ if (typeof r.qty === 'number') o.qty = r.qty; if (typeof r.active === 'boolean') o.active = r.active; }
+            map.set(key, o); updated++;
+          } else {
+            map.set(key, { code:key, name:r.name||key, brand:r.brand??null, category:r.category??null, price:typeof r.price==='number'?r.price:0, qty:0, active:true }); added++;
           }
-          map.set(key, o);
-          updated++;
-        } else {
-          map.set(key, {
-            code: key,
-            name: r.name || key,
-            brand: r.brand ?? null,
-            category: r.category ?? null,
-            price: typeof r.price === 'number' ? r.price : 0,
-            qty: 0,
-            active: true
-          });
-          added++;
         }
+        payload = [...map.values()]; msgExtra = ` Режим MERGE: обновлено цен у ${fmt(updated)}, добавлено новых ${fmt(added)}, всего в БД станет ${fmt(payload.length)}.`;
       }
-
-      payload = [...map.values()];
-      msgExtra = ` Режим MERGE: обновлено цен у ${nf.format(updated)}, добавлено новых ${nf.format(added)}, всего в БД станет ${nf.format(payload.length)}.`;
-    }
-
-    // 3) сохраняем объединённый список
-    const res = await fetchJSON('/products/db/bulk-upsert', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(payload)
-    });
-
-    setNote(`Сохранено в БД: вставлено ${fmt(res.inserted||0)}, обновлено ${fmt(res.updated||0)}.${msgExtra}`, true);
-    await loadDB();
-  }catch(e){
-    setNote('Сохранение в БД не удалось: ' + e.message);
-  }
-};
-
-
-  // экспорт CSV
-  qs('#btnExportDb').onclick = ()=>{
-    const p = new URLSearchParams();
-    p.set('active_only', qs('#onlyActive').checked ? '1' : '0');
-    const qv = qs('#search').value.trim(); if(qv) p.set('search', qv);
-    window.location = '/products/db/export.csv?' + p.toString();
+      const res = await fetchJSON('/products/db/bulk-upsert', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+      setNote(`Сохранено в БД: вставлено ${fmt(res.inserted||0)}, обновлено ${fmt(res.updated||0)}.${msgExtra}`, true);
+      await loadDB();
+    }catch(e){ setNote('Сохранение в БД не удалось: ' + e.message); }
   };
 
-  // первичная загрузка (только чтение, без списаний)
+  qs('#btnHistoryAll').onclick = showGlobalHistory;
+  qs('#btnHideHistory').onclick = ()=>{ if (histAbortCtrl) histAbortCtrl.abort(); qs('#history-all-panel').style.display='none'; };
+
+  qs('#fifo-run').onclick = runFIFO;
+
   await loadDB();
   await refreshSignals();
 });
 </script>
 
-<!-- ГЛОБАЛЬНАЯ подстановка X-API-Key к /products/* и /profit/* -->
+<!-- Инжектор X-API-Key к /products/* и /profit/* — ключ «зашит» в localStorage -->
 <script>
-(() => {
+(()=> {
   const KEY = "KASPI_API_KEY";
-  const badge = () => document.getElementById('apiKeyBadge');
-
-  function refreshKeyBadge(){
-    const v = localStorage.getItem(KEY) || "";
-    const el = badge(); if(!el) return;
-    const dot = el.querySelector('.dot'); const text = el.querySelector('span:last-child');
-    if(v){ dot.classList.add('on'); text.textContent = 'ключ установлен'; }
-    else { dot.classList.remove('on'); text.textContent = 'ключ не задан'; }
-  }
-
   window.KASPI_API_KEY = localStorage.getItem(KEY) || "";
-  refreshKeyBadge();
 
   const _origFetch = window.fetch.bind(window);
   window.fetch = function(input, init) {
-    try {
+    try{
       let urlStr = typeof input === "string" ? input : (input && input.url) || "";
       if (urlStr.startsWith("/products/") || urlStr.startsWith("/profit/")) {
         init = init || {};
@@ -1167,49 +848,12 @@ document.addEventListener('DOMContentLoaded', async ()=>{
           else input = new Request(u.toString(), init);
         }
       }
-    } catch (e) { /* no-op */ }
+    }catch(e){}
     return _origFetch(input, init);
   };
 
-  window.setApiKey = function(k) {
-    localStorage.setItem(KEY, k || "");
-    window.KASPI_API_KEY = k || "";
-    refreshKeyBadge();
-    console.log("API key set");
-  };
-
-  document.addEventListener("DOMContentLoaded", () => {
-    const btn = document.getElementById("btnApiKey");
-    if (btn) {
-      btn.addEventListener("click", () => {
-        const curr = window.KASPI_API_KEY || "";
-        const v = prompt("Введите X-API-Key (сохранится в этом браузере):", curr);
-        if (v !== null) { setApiKey(v.trim()); alert("Сохранено. Повторите действие."); }
-      });
-    }
-  });
+  window.setApiKey = function(k){ localStorage.setItem(KEY, k || ""); window.KASPI_API_KEY = k || ""; console.log("API key set"); };
 })();
 </script>
-
-<!-- Скрыть sqlite-only в режиме Postgres -->
-<script>
-document.addEventListener("DOMContentLoaded", async () => {
-  let isPG = false;
-  try {
-    const j = await (await fetch("/products/db/ping")).json();
-    if (j && typeof j.driver === "string") isPG = (j.driver === "pg");
-    else if (j && j.db_path) isPG = String(j.db_path).startsWith("postgres");
-  } catch (e) {}
-  if (!isPG) return;
-  const hide = (el) => { if (el) el.style.display = "none"; };
-  document.querySelectorAll("[data-sqlite-only]").forEach(hide);
-  // Fallback по тексту
-  document.querySelectorAll("button, a, form, div, section").forEach((el) => {
-    const t = (el.innerText || "").toLowerCase();
-    if (/(backup|бэкап|restore|восстанов)/.test(t)) hide(el);
-  });
-});
-</script>
-
 </body>
 </html>
