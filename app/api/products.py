@@ -10,7 +10,8 @@ import io
 import os
 import shutil
 import sqlite3
-import secrets
+import random
+import string
 
 # ──────────────────────────────────────────────────────────────────────────────
 # optional Excel
@@ -42,6 +43,7 @@ def _resolve_db_path() -> str:
             return target
     except Exception:
         pass
+    # fallback внутрь контейнера
     return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data.sqlite3"))
 
 DB_PATH = _resolve_db_path()
@@ -58,6 +60,7 @@ if _USE_PG:
 
 @contextmanager
 def _db():
+    """Единый контекст соединения: PG через SQLAlchemy, SQLite — через sqlite3."""
     if _USE_PG:
         with _engine.begin() as conn:
             yield conn
@@ -94,8 +97,7 @@ def _require_api_key(req: Request) -> bool:
 # ──────────────────────────────────────────────────────────────────────────────
 def _gen_batch_code() -> str:
     alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-    import random as _r
-    return "".join(_r.choice(alphabet) for _ in range(6))
+    return "".join(random.choice(alphabet) for _ in range(6))
 
 def _table_exists(c, name: str) -> bool:
     if _USE_PG:
@@ -145,11 +147,10 @@ def _maybe_int(v) -> Optional[int]:
             return None
 
 def _norm_sku(s: str) -> str:
-    """нормализуем SKU: трим, убираем все whitespace/невидимые пробелы"""
+    """Нормализуем SKU: трим, убираем все whitespace/невидимые пробелы."""
     if s is None:
         return ""
-    s = "".join(ch for ch in str(s).strip() if not ch.isspace())
-    return s
+    return "".join(ch for ch in str(s).strip() if not ch.isspace())
 
 def _sku_of(row: dict) -> str:
     raw = (
@@ -203,13 +204,9 @@ def _ensure_schema():
             c.execute(_q("CREATE INDEX IF NOT EXISTS idx_batches_date ON batches(date)"))
             if not _has_column(c, "batches", "qty_sold"):
                 c.execute(_q("ALTER TABLE batches ADD COLUMN qty_sold INTEGER DEFAULT 0"))
-
-            # зачистка дублей перед гарантией уникальности (на всякий)
-            dup = c.execute(_q("""
-                SELECT sku, COUNT(*) AS c FROM products GROUP BY sku HAVING COUNT(*)>1
-            """)).all()
+            # зачистка дублей по products.sku (перестраховка)
+            dup = c.execute(_q("SELECT sku, COUNT(*) AS c FROM products GROUP BY sku HAVING COUNT(*)>1")).all()
             if dup:
-                # оставляем первую запись по времени, удаляем остальные
                 c.execute(_q("""
                     DELETE FROM products p USING (
                         SELECT ctid, sku, row_number() OVER (PARTITION BY sku ORDER BY updated_at NULLS LAST) AS rn
@@ -217,7 +214,6 @@ def _ensure_schema():
                     ) t
                     WHERE p.ctid=t.ctid AND t.rn>1
                 """))
-            # уникальность уже обеспечена PK
     else:
         with _db() as c:
             c.executescript("""
@@ -266,13 +262,13 @@ def _ensure_schema():
                 c.execute("ALTER TABLE batches ADD COLUMN qty_sold INTEGER DEFAULT 0")
             if "batch_code" not in cols:
                 c.execute("ALTER TABLE batches ADD COLUMN batch_code TEXT")
-            # сгенерировать коды партиям без кода
-            for r in c.execute("SELECT id FROM batches WHERE batch_code IS NULL OR batch_code=''").fetchall():
+            # коды партиям без кода
+            for r in c.execute("SELECT id FROM batches WHERE batch_code IS NULL OR batch_code=''"):
                 c.execute("UPDATE batches SET batch_code=? WHERE id=?", (_gen_batch_code(), r["id"]))
             # зачистка дублей по products.sku
-            c.executescript("""
+            c.execute("""
                 DELETE FROM products
-                 WHERE rowid NOT IN (SELECT MIN(rowid) FROM products GROUP BY sku);
+                 WHERE rowid NOT IN (SELECT MIN(rowid) FROM products GROUP BY sku)
             """)
 
 def _seed_categories_if_empty():
@@ -335,19 +331,15 @@ def _upsert_products(items: List[Dict[str, Any]], *, price_only: bool = True) ->
                     INSERT INTO products(sku,name,brand,category,price,quantity,active,barcode,updated_at)
                     VALUES(:sku,:name,:brand,:category,:price,:quantity,:active,:barcode,NOW())
                     ON CONFLICT (sku) DO UPDATE SET
-                        name     = CASE WHEN EXCLUDED.name     IS NOT NULL AND EXCLUDED.name     <> '' THEN EXCLUDED.name     ELSE products.name END,
-                        brand    = CASE WHEN EXCLUDED.brand    IS NOT NULL AND EXCLUDED.brand    <> '' THEN EXCLUDED.brand    ELSE products.brand END,
-                        category = CASE WHEN EXCLUDED.category IS NOT NULL AND EXCLUDED.category <> '' THEN EXCLUDED.category ELSE products.category END,
-                        price    = COALESCE(EXCLUDED.price,    products.price),
-                        quantity = CASE
-                                     WHEN :price_only::int=1 THEN products.quantity
-                                     ELSE COALESCE(EXCLUDED.quantity, products.quantity)
-                                   END,
-                        active   = CASE
-                                     WHEN :price_only::int=1 THEN products.active
-                                     ELSE COALESCE(EXCLUDED.active, products.active)
-                                   END,
-                        barcode  = CASE WHEN EXCLUDED.barcode  IS NOT NULL AND EXCLUDED.barcode  <> '' THEN EXCLUDED.barcode  ELSE products.barcode END,
+                        name     = COALESCE(NULLIF(EXCLUDED.name,''), products.name),
+                        brand    = COALESCE(NULLIF(EXCLUDED.brand,''), products.brand),
+                        category = COALESCE(NULLIF(EXCLUDED.category,''), products.category),
+                        price    = COALESCE(EXCLUDED.price, products.price),
+                        quantity = CASE WHEN :price_only::int=1 THEN products.quantity
+                                        ELSE COALESCE(EXCLUDED.quantity, products.quantity) END,
+                        active   = CASE WHEN :price_only::int=1 THEN products.active
+                                        ELSE COALESCE(EXCLUDED.active, products.active) END,
+                        barcode  = COALESCE(NULLIF(EXCLUDED.barcode,''), products.barcode),
                         updated_at = NOW()
                 """), {**params, "price_only": 1 if price_only else 0})
             else:
@@ -405,7 +397,10 @@ def _parse_xml_smart(raw: bytes, *, city_id: str) -> List[Dict[str, Any]]:
         price = None
         for el in off.iter():
             if strip(el.tag) == "cityprice" and (el.get("cityId") or "") == city_id:
-                price = _maybe_float(el.text)
+                try:
+                    price = _maybe_float(el.text)
+                except Exception:
+                    price = None
                 break
         if price is None:
             for el in off.iter():
@@ -413,8 +408,7 @@ def _parse_xml_smart(raw: bytes, *, city_id: str) -> List[Dict[str, Any]]:
                     price = _maybe_float(el.text)
                     break
         if price is None:
-            p = first_text(off, "price")
-            price = _maybe_float(p)
+            price = _maybe_float(first_text(off, "price"))
 
         qty, active = None, None
         for el in off.iter():
@@ -442,7 +436,6 @@ def _parse_excel_smart(raw: bytes) -> List[Dict[str, Any]]:
     ws = wb.active
     headers = [str(c.value or '').strip() for c in ws[1]]
 
-    # лёгкий маппинг заголовков
     def norm(h: str) -> str:
         return "".join(ch for ch in h.lower() if ch.isalnum())
 
@@ -472,7 +465,8 @@ def _parse_excel_smart(raw: bytes) -> List[Dict[str, Any]]:
         item: Dict[str, Any] = {}
         for i,val in enumerate(row):
             k = col2key.get(i)
-            if not k: continue
+            if not k:
+                continue
             if k == "price":
                 item[k] = _maybe_float(val)
             elif k == "qty":
@@ -517,7 +511,7 @@ def _smart_import_bytes(filename: str, content: bytes, *, city_id: str, price_on
     else:
         raise HTTPException(400, "Поддерживаются XML и Excel (.xlsx/.xls).")
 
-    # дедуп по SKU (на всякий случай)
+    # дедуп по SKU
     unique: Dict[str, Dict[str, Any]] = {}
     for r in items:
         sku = _sku_of(r)
@@ -588,7 +582,11 @@ def _recount_qty_sold_from_ledger() -> int:
 # ──────────────────────────────────────────────────────────────────────────────
 # Router
 # ──────────────────────────────────────────────────────────────────────────────
-def get_products_router() -> APIRouter:
+def get_products_router(client: Any | None = None) -> APIRouter:
+    """
+    Опциональный `client` оставлен для совместимости с include_router(get_products_router(client), ...).
+    Параметр не используется внутри.
+    """
     router = APIRouter(tags=["products"])
 
     # Ping
@@ -602,20 +600,30 @@ def get_products_router() -> APIRouter:
         else:
             with _db() as c:
                 ok = c.execute("PRAGMA integrity_check").fetchone()[0]
-            return {"ok": ok == "ok", "driver": "sqlite"}
+            return {"ok": ok == "ok", "driver": "sqlite", "db_path": DB_PATH}
 
     # Список из БД (для таблицы «Мой склад»)
     @router.get("/db/list")
     async def db_list(active_only: int = Query(1), search: str = Query("", alias="q")):
         _ensure_schema()
         _seed_categories_if_empty()
+
+        # 1) категории (комиссии)
         with _db() as c:
-            # категории (комиссии)
             if _USE_PG:
                 cats_rows = c.execute(_q(
                     "SELECT name, base_percent, extra_percent, tax_percent FROM categories ORDER BY name"
                 )).all()
                 cats = {r._mapping["name"]: dict(r._mapping) for r in cats_rows}
+            else:
+                cats_rows = c.execute(
+                    "SELECT name, base_percent, extra_percent, tax_percent FROM categories ORDER BY name COLLATE NOCASE"
+                ).fetchall()
+                cats = {r["name"]: dict(r) for r in cats_rows}
+
+        # 2) продукты
+        with _db() as c:
+            if _USE_PG:
                 sql = "SELECT sku,name,brand,category,price,quantity,active FROM products"
                 conds, params = [], {}
                 if active_only:
@@ -628,49 +636,51 @@ def get_products_router() -> APIRouter:
                 sql += " ORDER BY name"
                 rows = _rows_to_dicts(c.execute(_q(sql), params).all())
             else:
-                cats = {r["name"]: dict(r) for r in _rows_to_dicts(
-                    _db().__enter__().execute("SELECT name,base_percent,extra_percent,tax_percent FROM categories").fetchall()
-                )} if False else {r["name"]: dict(r) for r in _db().__enter__().cursor().execute("SELECT name,base_percent,extra_percent,tax_percent FROM categories").fetchall()}  # noqa
-                with _db() as cc:
-                    sql = "SELECT sku,name,brand,category,price,quantity,active FROM products"
-                    conds, params = [], []
-                    if active_only:
-                        conds.append("active=1")
-                    if search:
-                        conds.append("(sku LIKE ? OR name LIKE ?)")
-                        params += [f"%{search}%", f"%{search}%"]
-                    if conds:
-                        sql += " WHERE " + " AND ".join(conds)
-                    sql += " ORDER BY name COLLATE NOCASE"
-                    rows = [dict(r) for r in cc.execute(sql, params).fetchall()]
+                sql = "SELECT sku,name,brand,category,price,quantity,active FROM products"
+                conds, params = [], []
+                if active_only:
+                    conds.append("active=1")
+                if search:
+                    conds.append("(sku LIKE ? OR name LIKE ?)")
+                    params += [f"%{search}%", f"%{search}%"]
+                if conds:
+                    sql += " WHERE " + " AND ".join(conds)
+                sql += " ORDER BY name COLLATE NOCASE"
+                rows = [dict(r) for r in c.execute(sql, params).fetchall()]
 
-            # мета по партиям
+        # 3) мета по партиям
         with _db() as c:
             if _USE_PG:
                 bc_rows = c.execute(_q("SELECT sku, COUNT(*) AS cnt FROM batches GROUP BY sku")).all()
                 bc = {r._mapping["sku"]: r._mapping["cnt"] for r in bc_rows}
-                last_rows = c.execute(_q(
-                    "SELECT DISTINCT ON (sku) sku, unit_cost, commission_pct FROM batches ORDER BY sku, date DESC, id DESC"
-                )).all()
+
+                # последняя партия per sku
+                last_rows = c.execute(_q("""
+                    SELECT DISTINCT ON (sku) sku, unit_cost, commission_pct
+                      FROM batches
+                     ORDER BY sku, date DESC, id DESC
+                """)).all()
                 last = {r._mapping["sku"]: (r._mapping["unit_cost"], r._mapping["commission_pct"]) for r in last_rows}
+
                 left_rows = c.execute(_q(
                     "SELECT sku, SUM(qty - COALESCE(qty_sold,0)) AS left FROM batches GROUP BY sku"
                 )).all()
                 left_by_sku = {r._mapping["sku"]: int(r._mapping["left"] or 0) for r in left_rows}
             else:
-                with _db() as cc:
-                    bc = {r["sku"]: r["cnt"] for r in cc.execute(
-                        "SELECT sku, COUNT(*) AS cnt FROM batches GROUP BY sku"
-                    )}
-                    last = {}
-                    for r in cc.execute(
-                        "SELECT sku, unit_cost, commission_pct FROM batches ORDER BY sku, date DESC, id DESC"
-                    ):
-                        if r["sku"] not in last:
-                            last[r["sku"]] = (r["unit_cost"], r["commission_pct"])
-                    left_by_sku = {r["sku"]: int(r["left"] or 0) for r in cc.execute(
-                        "SELECT sku, SUM(qty - COALESCE(qty_sold,0)) AS left FROM batches GROUP BY sku"
-                    ).fetchall()}
+                bc = {r["sku"]: r["cnt"] for r in c.execute(
+                    "SELECT sku, COUNT(*) AS cnt FROM batches GROUP BY sku"
+                ).fetchall()}
+
+                last: Dict[str, Tuple[float, Optional[float]]] = {}
+                for r in c.execute(
+                    "SELECT sku, unit_cost, commission_pct FROM batches ORDER BY sku, date DESC, id DESC"
+                ).fetchall():
+                    if r["sku"] not in last:
+                        last[r["sku"]] = (r["unit_cost"], r["commission_pct"])
+
+                left_by_sku = {r["sku"]: int(r["left"] or 0) for r in c.execute(
+                    "SELECT sku, SUM(qty - COALESCE(qty_sold,0)) AS left FROM batches GROUP BY sku"
+                ).fetchall()}
 
         items: List[Dict[str, Any]] = []
         for r in rows:
@@ -771,7 +781,7 @@ def get_products_router() -> APIRouter:
             raise HTTPException(400, f"Не удалось обработать файл: {e}")
         return res
 
-    # Совместимость
+    # Совместимость (фронт вызывает /products/manual-upload)
     @router.post("/manual-upload", dependencies=[Depends(_require_api_key)])
     async def manual_upload(
         file: UploadFile = File(...),
@@ -859,9 +869,8 @@ def get_products_router() -> APIRouter:
             else:
                 parts = [f"{k}=?" for k in sets.keys()]
                 params = list(sets.values()) + [bid, sku]
-                with _db() as cc:
-                    cc.execute(f"UPDATE batches SET {', '.join(parts)} WHERE id=? AND sku=?", params)
-                    cc.execute("UPDATE batches SET qty_sold = MIN(qty_sold, qty) WHERE id=? AND sku=?", (bid, sku))
+                c.execute(f"UPDATE batches SET {', '.join(parts)} WHERE id=? AND sku=?", params)
+                c.execute("UPDATE batches SET qty_sold = MIN(qty_sold, qty) WHERE id=? AND sku=?", (bid, sku))
         return {"ok": True}
 
     @router.delete("/db/price-batches/{sku}/{bid}", dependencies=[Depends(_require_api_key)])
@@ -877,13 +886,12 @@ def get_products_router() -> APIRouter:
                     raise HTTPException(400, "Cannot delete: batch has sales")
                 c.execute(_q("DELETE FROM batches WHERE id=:bid AND sku=:sku"), {"bid": bid, "sku": sku})
             else:
-                with _db() as cc:
-                    r = cc.execute("SELECT COALESCE(qty_sold,0) AS s FROM batches WHERE id=? AND sku=?", (bid, sku)).fetchone()
-                    if not r:
-                        raise HTTPException(404, "Batch not found")
-                    if int(r["s"]) > 0:
-                        raise HTTPException(400, "Cannot delete: batch has sales")
-                    cc.execute("DELETE FROM batches WHERE id=? AND sku=?", (bid, sku))
+                r = c.execute("SELECT COALESCE(qty_sold,0) AS s FROM batches WHERE id=? AND sku=?", (bid, sku)).fetchone()
+                if not r:
+                    raise HTTPException(404, "Batch not found")
+                if int(r["s"]) > 0:
+                    raise HTTPException(400, "Cannot delete: batch has sales")
+                c.execute("DELETE FROM batches WHERE id=? AND sku=?", (bid, sku))
         return {"ok": True}
 
     @router.post("/batches/recount-sold", dependencies=[Depends(_require_api_key)])
@@ -948,11 +956,12 @@ def get_products_router() -> APIRouter:
         fname = os.path.basename(DB_PATH) or "data.sqlite3"
         return FileResponse(DB_PATH, media_type="application/octet-stream", filename=fname)
 
-    @router.post("/db/restore")
+    @router.post("/db/restore", dependencies=[Depends(_require_api_key)])
     async def restore_db(file: UploadFile = File(...)):
         if _USE_PG:
             raise HTTPException(501, "Restore доступен только для локальной SQLite.")
         content = await file.read()
+        # сброс WAL
         try:
             with _db() as c:
                 c.execute("PRAGMA wal_checkpoint(TRUNCATE);")
@@ -964,5 +973,176 @@ def get_products_router() -> APIRouter:
         with _db() as c:
             ok = c.execute("PRAGMA integrity_check").fetchone()[0]
         return {"ok": True, "integrity": ok}
+
+    # ──────────────────────────────────────────────────────────────────────
+    # NEW: Итоговая стоимость остатков
+    # ──────────────────────────────────────────────────────────────────────
+    class StockValueItem(BaseModel):
+        sku: str
+        left: int
+        avg_cost: float
+        value_cost: float
+        price: Optional[float] = None
+        value_retail: Optional[float] = None
+
+    class StockValueResp(BaseModel):
+        total_left: int
+        total_cost: float
+        total_retail: Optional[float] = None
+        items: Optional[List[StockValueItem]] = None
+
+    @router.get("/db/stock-value", response_model=StockValueResp)
+    async def get_stock_value(
+        details: int = Query(0, ge=0, le=1),
+        with_retail: int = Query(0, ge=0, le=1),
+    ):
+        _ensure_schema()
+        # 1) агрегаты по складу
+        with _db() as c:
+            if _USE_PG:
+                row = c.execute(_q("""
+                    WITH lefts AS (
+                        SELECT
+                            sku AS code,
+                            SUM(qty - COALESCE(qty_sold, 0)) AS left_qty,
+                            SUM((qty - COALESCE(qty_sold, 0)) * unit_cost) AS cost_sum
+                        FROM batches
+                        GROUP BY sku
+                    ),
+                    filtered AS (
+                        SELECT code, left_qty, cost_sum FROM lefts WHERE left_qty > 0
+                    )
+                    SELECT COALESCE(SUM(left_qty),0) AS total_left,
+                           COALESCE(SUM(cost_sum),0) AS total_cost
+                      FROM filtered;
+                """)).first()
+                total_left = int(row._mapping["total_left"] or 0)
+                total_cost = float(row._mapping["total_cost"] or 0.0)
+            else:
+                r = c.execute("""
+                WITH lefts AS (
+                    SELECT
+                        sku AS code,
+                        SUM(qty - COALESCE(qty_sold, 0)) AS left_qty,
+                        SUM((qty - COALESCE(qty_sold, 0)) * unit_cost) AS cost_sum
+                    FROM batches
+                    GROUP BY sku
+                ),
+                filtered AS (
+                    SELECT code, left_qty, cost_sum FROM lefts WHERE left_qty > 0
+                )
+                SELECT COALESCE(SUM(left_qty),0) AS total_left,
+                       COALESCE(SUM(cost_sum),0) AS total_cost
+                  FROM filtered
+                """).fetchone()
+                total_left = int(r["total_left"] or 0)
+                total_cost = float(r["total_cost"] or 0.0)
+
+        result: Dict[str, Any] = {"total_left": total_left, "total_cost": total_cost}
+
+        # 2) ритейл по желанию
+        if with_retail:
+            with _db() as c:
+                if _USE_PG:
+                    r2 = c.execute(_q("""
+                        WITH lefts AS (
+                            SELECT
+                                sku AS code,
+                                SUM(qty - COALESCE(qty_sold, 0)) AS left_qty
+                            FROM batches
+                            GROUP BY sku
+                        ),
+                        filtered AS (
+                            SELECT code, left_qty FROM lefts WHERE left_qty > 0
+                        )
+                        SELECT COALESCE(SUM(f.left_qty * COALESCE(p.price,0)),0) AS total_retail
+                          FROM filtered f
+                          JOIN products p ON p.sku = f.code;
+                    """)).first()
+                    result["total_retail"] = float(r2._mapping["total_retail"] or 0.0)
+                else:
+                    r2 = c.execute("""
+                        WITH lefts AS (
+                            SELECT
+                                sku AS code,
+                                SUM(qty - COALESCE(qty_sold, 0)) AS left_qty
+                            FROM batches
+                            GROUP BY sku
+                        ),
+                        filtered AS (
+                            SELECT code, left_qty FROM lefts WHERE left_qty > 0
+                        )
+                        SELECT COALESCE(SUM(f.left_qty * COALESCE(p.price,0)),0) AS total_retail
+                          FROM filtered f
+                          JOIN products p ON p.sku = f.code
+                    """).fetchone()
+                    result["total_retail"] = float(r2["total_retail"] or 0.0)
+
+        # 3) детали по SKU (по запросу)
+        if details:
+            with _db() as c:
+                if _USE_PG:
+                    rows = _rows_to_dicts(c.execute(_q("""
+                        WITH lefts AS (
+                            SELECT
+                                sku AS code,
+                                SUM(qty - COALESCE(qty_sold, 0)) AS left_qty,
+                                SUM((qty - COALESCE(qty_sold, 0)) * unit_cost) AS cost_sum
+                            FROM batches
+                            GROUP BY sku
+                        ),
+                        filtered AS (
+                            SELECT code, left_qty, cost_sum FROM lefts WHERE left_qty > 0
+                        )
+                        SELECT
+                            f.code AS sku,
+                            CAST(f.left_qty AS INTEGER) AS left,
+                            CASE WHEN NULLIF(f.left_qty, 0) IS NULL THEN 0
+                                 ELSE f.cost_sum / NULLIF(f.left_qty, 0) END AS avg_cost,
+                            f.cost_sum AS value_cost,
+                            p.price AS price,
+                            (f.left_qty * COALESCE(p.price, 0)) AS value_retail
+                        FROM filtered f
+                        LEFT JOIN products p ON p.sku = f.code
+                        ORDER BY value_cost DESC
+                    """)).all())
+                else:
+                    rows = [dict(r) for r in c.execute("""
+                        WITH lefts AS (
+                            SELECT
+                                sku AS code,
+                                SUM(qty - COALESCE(qty_sold, 0)) AS left_qty,
+                                SUM((qty - COALESCE(qty_sold, 0)) * unit_cost) AS cost_sum
+                            FROM batches
+                            GROUP BY sku
+                        ),
+                        filtered AS (
+                            SELECT code, left_qty, cost_sum FROM lefts WHERE left_qty > 0
+                        )
+                        SELECT
+                            f.code AS sku,
+                            CAST(f.left_qty AS INTEGER) AS left,
+                            CASE WHEN f.left_qty IS NULL OR f.left_qty=0 THEN 0.0
+                                 ELSE (f.cost_sum * 1.0) / f.left_qty END AS avg_cost,
+                            f.cost_sum AS value_cost,
+                            p.price AS price,
+                            (f.left_qty * COALESCE(p.price, 0)) AS value_retail
+                        FROM filtered f
+                        LEFT JOIN products p ON p.sku = f.code
+                        ORDER BY value_cost DESC
+                    """).fetchall()]
+            items = []
+            for r in rows:
+                items.append({
+                    "sku": r["sku"],
+                    "left": int(r["left"] or 0),
+                    "avg_cost": float(r["avg_cost"] or 0.0),
+                    "value_cost": float(r["value_cost"] or 0.0),
+                    "price": float(r["price"] or 0.0) if r.get("price") is not None else None,
+                    "value_retail": float(r["value_retail"] or 0.0) if r.get("value_retail") is not None else None,
+                })
+            result["items"] = items
+
+        return result  # pydantic приведёт к StockValueResp
 
     return router
