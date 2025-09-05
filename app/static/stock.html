@@ -37,10 +37,18 @@
     .switch input:checked::after{left:21px}
     .content{padding:20px 16px}
     .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-    .btn{background:var(--pri);color:#fff;border:0;border-radius:10px;padding:8px 12px;cursor:pointer}
+    .btn{
+      background:var(--pri);color:#fff;border:0;border-radius:10px;padding:8px 12px;cursor:pointer;
+      transition:transform .12s ease, box-shadow .12s ease, opacity .12s ease, background-color .2s ease;
+      will-change:transform
+    }
     .btn.secondary{background:var(--pri-weak);color:var(--fg)}
-    .btn-link{background:transparent;border:0;color:var(--pri);cursor:pointer;padding:0}
-    .btn:disabled{opacity:.6;cursor:not-allowed}
+    .btn:hover{transform:translateY(-1px);box-shadow:0 6px 16px rgba(31,122,238,.18)}
+    .btn:active{transform:translateY(0);box-shadow:inset 0 1px 3px rgba(0,0,0,.25)}
+    .btn.small{padding:6px 10px;font-size:12px;border-radius:8px}
+    .btn-link{background:transparent;border:0;color:var(--pri);cursor:pointer;padding:0;transition:opacity .12s ease}
+    .btn-link:hover{opacity:.85;text-decoration:underline;text-underline-offset:3px}
+    .btn:disabled{opacity:.6;cursor:not-allowed;box-shadow:none;transform:none}
     input[type="text"],input[type="number"],input[type="date"],select{
       height:34px;padding:6px 8px;border:1px solid var(--line);border-radius:10px;background:transparent;color:var(--fg);outline:none
     }
@@ -89,13 +97,20 @@
     <main class="content">
       <h1>Мой склад</h1>
 
-      <!-- СИГНАЛЫ: только нужные -->
+      <!-- СИГНАЛЫ -->
       <div id="signals" class="statbar">
         <div class="stat" id="sig-last"><span class="badge">Последнее списание:</span><span class="muted">—</span></div>
         <div class="stat" id="sig-cogs-today"><span class="badge">Себестоимость сегодня:</span><span class="muted">—</span></div>
+        <div class="stat" id="sig-stock">
+          <span class="badge">Стоимость остатков:</span>
+          <span id="stockRetail" class="kpi muted">—</span>
+          <span class="muted">·</span>
+          <span id="stockCost" class="muted">себестоим.: —</span>
+          <button class="btn-link small" id="btnCalcCost" title="Рассчитать по сред. себестоимости (через партии)">пересчитать</button>
+        </div>
       </div>
 
-      <!-- ПАНЕЛЬ FIFO (ключи скрыты, но используются автоматически) -->
+      <!-- ПАНЕЛЬ FIFO -->
       <div class="panel" id="fifo-panel">
         <div class="row" style="align-items:end">
           <div>
@@ -123,7 +138,7 @@
         <div id="fifo-log" class="log"></div>
       </div>
 
-      <!-- УПРАВЛЕНИЕ ТОВАРАМИ (коротко) -->
+      <!-- УПРАВЛЕНИЕ ТОВАРАМИ -->
       <div class="toolbar">
         <input id="findSku" type="text" placeholder="SKU" style="width:160px">
         <button class="btn secondary" id="btnFindSku">Открыть SKU</button>
@@ -299,13 +314,64 @@ function renderProducts(items){
   sortTable(sortState.idx, /ШТ|Цена|Остаток|Кол-во|Маржа/i.test(th?.textContent||'')?'num':'str');
 }
 
+/* ─────────────── СТОИМОСТЬ СКЛАДА ─────────────── */
+function recomputeStockTotals(items){
+  let totalRetail=0, totalQty=0;
+  for (const it of (items||[])){
+    const left = Number(it.left_total ?? it.qty ?? 0) || 0;
+    const price = Number(it.price || 0) || 0;
+    totalQty += left;
+    totalRetail += left * price;
+  }
+  qs('#stockRetail').textContent = `${fmt(Math.round(totalRetail))} KZT`;
+  qs('#sig-stock').classList.add(totalQty>0 ? 'ok':'err');
+}
+
+async function computeCostBasedStockValue(items){
+  const span = qs('#stockCost');
+  const btn = qs('#btnCalcCost');
+  if (!items?.length){ span.textContent = 'себестоим.: —'; return; }
+  const leftList = items
+    .filter(it => Number(it.left_total ?? it.qty ?? 0) > 0)
+    .map(it => ({ sku: String(it.code||it.id||''), left: Number(it.left_total ?? it.qty ?? 0) }));
+  if (!leftList.length){ span.textContent = 'себестоим.: 0 KZT'; return; }
+
+  btn.disabled = true; const totalN = leftList.length;
+  let done=0, total=0;
+
+  // мягкий лимит параллелизма
+  const limit = 10;
+  let idx = 0;
+  async function worker(){
+    while (idx < leftList.length){
+      const me = leftList[idx++]; // взять задачу
+      try{
+        const data = await fetchJSON('/products/db/price-batches/'+encodeURIComponent(me.sku));
+        const avg = Number(data?.avg_cost || 0);
+        total += avg * me.left;
+      }catch(_){ /* пропуск проблемных SKU */ }
+      done++;
+      if (done % 10 === 0 || done === totalN){
+        span.textContent = `себестоим.: ${fmt(Math.round(total))} KZT  (${fmt(done)}/${fmt(totalN)})`;
+        await sleep(10);
+      }
+    }
+  }
+  const pool = Array.from({length:Math.min(limit,totalN)}, worker);
+  await Promise.all(pool);
+  span.textContent = `себестоим.: ${fmt(Math.round(total))} KZT`;
+  btn.disabled = false;
+}
+
 /* ─────────────── загрузка БД / импорт ─────────────── */
 async function loadDB(){
   try{
     const p = new URLSearchParams({ active_only:'0', page:'1', page_size:'20000' });
     const data = await fetchJSON('/products/db/list?'+p.toString());
     setNote('Загружено строк из БД: ' + (data.items?.length||0), true);
-    renderProducts(data.items||[]);
+    window._productsCache = data.items||[];
+    renderProducts(window._productsCache);
+    recomputeStockTotals(window._productsCache);
   }catch(e){ setNote('Сеть: ' + e.message); }
 }
 async function importFile(file){
@@ -313,7 +379,9 @@ async function importFile(file){
   try{
     const data = await fetchJSON('/products/manual-upload', {method:'POST', body:fd});
     setNote(`Файл загружен: ${file.name}. Позиции: ${data.count||0}. Вставлено: ${data.inserted||0}, обновлено: ${data.updated||0}`, true);
-    renderProducts(data.items||[]);
+    window._productsCache = data.items||[];
+    renderProducts(window._productsCache);
+    recomputeStockTotals(window._productsCache);
   }catch(e){ setNote('Импорт не удался: ' + e.message); }
 }
 
@@ -440,7 +508,7 @@ async function getBridgeLinesForPeriod(FROM, TO){
 }
 async function syncBridgeLines(lines){
   let synced=0, codes=[];
-  const key = window.KASPI_API_KEY || null; // «зашитый» ключ
+  const key = window.KASPI_API_KEY || null;
   if (!key) { logFIFO('⚠ Нет KASPI_API_KEY — синхронизация bridge пропущена.'); return { synced:0, codes:[] }; }
   for (let i=0; i<lines.length; i+=200){
     const chunk = lines.slice(i, i+200);
@@ -643,6 +711,7 @@ async function openDetail(row){
     catch(e){ setNote('Пересчёт не удался: ' + e.message); }
   };
 
+  // ИСТОРИЯ ПО SKU: новее — выше
   async function loadHistory(days){
     const end = isoDay(new Date());
     const start = addDays(end, -(Number(days)-1));
@@ -660,7 +729,9 @@ async function openDetail(row){
     if (!codes.length){ qs('#histSummary', mount).textContent = 'нет списаний'; return; }
     const ledger = await getLedgerByCodes(codes, 50, 10000);
     const startTs = dayStartTs(start), endTs = dayEndTs(end);
-    const list = ledger.filter(x => x.sku===sku && x.date_utc_ms>=startTs && x.date_utc_ms<=endTs).sort((a,b)=>a.date_utc_ms-b.date_utc_ms);
+    const list = ledger
+      .filter(x => x.sku===sku && x.date_utc_ms>=startTs && x.date_utc_ms<=endTs)
+      .sort((a,b)=>b.date_utc_ms - a.date_utc_ms); // новее первыми
     let sumQty=0,sumRev=0,sumComm=0,sumCost=0,sumProfit=0;
     list.forEach(r=>{
       sumQty += (r.qty||0); sumRev += (r.total_price||0); sumComm+= (r.commission_amount||0); sumCost+= (r.cost_amount||0); sumProfit += (r.profit_amount||0);
@@ -740,7 +811,8 @@ async function showGlobalHistory(){
           <td>${fmt(r.cost_amount)} KZT</td>
           <td>${fmt(r.profit_amount)} KZT</td>
           <td>${r.batch_id ? ('#'+r.batch_id) : ''}</td>`;
-        tbody.appendChild(tr);
+        // Новее сверху: вставляем в начало
+        tbody.insertBefore(tr, tbody.firstChild);
       }
       done += Math.min(chunk, orderCodes.length - i); paintProgress(); await sleep(30);
     }
@@ -820,12 +892,15 @@ document.addEventListener('DOMContentLoaded', async ()=>{
 
   qs('#fifo-run').onclick = runFIFO;
 
+  // расчёт стоимости остатков по себестоимости
+  qs('#btnCalcCost').onclick = ()=> computeCostBasedStockValue(window._productsCache||[]);
+
   await loadDB();
   await refreshSignals();
 });
 </script>
 
-<!-- Инжектор X-API-Key к /products/* и /profit/* — ключ «зашит» в localStorage -->
+<!-- Инжектор X-API-Key -->
 <script>
 (()=> {
   const KEY = "KASPI_API_KEY";
