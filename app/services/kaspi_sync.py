@@ -314,7 +314,12 @@ def kaspi_sync_run(*, mode: str = "merge", price_only: bool = True,
       - возвращаем разбиение «в продаже» vs «сняты».
     """
     _ensure_schema()
+    from app.api import products as api
 
+    db = api._db
+    list_from_db = api.list_from_db
+    bulk_upsert_products = api.bulk_upsert_products
+    get_kaspi_orders = api.get_kaspi_orders
     client = KaspiClient()
     offers = client.load_offers()
 
