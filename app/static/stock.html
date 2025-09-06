@@ -450,7 +450,7 @@ function tableToRows(){
 function recomputeStockTotals(items){
   let totalRetail=0, totalQty=0;
   for (const it of (items||[])){
-    const left = Number(it.left_total ?? it.qty ?? 0) || 0;
+    const left = Number(it.qty ?? it.left_total ?? 0) || 0;
     const price = Number(it.price || 0) || 0;
     totalQty += left; totalRetail += left * price;
   }
