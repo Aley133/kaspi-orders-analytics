@@ -6,11 +6,12 @@ from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Body, Dep
 from fastapi.responses import Response, FileResponse
 from pydantic import BaseModel
 from contextlib import contextmanager
+from dataclasses import asdict, is_dataclass
 import io
 import os
 import shutil
 import sqlite3
-from app.services.kaspi_sync import kaspi_sync_run
+
 # ──────────────────────────────────────────────────────────────────────────────
 # optional Excel
 # ──────────────────────────────────────────────────────────────────────────────
@@ -512,7 +513,7 @@ def _parse_excel_smart(raw: bytes) -> List[Dict[str, Any]]:
         item: Dict[str, Any] = {}
         for i,val in enumerate(row):
             k = col2key.get(i)
-            if not k: 
+            if not k:
                 continue
             if k == "price":
                 item[k] = _maybe_float(val)
@@ -680,6 +681,44 @@ def _recount_qty_sold_from_ledger() -> int:
     return updated
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Local DB listings helper (fix active filter)
+# ──────────────────────────────────────────────────────────────────────────────
+def list_from_db(*, active: Optional[bool], limit: int = 1000, offset: int = 0, search: str = "") -> List[Dict[str, Any]]:
+    _ensure_schema()
+    with _db() as c:
+        if _USE_PG:
+            sql = "SELECT sku, name, brand, category, price, quantity, active FROM products"
+            conds, params = [], {}
+            if active is True:
+                conds.append("active=1")
+            elif active is False:
+                conds.append("active=0")
+            if search:
+                conds.append("(sku ILIKE :q OR name ILIKE :q)")
+                params["q"] = f"%{search}%"
+            if conds:
+                sql += " WHERE " + " AND ".join(conds)
+            sql += " ORDER BY name LIMIT :lim OFFSET :off"
+            params.update({"lim": limit, "off": offset})
+            rows = _rows_to_dicts(c.execute(_q(sql), params).all())
+        else:
+            sql = "SELECT sku, name, brand, category, price, quantity, active FROM products"
+            conds, params = [], []
+            if active is True:
+                conds.append("active=1")
+            elif active is False:
+                conds.append("active=0")
+            if search:
+                conds.append("(sku LIKE ? OR name LIKE ?)")
+                params += [f"%{search}%", f"%{search}%"]
+            if conds:
+                sql += " WHERE " + " AND ".join(conds)
+            sql += " ORDER BY name COLLATE NOCASE LIMIT ? OFFSET ?"
+            params += [limit, offset]
+            rows = [dict(r) for r in c.execute(sql, params).fetchall()]
+    return rows
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Router
 # ──────────────────────────────────────────────────────────────────────────────
 def get_products_router(*_, **__) -> APIRouter:
@@ -806,7 +845,7 @@ def get_products_router(*_, **__) -> APIRouter:
             })
         return {"count": len(items), "items": items}
 
-    # Расчёт стоимости остатков по партиям (для виджета «Стоимость остатков» в UI)
+    # Стоимость остатков (для виджета)
     @router.get("/db/stock-value")
     async def stock_value(with_retail: int = Query(0), details: int = Query(0)):
         _ensure_schema()
@@ -890,13 +929,45 @@ def get_products_router(*_, **__) -> APIRouter:
                 avgc = None if not rr or not rr["tq"] else float(rr["tc"])/float(rr["tq"])
         return {"product": prod, "batches": rows, "avg_cost": round(avgc,2) if avgc is not None else None}
 
-    @router.post("/sync/kaspi/run", dependencies=[Depends(_require_api_key)])
-    async def run_kaspi_sync(mode: str = Query("merge", regex="^(merge|replace)$"),
-                             price_only: int = Query(1), hard_delete_missing: int = Query(0)):
-        res = kaspi_sync_run(mode=mode, price_only=bool(price_only),
-                             hard_delete_missing=bool(hard_delete_missing))
-        return res.__dict__
+    # ── Синхронизация Kaspi (ленивый импорт, без циклов)
+    @router.post("/kaspi/sync", dependencies=[Depends(_require_api_key)])
+    async def kaspi_sync_endpoint(
+        mode: str = Query("merge", regex="^(merge|replace)$"),
+        price_only: bool = Query(True),
+        hard_delete_missing: bool = Query(False),
+    ):
+        from app.services.kaspi_sync import kaspi_sync_run  # lazy import
+        res = kaspi_sync_run(
+            mode=mode,
+            price_only=price_only,
+            hard_delete_missing=hard_delete_missing,
+        )
+        if is_dataclass(res):
+            return asdict(res)
+        if isinstance(res, dict):
+            return res
+        return getattr(res, "__dict__", {"ok": True})
 
+    # Совместимость со старым путём
+    @router.post("/sync/kaspi/run", dependencies=[Depends(_require_api_key)])
+    async def run_kaspi_sync(
+        mode: str = Query("merge", regex="^(merge|replace)$"),
+        price_only: int = Query(1),
+        hard_delete_missing: int = Query(0),
+    ):
+        from app.services.kaspi_sync import kaspi_sync_run  # lazy import
+        res = kaspi_sync_run(
+            mode=mode,
+            price_only=bool(price_only),
+            hard_delete_missing=bool(hard_delete_missing),
+        )
+        if is_dataclass(res):
+            return asdict(res)
+        if isinstance(res, dict):
+            return res
+        return getattr(res, "__dict__", {"ok": True})
+
+    # Списки (в продаже / снятые)
     @router.get("/db/list/in-sale")
     async def list_in_sale(q: str = Query(""), limit: int = 1000, offset: int = 0):
         return {"items": list_from_db(active=True, limit=limit, offset=offset, search=q)}
@@ -904,8 +975,6 @@ def get_products_router(*_, **__) -> APIRouter:
     @router.get("/db/list/removed")
     async def list_removed(q: str = Query(""), limit: int = 1000, offset: int = 0):
         return {"items": list_from_db(active=False, limit=limit, offset=offset, search=q)}
-
-      
 
     # Массовый upsert (кнопка «Сохранить таблицу в БД»)
     @router.post("/db/bulk-upsert", dependencies=[Depends(_require_api_key)])
@@ -1114,7 +1183,7 @@ def get_products_router(*_, **__) -> APIRouter:
                         (sku, e.date, int(e.qty), float(e.unit_cost), e.note,
                          float(e.commission_pct) if e.commission_pct is not None else None, code)
                     )
-                    _commit(c)
+            _commit(c)
         return {"ok": True}
 
     @router.put("/db/price-batches/{sku}/{bid}", dependencies=[Depends(_require_api_key)])
@@ -1141,10 +1210,9 @@ def get_products_router(*_, **__) -> APIRouter:
             else:
                 parts = [f"{k}=?" for k in sets.keys()]
                 params = list(sets.values()) + [bid, sku]
-                with _db() as cc:
-                    cc.execute(f"UPDATE batches SET {', '.join(parts)} WHERE id=? AND sku=?", params)
-                    cc.execute("UPDATE batches SET qty_sold = MIN(qty_sold, qty) WHERE id=? AND sku=?", (bid, sku))
-                    _commit(cc)
+                c.execute(f"UPDATE batches SET {', '.join(parts)} WHERE id=? AND sku=?", params)
+                c.execute("UPDATE batches SET qty_sold = MIN(qty_sold, qty) WHERE id=? AND sku=?", (bid, sku))
+                _commit(c)
         return {"ok": True}
 
     @router.delete("/db/price-batches/{sku}/{bid}", dependencies=[Depends(_require_api_key)])
