@@ -2,41 +2,117 @@
 from __future__ import annotations
 
 import os
-import math
-import time
-from typing import Any, Dict, Iterable, List, Optional, Tuple
 from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
 
-# HTTP клиент: requests по-умолчанию (можно заменить на httpx)
+# HTTP клиент: requests по-умолчанию
 try:
     import requests
 except Exception:  # pragma: no cover
-    requests = None  # поднимем ошибку при использовании REST
-
-# Используем готовые хелперы/схему из вашего products.py
-# ВАЖНО: здесь НЕТ циклического импорта (products не импортирует этот модуль).
-from app.api.products import (
-    _db, _USE_PG, _q, _ensure_schema, _upsert_products,
-    _maybe_float, _maybe_int, _norm_sku, _parse_xml_smart,
-)
+    requests = None  # если модуль недоступен, REST/фид работать не будет
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Конфиг через ENV
 # ──────────────────────────────────────────────────────────────────────────────
 KASPI_CITY_ID          = os.getenv("KASPI_CITY_ID", "196220100")
-KASPI_PRICE_XML_URL    = os.getenv("KASPI_PRICE_XML_URL")  # если задан, возьмём фид (быстро и надёжно)
-KASPI_API_BASE         = os.getenv("KASPI_API_BASE")       # если нужен REST, указать базу, напр.: "https://kaspi.kz/shop/api"
+KASPI_PRICE_XML_URL    = os.getenv("KASPI_PRICE_XML_URL")  # если задан — берём XML фид
+KASPI_API_BASE         = os.getenv("KASPI_API_BASE")       # база REST API (если используем REST)
 KASPI_MERCHANT_ID      = os.getenv("KASPI_MERCHANT_ID")
-KASPI_TOKEN            = os.getenv("KASPI_TOKEN")          # Bearer / X-Auth-Token — зависит от вашего шлюза
-# Кастомные пути REST (оставлены гибкими — у разных интеграций похоже, но не идентично)
-KASPI_ENDPOINT_OFFERS  = os.getenv("KASPI_ENDPOINT_OFFERS",  "/v2/offers")   # список витрины (пагинация)
-KASPI_ENDPOINT_PRICES  = os.getenv("KASPI_ENDPOINT_PRICES",  "/v2/prices")   # цены по sku
-KASPI_ENDPOINT_STOCKS  = os.getenv("KASPI_ENDPOINT_STOCKS",  "/v2/stocks")   # остатки по sku
+KASPI_TOKEN            = os.getenv("KASPI_TOKEN")          # Bearer/X-Auth-Token (всё равно)
+KASPI_ENDPOINT_OFFERS  = os.getenv("KASPI_ENDPOINT_OFFERS",  "/v2/offers")
+KASPI_ENDPOINT_PRICES  = os.getenv("KASPI_ENDPOINT_PRICES",  "/v2/prices")
+KASPI_ENDPOINT_STOCKS  = os.getenv("KASPI_ENDPOINT_STOCKS",  "/v2/stocks")
 
-# Авто-ценообразование (простое правило)
-AUTO_REPRICE            = bool(int(os.getenv("KASPI_AUTO_REPRICE", "0")))
-MIN_MARGIN_PCT          = float(os.getenv("KASPI_MIN_MARGIN_PCT", "10"))      # не падать ниже этой маржи
-UNDERCUT_DELTA_PCT      = float(os.getenv("KASPI_REPRICE_UNDERCUT", "0"))     # % на сколько «подрезать» конкурентную цену (0 = выкл)
+# Авто-ценообразование
+AUTO_REPRICE       = bool(int(os.getenv("KASPI_AUTO_REPRICE", "0")))
+MIN_MARGIN_PCT     = float(os.getenv("KASPI_MIN_MARGIN_PCT", "10"))
+UNDERCUT_DELTA_PCT = float(os.getenv("KASPI_REPRICE_UNDERCUT", "0"))
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Утилиты (локальные, чтобы не импортировать products)
+# ──────────────────────────────────────────────────────────────────────────────
+def _maybe_float(v: Any) -> Optional[float]:
+    try:
+        if v is None or v == "":
+            return None
+        return float(str(v).replace(" ", "").replace(",", "."))
+    except Exception:
+        return None
+
+def _maybe_int(v: Any) -> Optional[int]:
+    try:
+        if v is None or v == "":
+            return None
+        return int(float(str(v).replace(" ", "").replace(",", ".")))
+    except Exception:
+        return None
+
+def _norm_sku(v: Any) -> Optional[str]:
+    if v is None:
+        return None
+    s = str(v).strip()
+    return s or None
+
+# XML → список словарей с полями, близкими к REST
+def _parse_xml_smart(xml_bytes: bytes, city_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """
+    Универсальный парсер витринного XML-фида Kaspi.
+    Ищет <offer> и вынимает основные поля: vendorCode/sku, name, brand, price, quantity/stock, barcode.
+    """
+    import xml.etree.ElementTree as ET
+
+    def strip(tag: str) -> str:
+        return tag.split("}", 1)[-1] if "}" in tag else tag
+
+    root = ET.fromstring(xml_bytes)
+    items: List[Dict[str, Any]] = []
+
+    for off in [el for el in root.iter() if strip(el.tag) == "offer"]:
+        # атрибуты оффера
+        sku = _norm_sku(off.get("sku") or off.get("id") or off.get("code") or off.get("vendorCode"))
+        available = off.get("available")
+        active: Optional[bool] = None
+        if isinstance(available, str):
+            s = available.strip().lower()
+            if s in ("true", "1", "yes", "да", "+"):
+                active = True
+            elif s in ("false", "0", "no", "нет", "-"):
+                active = False
+
+        row: Dict[str, Any] = {
+            "sku": sku,
+            "name": None,
+            "brand": None,
+            "category": None,
+            "price": None,
+            "qty": None,
+            "active": active,
+            "barcode": None,
+        }
+
+        # дочерние элементы
+        for ch in off:
+            tag = strip(ch.tag).lower()
+            val = (ch.text or "").strip()
+            if not val:
+                continue
+
+            if tag in ("name", "title", "model"):
+                row["name"] = val
+            elif tag in ("vendor", "brand"):
+                row["brand"] = val
+            elif tag in ("barcode", "ean"):
+                row["barcode"] = val
+            elif tag in ("price", "saleprice", "currentprice"):
+                row["price"] = _maybe_float(val)
+            elif tag in ("quantity", "qty", "stock", "stockcount"):
+                row["qty"] = _maybe_int(val)
+            elif tag in ("category", "categoryname"):
+                row["category"] = val
+
+        items.append(row)
+
+    return items
 
 # ──────────────────────────────────────────────────────────────────────────────
 # DTO
@@ -51,49 +127,42 @@ class Offer:
     qty: Optional[int]
     active: Optional[bool]
     barcode: Optional[str] = None
-    # Доп. инфо, если есть в REST:
-    competitor_min_price: Optional[float] = None
+    competitor_min_price: Optional[float] = None  # если REST возвращает минимум рынка
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Клиент Каспи
+# Клиент Kaspi (XML/REST)
 # ──────────────────────────────────────────────────────────────────────────────
 class KaspiClient:
-    """
-    Универсальный клиент: умеет забирать товары либо из XML-фида, либо из REST.
-    Выбор стратегии — автоматически по ENV (фид в приоритете: он стабильнее).
-    """
-    def __init__(self):
+    def __init__(self) -> None:
         self.session = None
         if KASPI_API_BASE and requests:
             self.session = requests.Session()
             self.session.headers.update(self._auth_headers())
 
     def _auth_headers(self) -> Dict[str, str]:
-        # У разных инсталляций шапка бывает Bearer / X-Auth-Token — оставляем оба варианта.
-        hdrs = {"User-Agent": "kaspi-sync/1.0"}
+        headers = {"User-Agent": "kaspi-sync/1.0"}
         if KASPI_TOKEN:
-            hdrs["Authorization"]  = f"Bearer {KASPI_TOKEN}"
-            hdrs["X-Auth-Token"]   = KASPI_TOKEN
+            headers["Authorization"] = f"Bearer {KASPI_TOKEN}"
+            headers["X-Auth-Token"] = KASPI_TOKEN
         if KASPI_MERCHANT_ID:
-            hdrs["X-Merchant-Id"]  = KASPI_MERCHANT_ID
-        return hdrs
+            headers["X-Merchant-Id"] = KASPI_MERCHANT_ID
+        return headers
 
-    # ───────────── ФИД: XML (быстро и просто) ─────────────
+    # XML-фид
     def fetch_via_xml_feed(self) -> List[Offer]:
         if not KASPI_PRICE_XML_URL:
             raise RuntimeError("KASPI_PRICE_XML_URL не задан")
         if not requests:
-            raise RuntimeError("Модуль requests недоступен для HTTP-загрузки XML")
+            raise RuntimeError("requests недоступен для HTTP-загрузки XML")
         r = requests.get(KASPI_PRICE_XML_URL, timeout=60)
         r.raise_for_status()
         items = _parse_xml_smart(r.content, city_id=KASPI_CITY_ID)
         return [self._norm_item(it) for it in items]
 
-    # ───────────── REST: офферы/цены/остатки ─────────────
+    # REST
     def fetch_via_rest(self) -> List[Offer]:
         if not (KASPI_API_BASE and self.session):
             raise RuntimeError("REST-параметры не заданы (KASPI_API_BASE/KASPI_TOKEN)")
-        # 1) тянем офферы постранично
         offers: Dict[str, Offer] = {}
         page, size = 0, 100
         while True:
@@ -109,9 +178,9 @@ class KaspiClient:
                 it = self._norm_item(self._map_offer_json(raw))
                 if it.sku:
                     offers[it.sku] = it
-            total_pages = (data.get("totalPages") or data.get("pages") or 1)
+            total_pages = int(data.get("totalPages") or data.get("pages") or 1)
             page += 1
-            if page >= int(total_pages):
+            if page >= total_pages:
                 break
 
         if not offers:
@@ -119,7 +188,7 @@ class KaspiClient:
 
         skus = list(offers.keys())
 
-        # 2) подтягиваем цены (если есть отдельная ручка)
+        # цены
         try:
             price_map = self._fetch_prices_map(skus)
             for sku, p in price_map.items():
@@ -128,7 +197,7 @@ class KaspiClient:
         except Exception:
             pass
 
-        # 3) подтягиваем остатки/активность (если есть отдельная ручка)
+        # остатки/активность
         try:
             stock_map = self._fetch_stocks_map(skus)
             for sku, st in stock_map.items():
@@ -148,16 +217,14 @@ class KaspiClient:
         if not KASPI_ENDPOINT_PRICES:
             return {}
         out: Dict[str, Optional[float]] = {}
-        # батчами по 200
         for i in range(0, len(skus), 200):
-            slice_ = skus[i:i+200]
+            payload = {"skus": skus[i:i+200]}
             url = f"{KASPI_API_BASE}{KASPI_ENDPOINT_PRICES}"
-            payload = {"skus": slice_}
             r = self.session.post(url, json=payload, timeout=60)
             r.raise_for_status()
             data = r.json() if r.content else {}
-            # ожидаем формат: [{"sku":"xxx","price":123.45}, ...]
-            for row in data if isinstance(data, list) else data.get("items", []):
+            rows = data if isinstance(data, list) else data.get("items", [])
+            for row in rows:
                 sku = _norm_sku(row.get("sku"))
                 price = _maybe_float(row.get("price"))
                 if sku:
@@ -169,32 +236,25 @@ class KaspiClient:
             return {}
         out: Dict[str, Tuple[Optional[int], Optional[bool]]] = {}
         for i in range(0, len(skus), 200):
-            slice_ = skus[i:i+200]
+            payload = {"skus": skus[i:i+200]}
             url = f"{KASPI_API_BASE}{KASPI_ENDPOINT_STOCKS}"
-            payload = {"skus": slice_}
             r = self.session.post(url, json=payload, timeout=60)
             r.raise_for_status()
             data = r.json() if r.content else {}
-            # ожидаем формат: [{"sku":"xxx","stock":5,"active":true}, ...]
-            for row in data if isinstance(data, list) else data.get("items", []):
+            rows = data if isinstance(data, list) else data.get("items", [])
+            for row in rows:
                 sku = _norm_sku(row.get("sku"))
                 qty = _maybe_int(row.get("stock"))
-                active = None
                 if "active" in row:
                     active = bool(row.get("active"))
-                elif qty is not None:
-                    # эвристика: >0 => потенциально в продаже
-                    active = True if int(qty) > 0 else None
+                else:
+                    active = True if (qty is not None and qty > 0) else None
                 if sku:
                     out[sku] = (qty, active)
         return out
 
-    # ───────────── нормализация ─────────────
     @staticmethod
     def _map_offer_json(raw: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        У разных интеграций поля могут называться по-разному — сминаем в единое.
-        """
         return {
             "sku": raw.get("sku") or raw.get("code") or raw.get("vendorCode") or raw.get("id"),
             "name": raw.get("name") or raw.get("title") or raw.get("model"),
@@ -204,7 +264,6 @@ class KaspiClient:
             "qty": raw.get("qty") or raw.get("stock") or raw.get("stockCount"),
             "active": raw.get("active") if "active" in raw else raw.get("published"),
             "barcode": raw.get("barcode") or raw.get("ean"),
-            # иногда REST возвращает ещё минимальную цену по рынку:
             "competitor_min_price": raw.get("minPrice") or raw.get("minimalPrice"),
         }
 
@@ -241,19 +300,19 @@ class KaspiClient:
         return self.fetch_via_rest()
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Repricing (очень аккуратное, в одну строчку логики)
+# Repricing: аккуратно, с ограничением минимальной маржи
 # ──────────────────────────────────────────────────────────────────────────────
 def _apply_repricing_if_needed(offers: List[Offer]) -> None:
-    """
-    Простое правило:
-      - если есть competitor_min_price, попытаемся быть ниже на UNDERCUT_DELTA_PCT,
-      - но не опускаться ниже минимальной маржи MIN_MARGIN_PCT относительно нашей себестоимости (по последней партии).
-    Если себестоимость неизвестна — цену не трогаем.
-    """
     if not AUTO_REPRICE or UNDERCUT_DELTA_PCT <= 0:
         return
 
-    # Подтянем последнюю себестоимость из batches
+    # ленивый импорт инфраструктуры БД из products — БЕЗ циклического импорта
+    from app.api import products as api
+    _db = api._db
+    _USE_PG = getattr(api, "_USE_PG", False)
+    _q = getattr(api, "_q", lambda s: s)
+
+    # подтянем последнюю себестоимость по sku из batches
     last_cost: Dict[str, float] = {}
     with _db() as c:
         if _USE_PG:
@@ -281,17 +340,16 @@ def _apply_repricing_if_needed(offers: List[Offer]) -> None:
             continue
 
         target = off.competitor_min_price * (1.0 - UNDERCUT_DELTA_PCT/100.0)
-        # контроль маржи
         min_allowed = cost * (1.0 + MIN_MARGIN_PCT/100.0)
         if target < min_allowed:
             target = min_allowed
 
-        # если target сильно отличается — обновим локально (в Каспи выкладка цены остаётся на вашей ответственности)
+        # если изменение >1% — обновим локально
         if off.price is None or abs(off.price - target) / max(off.price or 1, 1) > 0.01:
             off.price = round(target, 2)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Синхронизация в БД «Мой склад»
+# Синхронизация в локальную БД
 # ──────────────────────────────────────────────────────────────────────────────
 @dataclass
 class SyncResult:
@@ -310,30 +368,27 @@ def kaspi_sync_run(
     hard_delete_missing: bool = False
 ) -> SyncResult:
     """
-    Основной сценарий:
-      - тянем ассортимент из Kaspi,
-      - опционально применяем авто-цену,
-      - апсертим в локальную БД,
-      - при mode='replace' деактивируем/удаляем то, чего нет в Kaspi,
-      - возвращаем разбиение «в продаже» vs «сняты».
+    - тянем ассортимент из Kaspi (XML или REST),
+    - опционально репрайсим,
+    - апсертим в БД,
+    - при mode='replace' снимаем/удаляем то, чего нет в Kaspi.
     """
-    _ensure_schema()
-
-    # Ленивый импорт, чтобы не ловить цикл при загрузке модулей
+    # ленивый импорт, чтобы не образовать цикл
     from app.api import products as api
-
-    db = api._db  # фабрика соединений/контекст-менеджер
-    bulk_upsert_products = api.bulk_upsert_products
+    _ensure_schema = api._ensure_schema
+    _db = api._db
     _USE_PG = getattr(api, "_USE_PG", False)
-    _q = getattr(api, "_q", lambda s: s)  # no-op для sqlite
+    _q = getattr(api, "_q", lambda s: s)
+    bulk_upsert_products = api.bulk_upsert_products
+
+    _ensure_schema()
 
     client = KaspiClient()
     offers = client.load_offers()
 
-    # авто-репрайсинг если включён
     _apply_repricing_if_needed(offers)
 
-    # приводим офферы к формату БД (используем 'code', не 'sku')
+    # готовим payload (используем 'code' как ключ)
     payload: List[Dict[str, Any]] = []
     keep_codes: List[str] = []
     in_sale = 0
@@ -359,7 +414,7 @@ def kaspi_sync_run(
             "barcode": o.barcode,
         })
 
-    # Апсерт (ожидаем dict с inserted/updated; поправь, если у тебя кортеж)
+    # апсерт
     upsert_res = bulk_upsert_products(payload, price_only=price_only)
     inserted = upsert_res.get("inserted", 0) if isinstance(upsert_res, dict) else (upsert_res[0] if upsert_res else 0)
     updated  = upsert_res.get("updated", 0)  if isinstance(upsert_res, dict) else (upsert_res[1] if upsert_res else 0)
@@ -367,11 +422,9 @@ def kaspi_sync_run(
     deactivated = 0
     deleted = 0
 
-    # В режиме replace деактивируем/удаляем всё, чего нет в Kaspi
     if mode.lower() == "replace" and keep_codes:
-        with db() as c:
+        with _db() as c:
             if hard_delete_missing:
-                # DELETE
                 if _USE_PG:
                     placeholders = ", ".join([f":c{i}" for i in range(len(keep_codes))])
                     sql = _q(f"DELETE FROM products WHERE code NOT IN ({placeholders})")
@@ -382,7 +435,6 @@ def kaspi_sync_run(
                     r = c.execute(f"DELETE FROM products WHERE code NOT IN ({placeholders})", keep_codes)
                 deleted = getattr(r, "rowcount", 0) or 0
             else:
-                # UPDATE active=0
                 if _USE_PG:
                     placeholders = ", ".join([f":c{i}" for i in range(len(keep_codes))])
                     sql = _q(f"UPDATE products SET active=0 WHERE code NOT IN ({placeholders}) AND active<>0")
@@ -405,26 +457,41 @@ def kaspi_sync_run(
         in_sale=in_sale,
         removed=removed,
     )
+
 # ──────────────────────────────────────────────────────────────────────────────
-# Утилиты для чтения «списков» из локальной БД (для двух вкладок в UI)
+# Утилита «список из БД» (для вкладок в UI)
 # ──────────────────────────────────────────────────────────────────────────────
-def list_from_db(*, active: Optional[bool], limit: int = 1000, offset: int = 0,
-                 search: str = "") -> List[Dict[str, Any]]:
+def list_from_db(
+    *,
+    active: Optional[bool],
+    limit: int = 1000,
+    offset: int = 0,
+    search: str = ""
+) -> List[Dict[str, Any]]:
     """
-    Вернуть товары из локальной БД, отфильтрованные по активности.
-    Это удобный источник для вкладок «В продаже» / «Сняты с продажи».
+    Вернёт товары из локальной БД c полями:
+      code, name, brand, category, price, qty, active, barcode
     """
+    from app.api import products as api
+    _ensure_schema = api._ensure_schema
+    _db = api._db
+    _USE_PG = getattr(api, "_USE_PG", False)
+    _q = getattr(api, "_q", lambda s: s)
+
     _ensure_schema()
     with _db() as c:
         if _USE_PG:
-            sql = "SELECT sku,name,brand,category,price,quantity,active FROM products"
+            sql = """
+              SELECT code, name, brand, category, price, qty, active, barcode
+                FROM products
+            """
             conds, params = [], {}
             if active is True:
                 conds.append("active=1")
             elif active is False:
                 conds.append("COALESCE(active,0)=0")
             if search:
-                conds.append("(sku ILIKE :q OR name ILIKE :q)")
+                conds.append("(code ILIKE :q OR name ILIKE :q)")
                 params["q"] = f"%{search}%"
             if conds:
                 sql += " WHERE " + " AND ".join(conds)
@@ -433,14 +500,17 @@ def list_from_db(*, active: Optional[bool], limit: int = 1000, offset: int = 0,
             rows = c.execute(_q(sql), params).all()
             return [dict(r._mapping) for r in rows]
         else:
-            sql = "SELECT sku,name,brand,category,price,quantity,active FROM products"
+            sql = """
+              SELECT code, name, brand, category, price, qty, active, barcode
+                FROM products
+            """
             conds, params = [], []
             if active is True:
                 conds.append("active=1")
             elif active is False:
                 conds.append("COALESCE(active,0)=0")
             if search:
-                conds.append("(sku LIKE ? OR name LIKE ?)")
+                conds.append("(code LIKE ? OR name LIKE ?)")
                 params += [f"%{search}%", f"%{search}%"]
             if conds:
                 sql += " WHERE " + " AND ".join(conds)
@@ -448,4 +518,3 @@ def list_from_db(*, active: Optional[bool], limit: int = 1000, offset: int = 0,
             params += [limit, offset]
             rows = [dict(r) for r in c.execute(sql, params).fetchall()]
             return rows
-
