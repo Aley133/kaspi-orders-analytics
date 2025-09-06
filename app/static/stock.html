@@ -101,6 +101,19 @@
     /* details row in products table */
     tr.detail{background:var(--card)}
     .block{padding:12px}
+
+    /* Tabs */
+    .tabs{display:flex;gap:6px;align-items:center}
+    .tab{border:1px solid var(--line);background:var(--card);color:var(--fg);border-radius:999px;padding:6px 10px;cursor:pointer}
+    .tab.active{background:var(--pri);color:#fff;border-color:transparent}
+    .tab .badge{font-weight:700;margin-left:4px}
+
+    /* Low-stock + recommendations */
+    td.lowcell{color:var(--danger);font-weight:700}
+    #recoPanel{display:none}
+    .reco{display:flex;flex-wrap:wrap;gap:10px}
+    .reco .card{border:1px solid var(--line);background:var(--card);padding:10px;border-radius:12px;width:280px}
+    .reco .card .badge{font-weight:700}
   </style>
 </head>
 <body data-theme="light">
@@ -120,7 +133,7 @@
     <main class="content">
       <h1 style="margin:0 0 8px">Мой склад</h1>
 
-      <!-- История (вверху, сворачивается) -->
+      <!-- История (сворачивается) -->
       <details class="hist" id="history">
         <summary>
           <span class="caret"></span>
@@ -190,7 +203,16 @@
         </div>
       </div>
 
-      <!-- ПАНЕЛЬ FIFO (оставил без изменений по логике) -->
+      <!-- Рекомендации к закупке -->
+      <div class="panel" id="recoPanel">
+        <div class="row" style="justify-content:space-between">
+          <div><b>Рекомендации к закупке</b> <span class="muted">(по скорости продаж, последние 14 дней)</span></div>
+          <div class="row"><span class="muted">Период:</span> <div class="pill" id="recoRange">последние 14 дней</div></div>
+        </div>
+        <div id="recoList" class="reco"></div>
+      </div>
+
+      <!-- ПАНЕЛЬ FIFO -->
       <div class="panel" id="fifo-panel">
         <div class="row" style="align-items:end">
           <div>
@@ -217,10 +239,12 @@
         <div id="fifo-log" class="panel" style="max-height:260px;overflow:auto"></div>
       </div>
 
-      <!-- УПРАВЛЕНИЕ ТОВАРАМИ -->
+      <!-- Управление товарами: вкладки и действия -->
       <div class="row" style="margin-top:6px">
-        <input id="findSku" type="text" placeholder="SKU" style="width:160px">
-        <button class="btn secondary" id="btnFindSku">Открыть SKU</button>
+        <div class="tabs" id="tabs">
+          <button class="tab active" id="tabIn"><span>В продаже</span><span class="badge" id="cntIn">0</span></button>
+          <button class="tab" id="tabOut"><span>Сняты/Нет</span><span class="badge" id="cntOut">0</span></button>
+        </div>
         <div class="grow"></div>
         <span class="pill" id="rowsBadge" title="Строк в таблице">0 позиций</span>
       </div>
@@ -230,7 +254,14 @@
         <input type="file" id="fileInput" accept=".xml,.xlsx,.xls" style="display:none">
         <button class="btn" id="btnSaveDb">Сохранить таблицу в БД</button>
         <button class="btn secondary" id="btnLoadDb">Загрузить из БД</button>
-        <label class="row" style="gap:6px;margin-left:auto">
+
+        <div class="grow"></div>
+
+        <label class="row" style="gap:6px">
+          <span class="muted">Порог «мало»</span>
+          <input id="lowThreshold" type="number" min="1" step="1" value="3" style="width:70px">
+        </label>
+        <label class="row" style="gap:6px">
           <input id="mergeMode" type="checkbox" checked>
           <span class="muted">Merge-режим (не удалять старые)</span>
         </label>
@@ -238,6 +269,11 @@
           <input id="priceOnly" type="checkbox" checked>
           <span class="muted">Только цены (qty/активность не менять)</span>
         </label>
+      </div>
+
+      <div class="row" style="margin-top:6px">
+        <input id="findSku" type="text" placeholder="SKU" style="width:160px">
+        <button class="btn secondary" id="btnFindSku">Открыть SKU</button>
       </div>
 
       <div id="note" class="note"></div>
@@ -291,7 +327,7 @@ function setNote(msg, ok=false){ const el = qs('#note'); el.textContent = msg; e
   });
 })();
 
-/* fetch with API key */
+/* API key injector via fetch wrapper */
 async function fetchJSON(url, opts, _retry){
   const r = await fetch(url, opts||{});
   if(r.status===401 || r.status===403){
@@ -307,9 +343,16 @@ async function fetchJSON(url, opts, _retry){
   return ct.includes('application/json') ? r.json() : r.text();
 }
 
-/* ───────── таблица товаров ───────── */
+/* ───────── глобальное состояние ───────── */
 let sortState = { idx: 1, dir: 1 };
+let _view = 'in';              // in | out
+let _recoDays = 14;
+const LOW_KEY='LOW_THRESHOLD';
+const getLow = () => Number(localStorage.getItem(LOW_KEY) || '3');
+const setLow = (v) => { const n = Math.max(1, Number(v)||3); localStorage.setItem(LOW_KEY, String(n)); };
+
 function updateRowsBadge(){ const n = qsa('#tbl tbody tr').length; const b = qs('#rowsBadge'); if(b) b.textContent = nf.format(n) + ' позиций'; }
+
 function sortTable(idx, type='str'){
   const tb = qs('#tbl tbody'); if(!tb) return;
   const rows = qsa('tr', tb);
@@ -332,11 +375,34 @@ function attachSorting(){
     });
   });
 }
+
+/* фильтрация для вкладок */
+function filterByView(items){
+  const list = items||[];
+  if(_view==='in'){
+    return list.filter(it=>{
+      const left = Number(it.left_total ?? it.qty ?? 0) || 0;
+      const active = !!it.active;
+      return left>0 && active;  // реально есть и активен
+    });
+  }else{
+    return list.filter(it=>{
+      const left = Number(it.left_total ?? it.qty ?? 0) || 0;
+      const active = !!it.active;
+      return left<=0 || !active; // нет остатков или снят
+    });
+  }
+}
+
 function renderProducts(items){
   const tb = qs('#tbl tbody'); tb.innerHTML = '';
-  (items||[]).forEach(it=>{
+  const low = getLow();
+  const viewItems = filterByView(items);
+  viewItems.forEach(it=>{
     const tr = document.createElement('tr');
     const sku = it.code || it.id || '';
+    const left = Number(it.left_total ?? it.qty ?? 0) || 0;
+    const lowClass = (left > 0 && left <= low) ? 'lowcell' : '';
     tr.dataset.sku = sku;
     tr.innerHTML = `
       <td>${escapeHtml(sku)}</td>
@@ -346,7 +412,7 @@ function renderProducts(items){
       <td>${fmt(it.qty||0)}</td>
       <td>${fmt(it.price||0)}</td>
       <td><span class="dot ${((it.qty||0)>0 || it.active===true) ? 'on':''}" title="${it.active?'активен':'нет'}"></span></td>
-      <td>${fmt(it.left_total ?? 0)}</td>
+      <td class="${lowClass}">${fmt(left)}</td>
       <td>${fmt(it.batch_count||0)}</td>
       <td>${it.last_margin!=null ? fmt(it.last_margin) : '—'}</td>
       <td class="col-right">
@@ -360,6 +426,8 @@ function renderProducts(items){
   const th = qs('#tbl thead th:nth-child('+(sortState.idx+1)+')');
   sortTable(sortState.idx, /ШТ|Цена|Остаток|Кол-во|Маржа/i.test(th?.textContent||'')?'num':'str');
 }
+
+/* сохранение таблицы обратно */
 function tableToRows(){
   return qsa('#tbl tbody tr').map(tr=>{
     const t = tr.children;
@@ -388,7 +456,7 @@ async function computeStockValueFromApi(){
   const btn = qs('#btnCalcCost');
   btn.disabled = true; spanCost.textContent = 'себестоим.: считаю…';
   try{
-    const data = await fetchJSON('/products/db/stock-value?with_retail=1&details=0'); // опционально
+    const data = await fetchJSON('/products/db/stock-value?with_retail=1&details=0');
     const totalCost = Math.round(Number(data.total_cost || 0));
     const totalRetail = Math.round(Number(data.total_retail || 0));
     spanCost.textContent = `себестоим.: ${fmt(totalCost)} KZT`;
@@ -406,6 +474,13 @@ async function loadDB(){
     const data = await fetchJSON('/products/db/list?'+p.toString());
     setNote('Загружено строк из БД: ' + (data.items?.length||0), true);
     window._productsCache = data.items||[];
+
+    // counters для вкладок
+    const inCount  = filterByView(window._productsCache.filter(x=>true && (x.active))).length;
+    const outCount = filterByView(window._productsCache.filter(x=>true && (!x.active || (Number(x.left_total ?? x.qty ?? 0)||0)<=0))).length;
+    qs('#cntIn').textContent = fmt(inCount);
+    qs('#cntOut').textContent = fmt(outCount);
+
     renderProducts(window._productsCache);
     recomputeStockTotals(window._productsCache);
   }catch(e){ setNote('Сеть: ' + e.message); }
@@ -413,24 +488,16 @@ async function loadDB(){
 async function importFile(file){
   const fd = new FormData();
   fd.append('file', file);
-
-  const priceOnly = qs('#priceOnly')?.checked ? 1 : 0; // читать чекбокс
+  const priceOnly = qs('#priceOnly')?.checked ? 1 : 0;
   try{
     const url = `/products/manual-upload?price_only=${priceOnly}`;
     const data = await fetchJSON(url, { method:'POST', body: fd });
-
-    // показываем результат и сразу перезагружаем таблицу из БД
-    setNote(
-      `Файл загружен: ${file.name}. Вставлено: ${fmt(data.inserted||0)}, обновлено: ${fmt(data.updated||0)}. Обновляю таблицу…`,
-      true
-    );
-    await loadDB();           // <-- всегда берём актуальные данные из БД
-  }catch(e){
-    setNote('Импорт не удался: ' + e.message);
-  }
+    setNote(`Файл загружен: ${file.name}. Вставлено: ${fmt(data.inserted||0)}, обновлено: ${fmt(data.updated||0)}. Обновляю таблицу…`, true);
+    await loadDB();
+  }catch(e){ setNote('Импорт не удался: ' + e.message); }
 }
 
-/* ───────── утилиты дат ───────── */
+/* ───────── даты ───────── */
 function isoDay(d){ return d.toISOString().slice(0,10); }
 function dayStartTs(dateStr){ return new Date(dateStr+'T00:00:00.000Z').getTime(); }
 function dayEndTs(dateStr){   return new Date(dateStr+'T23:59:59.999Z').getTime(); }
@@ -466,11 +533,10 @@ async function getLedgerByCodes(orderCodes, chunk=50, perLimit=10000, onProgress
   return res;
 }
 
-/* ───────── история (верхний блок) ───────── */
+/* ───────── история ───────── */
 function setHistRangeLabel(){
   const f = qs('#histFrom').value, t=qs('#histTo').value;
-  const lbl = f && t ? `${f} — ${t}` : '—';
-  qs('#histRangeLabel').textContent = lbl;
+  qs('#histRangeLabel').textContent = (f && t) ? `${f} — ${t}` : '—';
 }
 function paintHistTotals(rows){
   const st = {rows:0, orders:new Set(), skus:new Set(), qty:0, revenue:0, cost:0, profit:0};
@@ -496,9 +562,7 @@ async function loadHistoryRange(){
     const orderCodes = await getOrderCodes(FROM, TO);
     if(!orderCodes.length){ paintHistTotals([]); return; }
     const startTs = dayStartTs(FROM), endTs = dayEndTs(TO);
-    const rowsAll = await getLedgerByCodes(orderCodes, 50, 10000, (done,total)=>{
-      progress.style.width = Math.round(done/total*100)+'%';
-    });
+    const rowsAll = await getLedgerByCodes(orderCodes, 50, 10000, (done,total)=>{ progress.style.width = Math.round(done/total*100)+'%'; });
     const list = rowsAll.filter(x => x.date_utc_ms>=startTs && x.date_utc_ms<=endTs)
                         .sort((a,b)=>b.date_utc_ms - a.date_utc_ms);
     paintHistTotals(list);
@@ -522,7 +586,7 @@ async function loadHistoryRange(){
   }catch(e){ setNote('История: ' + e.message); }
 }
 
-/* ───────── FIFO / bridge (как было) ───────── */
+/* ───────── FIFO / bridge ───────── */
 function logFIFO(msg, obj){
   const el = qs("#fifo-log"); const time = new Date().toLocaleTimeString();
   el.innerHTML += `<div>[${time}] ${escapeHtml(msg)}</div>`;
@@ -638,7 +702,6 @@ async function runFIFO(){
     if (gaps.length===0) logFIFO('✅ Готово: дыры отсутствуют, полное списание выполнено.');
     else                 logFIFO('⚠ Есть незакрытые дыры:', gaps);
 
-    // обновим верхнюю историю и сигналы
     await loadHistoryRange();
     await refreshSignals();
   }catch(e){
@@ -686,6 +749,67 @@ async function refreshSignals(){
   }catch{
     const el = qs('#sig-last'); el.classList.add('err'); el.innerHTML = `<span class="badge">Последнее списание:</span><span class="muted">ошибка</span>`;
   }
+}
+
+/* ───────── рекомендации к закупке ───────── */
+function renderRecs(items){
+  const box = qs('#recoPanel'); const list = qs('#recoList');
+  if(!box || !list) return;
+  if(!items || !items.length){ box.style.display='none'; list.innerHTML=''; return; }
+  box.style.display='block';
+  list.innerHTML = items.map(it => `
+    <div class="card">
+      <div style="font-weight:600">${escapeHtml(it.name)}</div>
+      <div class="muted" style="font-size:12px">${escapeHtml(it.sku)}</div>
+      <div class="row" style="gap:8px;margin-top:6px">
+        <span class="chip"><span class="badge">продаж за ${_recoDays}д:</span> ${fmt(it.sold)}</span>
+        <span class="chip"><span class="badge">в день:</span> ${fmt(it.daily.toFixed(2))}</span>
+        <span class="chip"><span class="badge">остаток:</span> ${fmt(it.left)}</span>
+        <span class="chip"><span class="badge">реком. докупить:</span> ${fmt(it.suggested)}</span>
+      </div>
+      <div class="row" style="gap:8px;margin-top:6px">
+        <button class="btn small btnOpen" data-sku="${escapeHtml(it.sku)}">Открыть</button>
+      </div>
+    </div>
+  `).join('');
+  list.querySelectorAll('.btnOpen').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      const row = qsa('#tbl tbody tr').find(tr => (tr.dataset.sku||tr.cells[0].textContent.trim()) === btn.dataset.sku);
+      if(row){ row.scrollIntoView({behavior:'smooth', block:'center'}); openDetail(row); }
+    });
+  });
+}
+
+async function recomputeRecommendations(){
+  try{
+    const to = isoDay(new Date());
+    const from = addDays(to, -(_recoDays-1));
+    const orderCodes = await getOrderCodes(from, to);
+    const rows = orderCodes.length ? await getLedgerByCodes(orderCodes) : [];
+
+    const salesBySku = new Map();
+    const nameBySku  = new Map();
+    for (const r of rows){
+      const sku = String(r.sku||'').trim(); if(!sku) continue;
+      salesBySku.set(sku, (salesBySku.get(sku)||0) + (Number(r.qty)||0));
+      if (r.title && !nameBySku.has(sku)) nameBySku.set(sku, r.title);
+    }
+
+    const stockBySku = new Map((window._productsCache||[]).map(it => [String(it.code), Number(it.left_total ?? it.qty ?? 0)]));
+    const recs = [];
+    const days = _recoDays;
+    for (const [sku, sold] of salesBySku.entries()){
+      const daily = sold / days;
+      const left  = stockBySku.get(sku) || 0;
+      if (sold >= 5 && left <= Math.max(2, Math.ceil(daily * 7))){
+        const name = nameBySku.get(sku) || (window._productsCache.find(x=>x.code===sku)?.name) || sku;
+        const suggested = Math.max(0, Math.ceil(daily * 14 - left));
+        recs.push({ sku, name, left, sold, daily, suggested });
+      }
+    }
+    recs.sort((a,b)=> b.daily - a.daily);
+    renderRecs(recs.slice(0, 12));
+  }catch(e){ /* тихо */ }
 }
 
 /* ───────── SKU details (партии / история по SKU) ───────── */
@@ -795,6 +919,14 @@ document.addEventListener('DOMContentLoaded', async ()=>{
 
   setDefaultDates(); attachSorting();
 
+  // вкладки
+  qs('#tabIn').onclick = ()=>{ _view='in'; qs('#tabIn').classList.add('active'); qs('#tabOut').classList.remove('active'); renderProducts(window._productsCache||[]); };
+  qs('#tabOut').onclick= ()=>{ _view='out';qs('#tabOut').classList.add('active'); qs('#tabIn').classList.remove('active'); renderProducts(window._productsCache||[]); };
+
+  // низкий остаток
+  qs('#lowThreshold').value = getLow();
+  qs('#lowThreshold').addEventListener('change', e => { setLow(e.target.value); renderProducts(window._productsCache||[]); });
+
   qs('#btnLoadDb').onclick  = loadDB;
   qs('#fileInput').addEventListener('change', async (e)=>{ const f = e.target.files?.[0]; if(!f) return; await importFile(f); e.target.value = ''; });
   qs('#btnFindSku').onclick = ()=>{
@@ -838,9 +970,9 @@ document.addEventListener('DOMContentLoaded', async ()=>{
     }catch(e){ setNote('Сохранение в БД не удалось: ' + e.message); }
   };
 
-  // история (верх)
-  qs('#btnHistLoad').onclick = loadHistoryRange;
-  qs('#btnHistRefresh').onclick = loadHistoryRange;
+  // история
+  qs('#btnHistLoad').onclick = async ()=>{ await loadHistoryRange(); await recomputeRecommendations(); };
+  qs('#btnHistRefresh').onclick = async ()=>{ await loadHistoryRange(); await recomputeRecommendations(); };
 
   // FIFO и сигналы
   qs('#fifo-run').onclick = runFIFO;
@@ -848,11 +980,12 @@ document.addEventListener('DOMContentLoaded', async ()=>{
 
   await loadDB();
   await refreshSignals();
-  await loadHistoryRange(); // загрузим историю сразу для текущего периода
+  await loadHistoryRange();
+  await recomputeRecommendations();
 });
 </script>
 
-<!-- Инжектор X-API-Key (сохраняет ключ в localStorage и добавляет в заголовки и query) -->
+<!-- X-API-Key инжектор -->
 <script>
 (()=> {
   const KEY = "KASPI_API_KEY";
