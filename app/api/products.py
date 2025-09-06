@@ -436,7 +436,7 @@ def _parse_xml_smart(raw: bytes, *, city_id: str) -> List[Dict[str, Any]]:
         return ""
 
     rows: Dict[str, Dict[str, Any]] = {}
-    for off in [el for el in root.iter() if strip(el.tag) == "offer"]:
+    for off in [el for el in root.iter() if strip(el.tag) == "offer"]]:
         code = _norm_sku(off.get("sku") or off.get("shop-sku") or off.get("code") or off.get("id") or "")
         if not code:
             continue
@@ -805,6 +805,57 @@ def get_products_router(*_, **__) -> APIRouter:
                 "left_total": int(left_by_sku.get(sku, 0)),
             })
         return {"count": len(items), "items": items}
+
+    # Расчёт стоимости остатков по партиям (для виджета «Стоимость остатков» в UI)
+    @router.get("/db/stock-value")
+    async def stock_value(with_retail: int = Query(0), details: int = Query(0)):
+        _ensure_schema()
+        total_cost = 0.0
+        total_retail = 0.0
+        per_sku: Dict[str, Dict[str, Any]] = {}
+
+        with _db() as c:
+            # left * unit_cost
+            if _USE_PG:
+                rows = c.execute(_q("""
+                    SELECT b.sku, SUM(b.qty - COALESCE(b.qty_sold,0)) AS left_qty,
+                           SUM( (b.qty - COALESCE(b.qty_sold,0)) * b.unit_cost ) AS cost
+                      FROM batches b
+                  GROUP BY b.sku
+                """)).all()
+                left_map = {r._mapping["sku"]: (float(r._mapping["cost"] or 0.0), int(r._mapping["left_qty"] or 0)) for r in rows}
+                if with_retail:
+                    pr = c.execute(_q("SELECT sku, price FROM products")).all()
+                    price_map = {r._mapping["sku"]: float(r._mapping["price"] or 0.0) for r in pr}
+                else:
+                    price_map = {}
+            else:
+                rows = c.execute("""
+                    SELECT sku, SUM(qty - COALESCE(qty_sold,0)) AS left_qty,
+                           SUM( (qty - COALESCE(qty_sold,0)) * unit_cost ) AS cost
+                      FROM batches
+                  GROUP BY sku
+                """).fetchall()
+                left_map = {r["sku"]: (float(r["cost"] or 0.0), int(r["left_qty"] or 0)) for r in rows}
+                if with_retail:
+                    pr = c.execute("SELECT sku, price FROM products").fetchall()
+                    price_map = {r["sku"]: float(r["price"] or 0.0) for r in pr}
+                else:
+                    price_map = {}
+
+            for sku, (cost, left_qty) in left_map.items():
+                total_cost += cost
+                retail = float(price_map.get(sku, 0.0)) * left_qty if with_retail else 0.0
+                total_retail += retail
+                if details:
+                    per_sku[sku] = {"left_qty": left_qty, "cost": round(cost,2), "retail": round(retail,2)}
+
+        out = {"total_cost": round(total_cost,2)}
+        if with_retail:
+            out["total_retail"] = round(total_retail,2)
+        if details:
+            out["items"] = per_sku
+        return out
 
     # Точная карточка товара
     @router.get("/db/sku/{sku}")
