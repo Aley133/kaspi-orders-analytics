@@ -303,43 +303,53 @@ class SyncResult:
     in_sale: int
     removed: int
 
-def kaspi_sync_run(*, mode: str = "merge", price_only: bool = True,
-                   hard_delete_missing: bool = False) -> SyncResult:
+def kaspi_sync_run(
+    *,
+    mode: str = "merge",
+    price_only: bool = True,
+    hard_delete_missing: bool = False
+) -> SyncResult:
     """
     Основной сценарий:
-      - тянем ассортимент из Каспи (XML или REST),
+      - тянем ассортимент из Kaspi,
       - опционально применяем авто-цену,
       - апсертим в локальную БД,
-      - при mode='replace' деактивируем/удаляем то, чего нет в Каспи,
+      - при mode='replace' деактивируем/удаляем то, чего нет в Kaspi,
       - возвращаем разбиение «в продаже» vs «сняты».
     """
     _ensure_schema()
+
+    # Ленивый импорт, чтобы не ловить цикл при загрузке модулей
     from app.api import products as api
 
-    db = api._db
-    list_from_db = api.list_from_db
+    db = api._db  # фабрика соединений/контекст-менеджер
     bulk_upsert_products = api.bulk_upsert_products
-    get_kaspi_orders = api.get_kaspi_orders
+    _USE_PG = getattr(api, "_USE_PG", False)
+    _q = getattr(api, "_q", lambda s: s)  # no-op для sqlite
+
     client = KaspiClient()
     offers = client.load_offers()
 
-    # auto pricing (опционально)
+    # авто-репрайсинг если включён
     _apply_repricing_if_needed(offers)
 
-    # Преобразуем в формат апсерта products.py
+    # приводим офферы к формату БД (используем 'code', не 'sku')
     payload: List[Dict[str, Any]] = []
-    keep_skus: List[str] = []
-    in_sale = removed = 0
+    keep_codes: List[str] = []
+    in_sale = 0
+    removed = 0
+
     for o in offers:
-        if not o.sku:
+        code = o.sku or getattr(o, "code", None)
+        if not code:
             continue
-        keep_skus.append(o.sku)
+        keep_codes.append(code)
         if o.active is True:
             in_sale += 1
         elif o.active is False:
             removed += 1
         payload.append({
-            "sku": o.sku,
+            "code": code,
             "name": o.name,
             "brand": o.brand,
             "category": o.category,
@@ -349,44 +359,52 @@ def kaspi_sync_run(*, mode: str = "merge", price_only: bool = True,
             "barcode": o.barcode,
         })
 
-    # Апсерт
-    inserted, updated = _upsert_products(payload, price_only=price_only)
+    # Апсерт (ожидаем dict с inserted/updated; поправь, если у тебя кортеж)
+    upsert_res = bulk_upsert_products(payload, price_only=price_only)
+    inserted = upsert_res.get("inserted", 0) if isinstance(upsert_res, dict) else (upsert_res[0] if upsert_res else 0)
+    updated  = upsert_res.get("updated", 0)  if isinstance(upsert_res, dict) else (upsert_res[1] if upsert_res else 0)
 
-    # Деактивация/удаление отсутствующих — только в режиме replace
-    deactivated = deleted = 0
-    if mode.lower() == "replace" and keep_skus:
-        # локально выполняем UPDATE/DELETE (без импорта приватных функций, чтобы не плодить зависимостей)
-        with _db() as c:
+    deactivated = 0
+    deleted = 0
+
+    # В режиме replace деактивируем/удаляем всё, чего нет в Kaspi
+    if mode.lower() == "replace" and keep_codes:
+        with db() as c:
             if hard_delete_missing:
+                # DELETE
                 if _USE_PG:
-                    placeholders = ", ".join([f":s{i}" for i in range(len(keep_skus))])
-                    sql = _q(f"DELETE FROM products WHERE sku NOT IN ({placeholders})")
-                    params = {f"s{i}": s for i, s in enumerate(keep_skus)}
+                    placeholders = ", ".join([f":c{i}" for i in range(len(keep_codes))])
+                    sql = _q(f"DELETE FROM products WHERE code NOT IN ({placeholders})")
+                    params = {f"c{i}": v for i, v in enumerate(keep_codes)}
                     r = c.execute(sql, params)
-                    deleted = r.rowcount or 0
                 else:
-                    placeholders = ", ".join(["?"] * len(keep_skus))
-                    r = c.execute(f"DELETE FROM products WHERE sku NOT IN ({placeholders})", keep_skus)
-                    deleted = r.rowcount or 0
+                    placeholders = ", ".join(["?"] * len(keep_codes))
+                    r = c.execute(f"DELETE FROM products WHERE code NOT IN ({placeholders})", keep_codes)
+                deleted = getattr(r, "rowcount", 0) or 0
             else:
+                # UPDATE active=0
                 if _USE_PG:
-                    placeholders = ", ".join([f":s{i}" for i in range(len(keep_skus))])
-                    sql = _q(f"UPDATE products SET active=0 WHERE sku NOT IN ({placeholders}) AND active<>0")
-                    params = {f"s{i}": s for i, s in enumerate(keep_skus)}
+                    placeholders = ", ".join([f":c{i}" for i in range(len(keep_codes))])
+                    sql = _q(f"UPDATE products SET active=0 WHERE code NOT IN ({placeholders}) AND active<>0")
+                    params = {f"c{i}": v for i, v in enumerate(keep_codes)}
                     r = c.execute(sql, params)
-                    deactivated = r.rowcount or 0
                 else:
-                    placeholders = ", ".join(["?"] * len(keep_skus))
-                    r = c.execute(f"UPDATE products SET active=0 WHERE sku NOT IN ({placeholders}) AND active<>0", keep_skus)
-                    deactivated = r.rowcount or 0
+                    placeholders = ", ".join(["?"] * len(keep_codes))
+                    r = c.execute(
+                        f"UPDATE products SET active=0 WHERE code NOT IN ({placeholders}) AND active<>0",
+                        keep_codes
+                    )
+                deactivated = getattr(r, "rowcount", 0) or 0
 
     return SyncResult(
         items_in_kaspi=len(offers),
-        inserted=inserted, updated=updated,
-        deactivated=deactivated, deleted=deleted,
-        in_sale=in_sale, removed=removed,
+        inserted=inserted,
+        updated=updated,
+        deactivated=deactivated,
+        deleted=deleted,
+        in_sale=in_sale,
+        removed=removed,
     )
-
 # ──────────────────────────────────────────────────────────────────────────────
 # Утилиты для чтения «списков» из локальной БД (для двух вкладок в UI)
 # ──────────────────────────────────────────────────────────────────────────────
