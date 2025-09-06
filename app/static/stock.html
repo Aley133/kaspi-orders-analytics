@@ -411,14 +411,23 @@ async function loadDB(){
   }catch(e){ setNote('Сеть: ' + e.message); }
 }
 async function importFile(file){
-  const fd = new FormData(); fd.append('file', file);
+  const fd = new FormData();
+  fd.append('file', file);
+
+  const priceOnly = qs('#priceOnly')?.checked ? 1 : 0; // читать чекбокс
   try{
-    const data = await fetchJSON('/products/manual-upload', {method:'POST', body:fd});
-    setNote(`Файл загружен: ${file.name}. Позиции: ${data.count||0}. Вставлено: ${data.inserted||0}, обновлено: ${data.updated||0}`, true);
-    window._productsCache = data.items||[];
-    renderProducts(window._productsCache);
-    recomputeStockTotals(window._productsCache);
-  }catch(e){ setNote('Импорт не удался: ' + e.message); }
+    const url = `/products/manual-upload?price_only=${priceOnly}`;
+    const data = await fetchJSON(url, { method:'POST', body: fd });
+
+    // показываем результат и сразу перезагружаем таблицу из БД
+    setNote(
+      `Файл загружен: ${file.name}. Вставлено: ${fmt(data.inserted||0)}, обновлено: ${fmt(data.updated||0)}. Обновляю таблицу…`,
+      true
+    );
+    await loadDB();           // <-- всегда берём актуальные данные из БД
+  }catch(e){
+    setNote('Импорт не удался: ' + e.message);
+  }
 }
 
 /* ───────── утилиты дат ───────── */
