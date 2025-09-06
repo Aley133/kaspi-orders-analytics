@@ -24,6 +24,8 @@
     *{box-sizing:border-box}
     html,body{height:100%}
     body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Helvetica Neue",Arial}
+
+    /* layout */
     .layout{display:grid;grid-template-columns:220px 1fr;min-height:100vh}
     .sidebar{border-right:1px solid var(--line);padding:16px 12px;position:sticky;top:0;height:100vh}
     .brand{font-weight:800;font-size:18px;margin:4px 0 12px}
@@ -36,6 +38,8 @@
     .switch input::after{content:"";position:absolute;inset:3px auto auto 3px;width:16px;height:16px;background:#fff;border-radius:50%;transition:left .2s}
     .switch input:checked::after{left:21px}
     .content{padding:20px 16px}
+
+    /* ui bits */
     .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
     .btn{
       background:var(--pri);color:#fff;border:0;border-radius:10px;padding:8px 12px;cursor:pointer;
@@ -43,41 +47,60 @@
       will-change:transform
     }
     .btn.secondary{background:var(--pri-weak);color:var(--fg)}
+    .btn.ghost{background:transparent;border:1px solid var(--line);color:var(--fg)}
     .btn:hover{transform:translateY(-1px);box-shadow:0 6px 16px rgba(31,122,238,.18)}
     .btn:active{transform:translateY(0);box-shadow:inset 0 1px 3px rgba(0,0,0,.25)}
     .btn.small{padding:6px 10px;font-size:12px;border-radius:8px}
     .btn-link{background:transparent;border:0;color:var(--pri);cursor:pointer;padding:0;transition:opacity .12s ease}
-    .btn-link:hover{opacity:.85;text-decoration:underline;text-underline-offset:3px}
+    .btn-link:hover{text-decoration:underline;text-underline-offset:3px}
     .btn:disabled{opacity:.6;cursor:not-allowed;box-shadow:none;transform:none}
+
     input[type="text"],input[type="number"],input[type="date"],select{
       height:34px;padding:6px 8px;border:1px solid var(--line);border-radius:10px;background:transparent;color:var(--fg);outline:none
     }
     input:focus,select:focus{box-shadow:0 0 0 3px var(--focus)}
+
     table{border-collapse:collapse;width:100%}
     th,td{border-bottom:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:middle}
     thead th{position:sticky;top:0;background:var(--card);z-index:1;user-select:none;cursor:pointer}
     thead th[data-nosort]{cursor:default}
+
     .muted{color:var(--muted)}
     .dot{display:inline-block;width:10px;height:10px;border-radius:50%;background:#9ca3af}
     .dot.on{background:var(--success)}
-    .note{margin:8px 0 12px; padding:8px 10px;border-radius:8px;display:none}
-    .note.ok{display:block;background:var(--ok-bg);color:var(--ok-fg);border:1px solid var(--ok-border)}
-    .note.err{display:block;background:var(--err-bg);color:var(--err-fg);border:1px solid var(--err-border)}
-    .detail{background:var(--card)}
-    .block{padding:12px}
     .chip{display:inline-flex;align-items:center;gap:6px;background:var(--chip);color:var(--fg);padding:4px 8px;border-radius:999px;font-size:12px}
     .chip .dot{width:8px;height:8px}
+    .pill{background:var(--pill-bg);color:var(--pill-fg);padding:4px 8px;border-radius:999px;font-weight:600}
+    .kpi{font-weight:700}
+
+    .panel{border:1px solid var(--line);border-radius:12px;background:var(--card);padding:12px;margin:12px 0}
+    .note{margin:10px 0 14px; padding:8px 10px;border-radius:10px;display:none}
+    .note.ok{display:block;background:var(--ok-bg);color:var(--ok-fg);border:1px solid var(--ok-border)}
+    .note.err{display:block;background:var(--err-bg);color:var(--err-fg);border:1px solid var(--err-border)}
     .statbar{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0}
     .stat{display:flex;align-items:center;gap:8px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 10px}
     .stat .badge{font-weight:700}
     .stat.ok .badge{color:var(--success)}
     .stat.err .badge{color:var(--danger)}
-    .panel{border:1px solid var(--line);border-radius:12px;background:var(--card);padding:12px;margin:12px 0}
-    .log{margin-top:8px;max-height:260px;overflow:auto;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
-    .kpi{font-weight:700}
-    .toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
-    .grow{flex:1 1 auto}
-    .pill{background:var(--pill-bg);color:var(--pill-fg);padding:4px 8px;border-radius:999px;font-weight:600}
+
+    /* History (collapsible) */
+    details.hist{border:1px solid var(--line);border-radius:12px;background:var(--card);margin-bottom:12px;overflow:hidden}
+    details.hist>summary{
+      list-style:none; cursor:pointer; padding:12px 14px; display:flex; align-items:center; gap:10px; position:sticky; top:0; background:var(--card); z-index:2
+    }
+    details.hist>summary::-webkit-details-marker{display:none}
+    .caret{width:12px;height:12px;border-right:2px solid var(--fg);border-bottom:2px solid var(--fg);transform:rotate(-45deg);transition:transform .2s}
+    details[open] .caret{transform:rotate(45deg)}
+    .hist-body{padding:0 12px 12px}
+    .hist-controls{display:flex;gap:8px;align-items:end;flex-wrap:wrap;padding:0 12px 12px}
+    .hist-stats{padding:0 12px 10px}
+    .hist-table-wrap{overflow:auto;max-height:60vh;margin:0 12px 12px}
+    .progress{height:8px;background:var(--line);border-radius:999px; overflow:hidden}
+    .progress>span{display:block;height:100%;background:var(--pri);width:0;transition:width .2s}
+
+    /* details row in products table */
+    tr.detail{background:var(--card)}
+    .block{padding:12px}
   </style>
 </head>
 <body data-theme="light">
@@ -95,7 +118,64 @@
     </aside>
 
     <main class="content">
-      <h1>Мой склад</h1>
+      <h1 style="margin:0 0 8px">Мой склад</h1>
+
+      <!-- История (вверху, сворачивается) -->
+      <details class="hist" id="history">
+        <summary>
+          <span class="caret"></span>
+          <b style="font-size:16px">История списаний (FIFO)</b>
+          <span class="muted">за период</span>
+          <div class="pill" id="histRangeLabel">—</div>
+          <div class="row" style="margin-left:auto">
+            <button class="btn ghost small" id="btnHistRefresh">Обновить</button>
+          </div>
+        </summary>
+
+        <div class="hist-controls">
+          <div>
+            <div class="muted">Период</div>
+            <div class="row">
+              <input type="date" id="histFrom"> —
+              <input type="date" id="histTo">
+              <button class="btn secondary" id="btnHistLoad">Показать</button>
+            </div>
+          </div>
+          <div class="row" style="gap:10px;margin-left:auto">
+            <div class="chip" title="Строк в истории"><span class="badge">Строк:</span> <span id="hstRows">0</span></div>
+            <div class="chip" title="Уникальных заказов"><span class="badge">Заказов:</span> <span id="hstOrders">0</span></div>
+            <div class="chip" title="Уникальных SKU"><span class="badge">SKU:</span> <span id="hstSkus">0</span></div>
+            <div class="chip" title="Суммарное количество"><span class="badge">qty:</span> <span id="hstQty">0</span></div>
+            <div class="chip" title="Выручка"><span class="badge">Выручка:</span> <span id="hstRevenue">0</span> KZT</div>
+            <div class="chip" title="Себестоимость"><span class="badge">Себестоимость:</span> <span id="hstCost">0</span> KZT</div>
+            <div class="chip" title="Прибыль"><span class="badge">Прибыль:</span> <span id="hstProfit">0</span> KZT</div>
+          </div>
+          <div class="grow" style="width:100%">
+            <div class="progress" title="Прогресс загрузки"><span id="histProgress"></span></div>
+          </div>
+        </div>
+
+        <div class="hist-table-wrap">
+          <table id="histTable">
+            <thead>
+              <tr>
+                <th>Дата</th>
+                <th>Заказ</th>
+                <th>SKU</th>
+                <th>Название</th>
+                <th>Кол-во</th>
+                <th>Цена/шт</th>
+                <th>Выручка</th>
+                <th>Комиссия</th>
+                <th>Себестоимость</th>
+                <th>Прибыль</th>
+                <th>Партия</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </details>
 
       <!-- СИГНАЛЫ -->
       <div id="signals" class="statbar">
@@ -110,7 +190,7 @@
         </div>
       </div>
 
-      <!-- ПАНЕЛЬ FIFO -->
+      <!-- ПАНЕЛЬ FIFO (оставил без изменений по логике) -->
       <div class="panel" id="fifo-panel">
         <div class="row" style="align-items:end">
           <div>
@@ -130,23 +210,22 @@
             <input id="fifo-default-comm" type="number" min="0" step="0.1" value="15" style="width:120px">
           </div>
           <button class="btn" id="fifo-run">Списать со склада</button>
-          <button class="btn secondary" id="btnHistoryAll">История за период</button>
         </div>
         <div class="muted" style="margin-top:6px">
           Внимание: автоматического списания нет — списание выполняется только по кнопке «Списать со склада».
         </div>
-        <div id="fifo-log" class="log"></div>
+        <div id="fifo-log" class="panel" style="max-height:260px;overflow:auto"></div>
       </div>
 
       <!-- УПРАВЛЕНИЕ ТОВАРАМИ -->
-      <div class="toolbar">
+      <div class="row" style="margin-top:6px">
         <input id="findSku" type="text" placeholder="SKU" style="width:160px">
         <button class="btn secondary" id="btnFindSku">Открыть SKU</button>
         <div class="grow"></div>
         <span class="pill" id="rowsBadge" title="Строк в таблице">0 позиций</span>
       </div>
 
-      <div class="toolbar">
+      <div class="row" style="margin-top:8px">
         <label class="btn secondary" for="fileInput">Импорт XML/XLSX</label>
         <input type="file" id="fileInput" accept=".xml,.xlsx,.xls" style="display:none">
         <button class="btn" id="btnSaveDb">Сохранить таблицу в БД</button>
@@ -163,7 +242,7 @@
 
       <div id="note" class="note"></div>
 
-      <div class="shell">
+      <div class="panel" style="padding:0">
         <div style="overflow:auto; max-height:70vh">
           <table id="tbl">
             <thead>
@@ -186,36 +265,6 @@
         </div>
       </div>
 
-      <!-- ГЛОБАЛЬНАЯ ИСТОРИЯ СПИСАНИЙ -->
-      <div class="panel" id="history-all-panel" style="display:none">
-        <div class="row">
-          <h3 style="margin:0">История списаний за период</h3>
-          <div class="grow"></div>
-          <button class="btn secondary" id="btnHideHistory">Скрыть</button>
-        </div>
-        <div id="histAllSummary" class="statbar"></div>
-        <div style="overflow:auto; max-height:60vh; margin-top:6px">
-          <table id="histAllTable">
-            <thead>
-              <tr>
-                <th>Дата</th>
-                <th>Заказ</th>
-                <th>SKU</th>
-                <th>Название</th>
-                <th>Кол-во</th>
-                <th>Цена/шт</th>
-                <th>Выручка</th>
-                <th>Комиссия</th>
-                <th>Себестоимость</th>
-                <th>Прибыль</th>
-                <th>Партия</th>
-              </tr>
-            </thead>
-            <tbody></tbody>
-          </table>
-        </div>
-      </div>
-
     </main>
   </div>
 
@@ -228,9 +277,9 @@ const fmt = n => nf.format(Number(n||0));
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const escapeHtml = (s) => String(s||'').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]));
 const parseNum = (txt) => Number(String(txt||'0').replace(/\s/g,'').replace(',', '.'))||0;
-
 function setNote(msg, ok=false){ const el = qs('#note'); el.textContent = msg; el.className = 'note ' + (ok ? 'ok':'err'); }
 
+/* theme */
 (function initTheme(){
   const saved = localStorage.getItem('theme') || 'light';
   document.body.setAttribute('data-theme', saved);
@@ -242,6 +291,7 @@ function setNote(msg, ok=false){ const el = qs('#note'); el.textContent = msg; e
   });
 })();
 
+/* fetch with API key */
 async function fetchJSON(url, opts, _retry){
   const r = await fetch(url, opts||{});
   if(r.status===401 || r.status===403){
@@ -250,26 +300,23 @@ async function fetchJSON(url, opts, _retry){
       const v = prompt("Укажите X-API-Key (сохранится в этом браузере):", curr);
       if(v!==null){ window.setApiKey(v.trim()); return fetchJSON(url, opts, true); }
     }
-    const txt = await r.text();
-    throw new Error(txt || 'Unauthorized');
+    const txt = await r.text(); throw new Error(txt || 'Unauthorized');
   }
   if(!r.ok){ const txt = await r.text(); throw new Error(txt || r.statusText || ('HTTP ' + r.status)); }
   const ct = r.headers.get('content-type')||'';
   return ct.includes('application/json') ? r.json() : r.text();
 }
 
-/* ─────────────── table + sorting ─────────────── */
-function updateRowsBadge(){ const n = qsa('#tbl tbody tr').length; const b = qs('#rowsBadge'); if(b) b.textContent = nf.format(n) + ' позиций'; }
-
+/* ───────── таблица товаров ───────── */
 let sortState = { idx: 1, dir: 1 };
+function updateRowsBadge(){ const n = qsa('#tbl tbody tr').length; const b = qs('#rowsBadge'); if(b) b.textContent = nf.format(n) + ' позиций'; }
 function sortTable(idx, type='str'){
   const tb = qs('#tbl tbody'); if(!tb) return;
   const rows = qsa('tr', tb);
   rows.sort((a,b)=>{
     const ax = a.children[idx]?.textContent?.trim() ?? '';
     const bx = b.children[idx]?.textContent?.trim() ?? '';
-    if(type==='num'){ return (parseNum(ax)-parseNum(bx))*sortState.dir; }
-    return ax.localeCompare(bx,'ru')*sortState.dir;
+    return (type==='num' ? (parseNum(ax)-parseNum(bx)) : ax.localeCompare(bx,'ru'))*sortState.dir;
   });
   tb.innerHTML = ''; rows.forEach(r=>tb.appendChild(r));
 }
@@ -305,7 +352,7 @@ function renderProducts(items){
       <td class="col-right">
         <button class="btn-link btn-parties">Партии</button>
         <span class="muted"> · </span>
-        <button class="btn-link btn-history">История списаний</button>
+        <button class="btn-link btn-history">История</button>
       </td>`;
     tb.appendChild(tr);
   });
@@ -313,44 +360,46 @@ function renderProducts(items){
   const th = qs('#tbl thead th:nth-child('+(sortState.idx+1)+')');
   sortTable(sortState.idx, /ШТ|Цена|Остаток|Кол-во|Маржа/i.test(th?.textContent||'')?'num':'str');
 }
+function tableToRows(){
+  return qsa('#tbl tbody tr').map(tr=>{
+    const t = tr.children;
+    const code = t[0].textContent.trim(); const name = t[1].textContent.trim();
+    const brand = t[2].textContent.trim() || null; const category = t[3].textContent.trim() || null;
+    const qty = parseNum(t[4].textContent); const price = parseNum(t[5].textContent);
+    const active = t[6].querySelector('.dot')?.classList.contains('on') || false;
+    return { code, name, brand, category, qty, price, active };
+  });
+}
 
-/* ─────────────── СТОИМОСТЬ СКЛАДА ─────────────── */
+/* ───────── склад: суммы ───────── */
 function recomputeStockTotals(items){
   let totalRetail=0, totalQty=0;
   for (const it of (items||[])){
     const left = Number(it.left_total ?? it.qty ?? 0) || 0;
     const price = Number(it.price || 0) || 0;
-    totalQty += left;
-    totalRetail += left * price;
+    totalQty += left; totalRetail += left * price;
   }
   qs('#stockRetail').textContent = `${fmt(Math.round(totalRetail))} KZT`;
   qs('#sig-stock').classList.add(totalQty>0 ? 'ok':'err');
 }
-
 async function computeStockValueFromApi(){
   const spanCost = qs('#stockCost');
   const spanRetail = qs('#stockRetail');
   const btn = qs('#btnCalcCost');
-  btn.disabled = true;
-  spanCost.textContent = 'себестоим.: считаю…';
-
+  btn.disabled = true; spanCost.textContent = 'себестоим.: считаю…';
   try{
-    const data = await fetchJSON('/products/db/stock-value?with_retail=1&details=0');
+    const data = await fetchJSON('/products/db/stock-value?with_retail=1&details=0'); // опционально
     const totalCost = Math.round(Number(data.total_cost || 0));
     const totalRetail = Math.round(Number(data.total_retail || 0));
     spanCost.textContent = `себестоим.: ${fmt(totalCost)} KZT`;
-    if (!isNaN(totalRetail) && totalRetail>0) {
-      spanRetail.textContent = `${fmt(totalRetail)} KZT`;
-    }
+    if (!isNaN(totalRetail) && totalRetail>0) spanRetail.textContent = `${fmt(totalRetail)} KZT`;
   }catch(e){
     spanCost.textContent = 'себестоим.: ошибка';
     setNote('Расчёт себестоимости не удался: ' + e.message);
-  }finally{
-    btn.disabled = false;
-  }
+  }finally{ btn.disabled = false; }
 }
 
-/* ─────────────── загрузка БД / импорт ─────────────── */
+/* ───────── загрузка/импорт ───────── */
 async function loadDB(){
   try{
     const p = new URLSearchParams({ active_only:'0', page:'1', page_size:'20000' });
@@ -372,12 +421,13 @@ async function importFile(file){
   }catch(e){ setNote('Импорт не удался: ' + e.message); }
 }
 
-/* ─────────────── FIFO helpers ─────────────── */
+/* ───────── утилиты дат ───────── */
 function isoDay(d){ return d.toISOString().slice(0,10); }
 function dayStartTs(dateStr){ return new Date(dateStr+'T00:00:00.000Z').getTime(); }
 function dayEndTs(dateStr){   return new Date(dateStr+'T23:59:59.999Z').getTime(); }
 function addDays(dateStr, d){ const dt = new Date(dateStr+'T00:00:00Z'); dt.setUTCDate(dt.getUTCDate()+d); return isoDay(dt); }
 
+/* ───────── заказы/леджер ───────── */
 async function getOrderCodes(start, end){
   const qs1 = new URLSearchParams({
     start, end, tz:'Asia/Almaty', date_field:'creationDate',
@@ -394,60 +444,76 @@ async function getOrderCodes(start, end){
   }
   return [];
 }
-async function getLedgerByCodes(orderCodes, chunk=30, perLimit=10000){
+async function getLedgerByCodes(orderCodes, chunk=50, perLimit=10000, onProgress){
   const res = [];
   for (let i=0; i<orderCodes.length; i+=chunk){
     const part = orderCodes.slice(i, i+chunk).map(encodeURIComponent).join(',');
     const url = `/profit/bridge/fifo/ledger?codes=${part}&limit=${perLimit}`;
     const j = await fetchJSON(url);
     if (Array.isArray(j.items)) res.push(...j.items);
-    if (orderCodes.length>chunk) await sleep(50);
+    if (typeof onProgress==='function') onProgress(Math.min(i+chunk, orderCodes.length), orderCodes.length);
+    if (orderCodes.length>chunk) await sleep(30);
   }
   return res;
 }
-function calcSignalsFromLedger(items, startTs, endTs){
-  const rows = items.filter(x => typeof x.date_utc_ms==='number' && x.date_utc_ms>=startTs && x.date_utc_ms<=endTs);
-  const qtySum    = rows.reduce((a,r)=>a+(Number(r.qty)||0),0);
-  const profitSum = rows.reduce((a,r)=>a+(Number(r.profit_amount)||0),0);
-  const costSum   = rows.reduce((a,r)=>a+(Number(r.cost_amount)||0),0);
-  const revSum    = rows.reduce((a,r)=>a+(Number(r.total_price)||0),0);
-  const orders = new Set(rows.map(x => x.order_code));
-  const skus   = new Set(rows.map(x => x.sku));
-  return { rows, orders: orders.size, skus: skus.size, qty: qtySum, profit: profitSum, cost: costSum, revenue: revSum };
+
+/* ───────── история (верхний блок) ───────── */
+function setHistRangeLabel(){
+  const f = qs('#histFrom').value, t=qs('#histTo').value;
+  const lbl = f && t ? `${f} — ${t}` : '—';
+  qs('#histRangeLabel').textContent = lbl;
 }
-async function refreshSignals(){
-  try{
-    const today = isoDay(new Date());
-    const codesToday = await getOrderCodes(today, today);
-    const ledToday = codesToday.length ? await getLedgerByCodes(codesToday) : [];
-    const stToday = calcSignalsFromLedger(ledToday, dayStartTs(today), dayEndTs(today));
-
-    const elCogs = qs('#sig-cogs-today');
-    elCogs.classList.remove('ok','err');
-    elCogs.classList.add(stToday.cost > 0 ? 'ok' : 'err');
-    elCogs.innerHTML = `<span class="badge">Себестоимость сегодня:</span><span class="kpi">${fmt(stToday.cost)} KZT</span>`;
-
-    const pick = (arr)=>arr.reduce((acc,r)=>{
-      const ts = Number(r.date_utc_ms || r.created_at || 0);
-      return (!isNaN(ts) && (!acc || ts>acc)) ? ts : acc;
-    }, null);
-    const lastCreated = pick(ledToday);
-    const elLast = qs('#sig-last');
-    elLast.classList.remove('ok','err');
-    if(lastCreated){
-      elLast.classList.add('ok');
-      const dt = new Date(Number(lastCreated));
-      elLast.innerHTML = `<span class="badge">Последнее списание:</span><span>${dt.toLocaleDateString()} ${dt.toLocaleTimeString()}</span>`;
-    }else{
-      elLast.classList.add('err');
-      elLast.innerHTML = `<span class="badge">Последнее списание:</span><span class="muted">не найдено</span>`;
-    }
-  }catch{
-    const el = qs('#sig-last'); el.classList.add('err'); el.innerHTML = `<span class="badge">Последнее списание:</span><span class="muted">ошибка</span>`;
+function paintHistTotals(rows){
+  const st = {rows:0, orders:new Set(), skus:new Set(), qty:0, revenue:0, cost:0, profit:0};
+  for (const r of rows){
+    st.rows++; if (r.order_code) st.orders.add(String(r.order_code));
+    if (r.sku) st.skus.add(String(r.sku));
+    st.qty += (r.qty||0); st.revenue += (r.total_price||0); st.cost += (r.cost_amount||0); st.profit += (r.profit_amount||0);
   }
+  qs('#hstRows').textContent = fmt(st.rows);
+  qs('#hstOrders').textContent = fmt(st.orders.size);
+  qs('#hstSkus').textContent = fmt(st.skus.size);
+  qs('#hstQty').textContent = fmt(st.qty);
+  qs('#hstRevenue').textContent = fmt(st.revenue);
+  qs('#hstCost').textContent = fmt(st.cost);
+  qs('#hstProfit').textContent = fmt(st.profit);
+}
+async function loadHistoryRange(){
+  const FROM = qs('#histFrom').value, TO = qs('#histTo').value;
+  setHistRangeLabel();
+  const tbody = qs('#histTable tbody'); tbody.innerHTML='';
+  const progress = qs('#histProgress'); progress.style.width='0';
+  try{
+    const orderCodes = await getOrderCodes(FROM, TO);
+    if(!orderCodes.length){ paintHistTotals([]); return; }
+    const startTs = dayStartTs(FROM), endTs = dayEndTs(TO);
+    const rowsAll = await getLedgerByCodes(orderCodes, 50, 10000, (done,total)=>{
+      progress.style.width = Math.round(done/total*100)+'%';
+    });
+    const list = rowsAll.filter(x => x.date_utc_ms>=startTs && x.date_utc_ms<=endTs)
+                        .sort((a,b)=>b.date_utc_ms - a.date_utc_ms);
+    paintHistTotals(list);
+    for (const r of list){
+      const tr = document.createElement('tr');
+      const dt = new Date(Number(r.date_utc_ms||0));
+      tr.innerHTML = `
+        <td>${dt.toLocaleDateString()} ${dt.toLocaleTimeString()}</td>
+        <td>${escapeHtml(r.order_code||'')}</td>
+        <td>${escapeHtml(r.sku||'')}</td>
+        <td>${escapeHtml(r.title||'')}</td>
+        <td>${fmt(r.qty)}</td>
+        <td>${fmt(r.unit_price)} KZT</td>
+        <td>${fmt(r.total_price)} KZT</td>
+        <td>${fmt(r.commission_amount)} KZT</td>
+        <td>${fmt(r.cost_amount)} KZT</td>
+        <td>${fmt(r.profit_amount)} KZT</td>
+        <td>${r.batch_id ? ('#'+r.batch_id) : ''}</td>`;
+      tbody.appendChild(tr);
+    }
+  }catch(e){ setNote('История: ' + e.message); }
 }
 
-/* ─────────────── BRIDGE / FIFO ─────────────── */
+/* ───────── FIFO / bridge (как было) ───────── */
 function logFIFO(msg, obj){
   const el = qs("#fifo-log"); const time = new Date().toLocaleTimeString();
   el.innerHTML += `<div>[${time}] ${escapeHtml(msg)}</div>`;
@@ -459,11 +525,12 @@ function setDefaultDates(){
   const y = new Date(Date.now()-24*3600*1000);
   qs("#fifo-from").value = y.toISOString().slice(0,10);
   qs("#fifo-to").value   = today.toISOString().slice(0,10);
+  qs("#histFrom").value  = y.toISOString().slice(0,10);
+  qs("#histTo").value    = today.toISOString().slice(0,10);
+  setHistRangeLabel();
 }
 async function ensureSkuAndBatch(sku, need, cost, comm){
-  try{
-    await fetchJSON(`/products/db/ensure-sku/${encodeURIComponent(sku)}?name=${encodeURIComponent(sku)}&price=0&qty=0&active=1`, { method:'POST' });
-  }catch(_){}
+  try{ await fetchJSON(`/products/db/ensure-sku/${encodeURIComponent(sku)}?name=${encodeURIComponent(sku)}&price=0&qty=0&active=1`, { method:'POST' }); }catch(_){}
   return fetchJSON(`/products/db/price-batches/${encodeURIComponent(sku)}`, {
     method:'POST',
     headers: { 'Content-Type':'application/json' },
@@ -500,9 +567,7 @@ async function syncBridgeLines(lines){
   for (let i=0; i<lines.length; i+=200){
     const chunk = lines.slice(i, i+200);
     const res = await fetchJSON('/profit/bridge/sync-by-ids', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(chunk)
+      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(chunk)
     });
     synced += Number(res?.synced||0);
     if (Array.isArray(res?.codes)) codes.push(...res.codes);
@@ -541,10 +606,7 @@ async function runFIFO(){
 
     if (gaps.length && FILL) {
       const agg = {};
-      gaps.forEach(g => {
-        const s=String(g.sku||'').trim(); const n=Number(g.not_covered_qty||0);
-        if(s&&n>0) agg[s]=(agg[s]||0)+n;
-      });
+      gaps.forEach(g => { const s=String(g.sku||'').trim(); const n=Number(g.not_covered_qty||0); if(s&&n>0) agg[s]=(agg[s]||0)+n; });
       logFIFO('Дефицит по SKU:', agg);
       for (const [sku, need] of Object.entries(agg)) {
         logFIFO(`Добавляю партию: ${sku} → ${need}шт по ${DEFAULT_COST} KZT, комиссия ${DEFAULT_COMM}%`);
@@ -561,12 +623,14 @@ async function runFIFO(){
     }
 
     logFIFO('Пересчитываю qty_sold по партиям…');
-    const rec = await fetchJSON('/profit/bridge/fifo/recalc-batches', { method:'POST' });
+    const rec = await fetchJSON('/products/batches/recount-sold', { method:'POST' });
     logFIFO('recalc-batches', rec);
 
     if (gaps.length===0) logFIFO('✅ Готово: дыры отсутствуют, полное списание выполнено.');
     else                 logFIFO('⚠ Есть незакрытые дыры:', gaps);
 
+    // обновим верхнюю историю и сигналы
+    await loadHistoryRange();
     await refreshSignals();
   }catch(e){
     logFIFO('❌ Ошибка: ' + (e?.message || e));
@@ -575,10 +639,49 @@ async function runFIFO(){
   }
 }
 
-/* ─────────────── SKU details ─────────────── */
+/* ───────── сигналы за сегодня ───────── */
+function calcSignalsFromLedger(items, startTs, endTs){
+  const rows = items.filter(x => typeof x.date_utc_ms==='number' && x.date_utc_ms>=startTs && x.date_utc_ms<=endTs);
+  const qtySum    = rows.reduce((a,r)=>a+(Number(r.qty)||0),0);
+  const profitSum = rows.reduce((a,r)=>a+(Number(r.profit_amount)||0),0);
+  const costSum   = rows.reduce((a,r)=>a+(Number(r.cost_amount)||0),0);
+  const revSum    = rows.reduce((a,r)=>a+(Number(r.total_price)||0),0);
+  const orders = new Set(rows.map(x => x.order_code));
+  const skus   = new Set(rows.map(x => x.sku));
+  return { rows, orders: orders.size, skus: skus.size, qty: qtySum, profit: profitSum, cost: costSum, revenue: revSum };
+}
+async function refreshSignals(){
+  try{
+    const today = isoDay(new Date());
+    const codesToday = await getOrderCodes(today, today);
+    const ledToday = codesToday.length ? await getLedgerByCodes(codesToday) : [];
+    const stToday = calcSignalsFromLedger(ledToday, dayStartTs(today), dayEndTs(today));
+
+    const elCogs = qs('#sig-cogs-today');
+    elCogs.classList.remove('ok','err');
+    elCogs.classList.add(stToday.cost > 0 ? 'ok' : 'err');
+    elCogs.innerHTML = `<span class="badge">Себестоимость сегодня:</span><span class="kpi">${fmt(stToday.cost)} KZT</span>`;
+
+    const pick = (arr)=>arr.reduce((acc,r)=>{ const ts = Number(r.date_utc_ms || r.created_at || 0); return (!isNaN(ts) && (!acc || ts>acc)) ? ts : acc; }, null);
+    const lastCreated = pick(ledToday);
+    const elLast = qs('#sig-last');
+    elLast.classList.remove('ok','err');
+    if(lastCreated){
+      elLast.classList.add('ok');
+      const dt = new Date(Number(lastCreated));
+      elLast.innerHTML = `<span class="badge">Последнее списание:</span><span>${dt.toLocaleDateString()} ${dt.toLocaleTimeString()}</span>`;
+    }else{
+      elLast.classList.add('err');
+      elLast.innerHTML = `<span class="badge">Последнее списание:</span><span class="muted">не найдено</span>`;
+    }
+  }catch{
+    const el = qs('#sig-last'); el.classList.add('err'); el.innerHTML = `<span class="badge">Последнее списание:</span><span class="muted">ошибка</span>`;
+  }
+}
+
+/* ───────── SKU details (партии / история по SKU) ───────── */
 function clearDetails(){ qsa('tr.detail').forEach(tr => tr.remove()); }
 function makeDetailRow(colspan){ const tr = document.createElement('tr'); tr.className='detail'; const td=document.createElement('td'); td.colSpan=colspan; tr.appendChild(td); return tr; }
-
 async function openDetail(row){
   clearDetails();
   const sku = row?.dataset?.sku || row.cells?.[0]?.textContent?.trim();
@@ -607,32 +710,6 @@ async function openDetail(row){
       <div class="row" style="margin-top:8px; gap:8px">
         <button class="btn secondary" id="btnAddRow">+ Добавить</button>
         <button class="btn" id="btnSaveRows">Сохранить новые</button>
-      </div>
-
-      <hr style="border:0;border-top:1px solid var(--line);margin:14px 0">
-
-      <div class="row" style="align-items:center;gap:8px">
-        <b>История списаний (FIFO) по SKU</b>
-        <label>за</label>
-        <select id="histDays" style="width:120px">
-          <option value="7">7 дней</option>
-          <option value="14">14 дней</option>
-          <option value="30" selected>30 дней</option>
-          <option value="90">90 дней</option>
-        </select>
-        <button class="btn secondary" id="btnLoadHistory">Показать</button>
-        <span id="histSummary" class="muted"></span>
-      </div>
-
-      <div style="overflow:auto;max-height:280px;margin-top:6px">
-        <table class="table" id="histTable">
-          <thead>
-            <tr>
-              <th>Дата</th><th>Заказ</th><th>Кол-во</th><th>Выручка</th><th>Комиссия</th><th>Себестоимость</th><th>Прибыль</th><th>Партия</th>
-            </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
       </div>
     </div>`;
 
@@ -697,130 +774,9 @@ async function openDetail(row){
     try{ const res = await fetchJSON('/products/batches/recount-sold', {method:'POST'}); setNote(`Пересчёт списаний выполнен (затронуто партий: ${res.updated_batches||0}).`, true); openDetail(row); }
     catch(e){ setNote('Пересчёт не удался: ' + e.message); }
   };
-
-  // ИСТОРИЯ ПО SKU: новее — выше
-  async function loadHistory(days){
-    const end = isoDay(new Date());
-    const start = addDays(end, -(Number(days)-1));
-    const p = new URLSearchParams({
-      start, end, tz:'Asia/Almaty', date_field:'creationDate',
-      order:'asc', grouped:'0', limit:'100000', with_items:'1',
-      use_bd:'1', business_day_start:'20:00',
-      assign_mode:'smart', store_accept_until:'17:00',
-      items_mode:'all', exclude_states:'CANCELED',
-    });
-    const data = await fetchJSON('/orders/ids?' + p.toString());
-    const rows = (data.items||[]).filter(x => String(x.sku) === String(sku));
-    const codes = [...new Set(rows.map(r=>r.order_code||r.number).filter(Boolean).map(String))];
-    const tb = qs('#histTable tbody', mount); tb.innerHTML = '';
-    if (!codes.length){ qs('#histSummary', mount).textContent = 'нет списаний'; return; }
-    const ledger = await getLedgerByCodes(codes, 50, 10000);
-    const startTs = dayStartTs(start), endTs = dayEndTs(end);
-    const list = ledger
-      .filter(x => x.sku===sku && x.date_utc_ms>=startTs && x.date_utc_ms<=endTs)
-      .sort((a,b)=>b.date_utc_ms - a.date_utc_ms); // новее первыми
-    let sumQty=0,sumRev=0,sumComm=0,sumCost=0,sumProfit=0;
-    list.forEach(r=>{
-      sumQty += (r.qty||0); sumRev += (r.total_price||0); sumComm+= (r.commission_amount||0); sumCost+= (r.cost_amount||0); sumProfit += (r.profit_amount||0);
-      const dt = new Date(Number(r.date_utc_ms||0));
-      const tr = document.createElement('tr');
-      tr.innerHTML = `
-        <td>${dt.toLocaleDateString()} ${dt.toLocaleTimeString()}</td>
-        <td>${r.order_code||''}</td>
-        <td>${fmt(r.qty)}</td>
-        <td>${fmt(r.total_price)} KZT</td>
-        <td>${fmt(r.commission_amount)} KZT</td>
-        <td>${fmt(r.cost_amount)} KZT</td>
-        <td>${fmt(r.profit_amount)} KZT</td>
-        <td>${r.batch_id ? ('#'+r.batch_id) : ''}</td>`;
-      tb.appendChild(tr);
-    });
-    qs('#histSummary', mount).innerHTML = list.length
-      ? `строк: <b>${fmt(list.length)}</b>, qty: <b>${fmt(sumQty)}</b>, выручка: <b>${fmt(sumRev)} KZT</b>, себестоимость: <b>${fmt(sumCost)} KZT</b>, прибыль: <b>${fmt(sumProfit)} KZT</b>`
-      : 'нет списаний';
-  }
-  qs('#btnLoadHistory', mount).onclick = async ()=>{ try{ await loadHistory(Number(qs('#histDays', mount).value||30)); }catch(e){ setNote('История не загрузилась: ' + e.message); } };
-  try{ await loadHistory(30); }catch(_){}
 }
 
-/* ─────────────── Глобальная история ─────────────── */
-let histAbortCtrl = null;
-async function showGlobalHistory(){
-  const FROM = qs('#fifo-from').value;
-  const TO   = qs('#fifo-to').value;
-  const box  = qs('#history-all-panel');
-  const sum  = qs('#histAllSummary');
-  const tbody= qs('#histAllTable tbody');
-  box.style.display = 'block'; sum.innerHTML = '<div class="muted">Собираю коды заказов…</div>'; tbody.innerHTML = '';
-  if (histAbortCtrl) histAbortCtrl.abort(); histAbortCtrl = new AbortController(); const { signal } = histAbortCtrl;
-
-  try{
-    const orderCodes = await getOrderCodes(FROM, TO);
-    if (signal.aborted) throw new Error('Отменено');
-    if(!orderCodes.length){ sum.innerHTML = '<div class="muted">За выбранный период заказов не найдено.</div>'; return; }
-
-    const startTs = dayStartTs(FROM), endTs = dayEndTs(TO);
-    const chunk = 50; let done = 0;
-    const totals = {rows:0, orders:new Set(), skus:new Set(), qty:0, revenue:0, cost:0, profit:0};
-
-    const paintProgress = () => {
-      sum.innerHTML = `
-        <div class="stat"><span class="badge">Прогресс:</span> ${Math.round(done/orderCodes.length*100)}% (${fmt(done)}/${fmt(orderCodes.length)})</div>
-        <div class="stat"><span class="badge">Строк:</span> ${fmt(totals.rows)}</div>
-        <div class="stat"><span class="badge">Заказов:</span> ${fmt(totals.orders.size)}</div>
-        <div class="stat"><span class="badge">SKU:</span> ${fmt(totals.skus.size)}</div>
-        <div class="stat"><span class="badge">qty:</span> ${fmt(totals.qty)}</div>
-        <div class="stat"><span class="badge">Выручка:</span> ${fmt(totals.revenue)} KZT</div>
-        <div class="stat"><span class="badge">Себестоимость:</span> ${fmt(totals.cost)} KZT</div>
-        <div class="stat"><span class="badge">Прибыль:</span> ${fmt(totals.profit)} KZT</div>`;
-    };
-    paintProgress();
-
-    for (let i=0; i<orderCodes.length; i+=chunk){
-      if (signal.aborted) throw new Error('Отменено');
-      const part = orderCodes.slice(i, i+chunk).map(encodeURIComponent).join(',');
-      const j = await fetchJSON(`/profit/bridge/fifo/ledger?codes=${part}&limit=10000`);
-      const items = Array.isArray(j.items) ? j.items : [];
-      for (const r of items){
-        const ms = Number(r.date_utc_ms||0); if (ms<startTs || ms>endTs) continue;
-        totals.rows++; if (r.order_code) totals.orders.add(String(r.order_code)); if (r.sku) totals.skus.add(String(r.sku));
-        totals.qty+=(r.qty||0); totals.revenue+=(r.total_price||0); totals.cost+=(r.cost_amount||0); totals.profit+=(r.profit_amount||0);
-        const tr = document.createElement('tr'); const dt = new Date(ms);
-        tr.innerHTML = `
-          <td>${dt.toLocaleDateString()} ${dt.toLocaleTimeString()}</td>
-          <td>${escapeHtml(r.order_code||'')}</td>
-          <td>${escapeHtml(r.sku||'')}</td>
-          <td>${escapeHtml(r.title||'')}</td>
-          <td>${fmt(r.qty)}</td>
-          <td>${fmt(r.unit_price)} KZT</td>
-          <td>${fmt(r.total_price)} KZT</td>
-          <td>${fmt(r.commission_amount)} KZT</td>
-          <td>${fmt(r.cost_amount)} KZT</td>
-          <td>${fmt(r.profit_amount)} KZT</td>
-          <td>${r.batch_id ? ('#'+r.batch_id) : ''}</td>`;
-        // Новее сверху: вставляем в начало
-        tbody.insertBefore(tr, tbody.firstChild);
-      }
-      done += Math.min(chunk, orderCodes.length - i); paintProgress(); await sleep(30);
-    }
-  }catch(e){
-    sum.innerHTML = `<div class="muted">${escapeHtml(e.message||e)}</div>`;
-  }
-}
-
-/* ─────────────── misc ─────────────── */
-function tableToRows(){
-  return qsa('#tbl tbody tr').map(tr=>{
-    const t = tr.children;
-    const code = t[0].textContent.trim(); const name = t[1].textContent.trim();
-    const brand = t[2].textContent.trim() || null; const category = t[3].textContent.trim() || null;
-    const qty = parseNum(t[4].textContent); const price = parseNum(t[5].textContent);
-    const active = t[6].querySelector('.dot')?.classList.contains('on') || false;
-    return { code, name, brand, category, qty, price, active };
-  });
-}
-
-/* ─────────────── init ─────────────── */
+/* ───────── init ───────── */
 document.addEventListener('DOMContentLoaded', async ()=>{
   try{
     const ping = await fetchJSON('/products/db/ping');
@@ -831,14 +787,13 @@ document.addEventListener('DOMContentLoaded', async ()=>{
   setDefaultDates(); attachSorting();
 
   qs('#btnLoadDb').onclick  = loadDB;
+  qs('#fileInput').addEventListener('change', async (e)=>{ const f = e.target.files?.[0]; if(!f) return; await importFile(f); e.target.value = ''; });
   qs('#btnFindSku').onclick = ()=>{
     const sku = qs('#findSku').value.trim(); if(!sku) return;
     const row = qsa('#tbl tbody tr').find(tr => (tr.dataset.sku||tr.cells[0].textContent.trim()) === sku);
-    if(!row){ setNote('SKU не найден в таблице. Нажми «Загрузить из БД».'); return; }
+    if(!row){ setNote('SKU не найден. Нажми «Загрузить из БД».'); return; }
     row.scrollIntoView({behavior:'smooth', block:'center'}); openDetail(row);
   };
-  qs('#fileInput').addEventListener('change', async (e)=>{ const f = e.target.files?.[0]; if(!f) return; await importFile(f); e.target.value = ''; });
-
   qs('#tbl').addEventListener('click', (e)=>{
     const btn1 = e.target.closest('.btn-parties'); if(btn1) { openDetail(btn1.closest('tr')); return; }
     const btn2 = e.target.closest('.btn-history'); if(btn2) { openDetail(btn2.closest('tr')); return; }
@@ -874,20 +829,21 @@ document.addEventListener('DOMContentLoaded', async ()=>{
     }catch(e){ setNote('Сохранение в БД не удалось: ' + e.message); }
   };
 
-  qs('#btnHistoryAll').onclick = showGlobalHistory;
-  qs('#btnHideHistory').onclick = ()=>{ if (histAbortCtrl) histAbortCtrl.abort(); qs('#history-all-panel').style.display='none'; };
+  // история (верх)
+  qs('#btnHistLoad').onclick = loadHistoryRange;
+  qs('#btnHistRefresh').onclick = loadHistoryRange;
 
+  // FIFO и сигналы
   qs('#fifo-run').onclick = runFIFO;
-
-  // расчёт стоимости остатков по себестоимости
   qs('#btnCalcCost').onclick = computeStockValueFromApi;
 
   await loadDB();
   await refreshSignals();
+  await loadHistoryRange(); // загрузим историю сразу для текущего периода
 });
 </script>
 
-<!-- Инжектор X-API-Key -->
+<!-- Инжектор X-API-Key (сохраняет ключ в localStorage и добавляет в заголовки и query) -->
 <script>
 (()=> {
   const KEY = "KASPI_API_KEY";
@@ -913,7 +869,6 @@ document.addEventListener('DOMContentLoaded', async ()=>{
     }catch(e){}
     return _origFetch(input, init);
   };
-
   window.setApiKey = function(k){ localStorage.setItem(KEY, k || ""); window.KASPI_API_KEY = k || ""; console.log("API key set"); };
 })();
 </script>
