@@ -436,7 +436,7 @@ def _parse_xml_smart(raw: bytes, *, city_id: str) -> List[Dict[str, Any]]:
         return ""
 
     rows: Dict[str, Dict[str, Any]] = {}
-    for off in [el for el in root.iter() if strip(el.tag) == "offer"]]:
+    for off in (el for el in root.iter() if strip(el.tag) == "offer"):
         code = _norm_sku(off.get("sku") or off.get("shop-sku") or off.get("code") or off.get("id") or "")
         if not code:
             continue
