@@ -10,7 +10,7 @@ import io
 import os
 import shutil
 import sqlite3
-
+from app.services.kaspi_sync import kaspi_sync_run, list_from_db
 # ──────────────────────────────────────────────────────────────────────────────
 # optional Excel
 # ──────────────────────────────────────────────────────────────────────────────
@@ -889,6 +889,23 @@ def get_products_router(*_, **__) -> APIRouter:
                 rr = c.execute("SELECT SUM(qty*unit_cost) AS tc, SUM(qty) AS tq FROM batches WHERE sku=?", (sku,)).fetchone()
                 avgc = None if not rr or not rr["tq"] else float(rr["tc"])/float(rr["tq"])
         return {"product": prod, "batches": rows, "avg_cost": round(avgc,2) if avgc is not None else None}
+
+    @router.post("/sync/kaspi/run", dependencies=[Depends(_require_api_key)])
+    async def run_kaspi_sync(mode: str = Query("merge", regex="^(merge|replace)$"),
+                             price_only: int = Query(1), hard_delete_missing: int = Query(0)):
+        res = kaspi_sync_run(mode=mode, price_only=bool(price_only),
+                             hard_delete_missing=bool(hard_delete_missing))
+        return res.__dict__
+
+    @router.get("/db/list/in-sale")
+    async def list_in_sale(q: str = Query(""), limit: int = 1000, offset: int = 0):
+        return {"items": list_from_db(active=True, limit=limit, offset=offset, search=q)}
+
+    @router.get("/db/list/removed")
+    async def list_removed(q: str = Query(""), limit: int = 1000, offset: int = 0):
+        return {"items": list_from_db(active=False, limit=limit, offset=offset, search=q)}
+
+      
 
     # Массовый upsert (кнопка «Сохранить таблицу в БД»)
     @router.post("/db/bulk-upsert", dependencies=[Depends(_require_api_key)])
