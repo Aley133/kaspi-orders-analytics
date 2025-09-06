@@ -1165,9 +1165,10 @@ def get_products_router(*_, **__) -> APIRouter:
             ]) + "\n"
             for r in rows
         )
-        return Response(content=header + body,
-                        media_type="text/csv; charset=utf-8",
-                        headers={"Content-Disposition": 'attachment; filename="products-db.csv'"})
+        return Response(
+            content=header + body,
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": 'attachment; filename="products-db.csv"'}
         )
 
     # ──────────────────────────────────────────────────────────────────────
