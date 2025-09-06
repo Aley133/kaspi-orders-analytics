@@ -10,7 +10,7 @@ import io
 import os
 import shutil
 import sqlite3
-from app.services.kaspi_sync import kaspi_sync_run, list_from_db
+from app.services.kaspi_sync import kaspi_sync_run
 # ──────────────────────────────────────────────────────────────────────────────
 # optional Excel
 # ──────────────────────────────────────────────────────────────────────────────
