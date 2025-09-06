@@ -381,6 +381,10 @@ def _upsert_products(items: List[Dict[str, Any]], *, price_only: bool = True) ->
 
     return inserted, updated
 
+def bulk_upsert_products(rows: List[Dict[str, Any]], *, price_only: bool = True) -> Dict[str, int]:
+    inserted, updated = _upsert_products(rows, price_only=price_only)
+    return {"inserted": inserted, "updated": updated}
+
 def _deactivate_missing(keep_skus: List[str]) -> int:
     if not keep_skus:
         return 0
