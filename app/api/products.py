@@ -1168,6 +1168,7 @@ def get_products_router(*_, **__) -> APIRouter:
         return Response(content=header + body,
                         media_type="text/csv; charset=utf-8",
                         headers={"Content-Disposition": 'attachment; filename="products-db.csv'"})
+        )
 
     # ──────────────────────────────────────────────────────────────────────
     # ИМПОРТ / СИНХРОНИЗАЦИЯ
