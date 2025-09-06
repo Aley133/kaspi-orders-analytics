@@ -378,19 +378,13 @@ function attachSorting(){
 
 /* фильтрация для вкладок */
 function filterByView(items){
-  const list = items||[];
-  if(_view==='in'){
-    return list.filter(it=>{
-      const left = Number(it.left_total ?? it.qty ?? 0) || 0;
-      const active = !!it.active;
-      return left>0 && active;  // реально есть и активен
-    });
-  }else{
-    return list.filter(it=>{
-      const left = Number(it.left_total ?? it.qty ?? 0) || 0;
-      const active = !!it.active;
-      return left<=0 || !active; // нет остатков или снят
-    });
+  const list = items || [];
+  if (_view === 'in') {
+    // в продаже: есть ШТ
+    return list.filter(it => (Number(it.qty || 0) > 0));
+  } else {
+    // сняты/нет: ШТ <= 0
+    return list.filter(it => (Number(it.qty || 0) <= 0));
   }
 }
 
@@ -398,20 +392,26 @@ function renderProducts(items){
   const tb = qs('#tbl tbody'); tb.innerHTML = '';
   const low = getLow();
   const viewItems = filterByView(items);
+
   viewItems.forEach(it=>{
-    const tr = document.createElement('tr');
-    const sku = it.code || it.id || '';
-    const left = Number(it.left_total ?? it.qty ?? 0) || 0;
+    const tr   = document.createElement('tr');
+    const sku  = it.code || it.id || '';
+    const qty  = Number(it.qty || 0);
+    const left = Number((it.left_total ?? it.qty ?? 0) || 0); // показываем как раньше, но логика вкладок — по qty
     const lowClass = (left > 0 && left <= low) ? 'lowcell' : '';
+
+    // if qty==0, но по партиям остался товар — значит надо списать => красим всю строку
+    if (qty <= 0 && left > 0) tr.classList.add('need-writeoff');
+
     tr.dataset.sku = sku;
     tr.innerHTML = `
       <td>${escapeHtml(sku)}</td>
       <td title="${escapeHtml(it.name||'')}">${escapeHtml(it.name||'')}</td>
       <td>${escapeHtml(it.brand||'')}</td>
       <td>${escapeHtml(it.category||'')}</td>
-      <td>${fmt(it.qty||0)}</td>
+      <td>${fmt(qty)}</td>
       <td>${fmt(it.price||0)}</td>
-      <td><span class="dot ${((it.qty||0)>0 || it.active===true) ? 'on':''}" title="${it.active?'активен':'нет'}"></span></td>
+      <td><span class="dot ${qty>0 ? 'on':''}" title="${qty>0 ? 'активен (есть шт)' : 'нет шт'}"></span></td>
       <td class="${lowClass}">${fmt(left)}</td>
       <td>${fmt(it.batch_count||0)}</td>
       <td>${it.last_margin!=null ? fmt(it.last_margin) : '—'}</td>
@@ -422,19 +422,26 @@ function renderProducts(items){
       </td>`;
     tb.appendChild(tr);
   });
+
   updateRowsBadge();
   const th = qs('#tbl thead th:nth-child('+(sortState.idx+1)+')');
-  sortTable(sortState.idx, /ШТ|Цена|Остаток|Кол-во|Маржа/i.test(th?.textContent||'')?'num':'str');
+  sortTable(
+    sortState.idx,
+    /ШТ|Цена|Остаток|Кол-во|Маржа/i.test(th?.textContent||'') ? 'num' : 'str'
+  );
 }
 
 /* сохранение таблицы обратно */
 function tableToRows(){
   return qsa('#tbl tbody tr').map(tr=>{
     const t = tr.children;
-    const code = t[0].textContent.trim(); const name = t[1].textContent.trim();
-    const brand = t[2].textContent.trim() || null; const category = t[3].textContent.trim() || null;
-    const qty = parseNum(t[4].textContent); const price = parseNum(t[5].textContent);
-    const active = t[6].querySelector('.dot')?.classList.contains('on') || false;
+    const code = t[0].textContent.trim();
+    const name = t[1].textContent.trim();
+    const brand = t[2].textContent.trim() || null;
+    const category = t[3].textContent.trim() || null;
+    const qty = parseNum(t[4].textContent);
+    const price = parseNum(t[5].textContent);
+    const active = qty > 0; // <-- ключевое изменение
     return { code, name, brand, category, qty, price, active };
   });
 }
@@ -475,10 +482,10 @@ async function loadDB(){
     setNote('Загружено строк из БД: ' + (data.items?.length||0), true);
     window._productsCache = data.items||[];
 
-    // counters для вкладок
-    const inCount  = filterByView(window._productsCache.filter(x=>true && (x.active))).length;
-    const outCount = filterByView(window._productsCache.filter(x=>true && (!x.active || (Number(x.left_total ?? x.qty ?? 0)||0)<=0))).length;
-    qs('#cntIn').textContent = fmt(inCount);
+    // считаем по qty
+    const inCount  = (window._productsCache||[]).filter(x => Number(x.qty||0) > 0).length;
+    const outCount = (window._productsCache||[]).filter(x => Number(x.qty||0) <= 0).length;
+    qs('#cntIn').textContent  = fmt(inCount);
     qs('#cntOut').textContent = fmt(outCount);
 
     renderProducts(window._productsCache);
