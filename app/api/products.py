@@ -68,6 +68,10 @@ def _db():
         try:
             yield conn
         finally:
+            try:
+                conn.commit()
+            except Exception:
+                pass
             conn.close()
 
 def _q(sql: str):
@@ -77,6 +81,13 @@ def _rows_to_dicts(rows):
     if _USE_PG:
         return [dict(r._mapping) for r in rows]
     return [dict(r) for r in rows]
+
+def _commit(c):
+    if not _USE_PG:
+        try:
+            c.commit()
+        except Exception:
+            pass
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Auth (X-API-Key)
@@ -108,10 +119,8 @@ def _table_exists(c, name: str) -> bool:
 
 def _has_column(c, table: str, col: str) -> bool:
     if _USE_PG:
-        r = c.execute(_q("""
-            SELECT 1 FROM information_schema.columns
-             WHERE table_name=:t AND column_name=:c
-        """), {"t": table, "c": col}).first()
+        r = c.execute(_q("""SELECT 1 FROM information_schema.columns
+                             WHERE table_name=:t AND column_name=:c"""), {"t": table, "c": col}).first()
         return bool(r)
     else:
         rows = c.execute(f"PRAGMA table_info({table})").fetchall()
@@ -174,8 +183,7 @@ def _ensure_schema():
                 active INTEGER DEFAULT 1,
                 barcode TEXT,
                 updated_at TIMESTAMP DEFAULT NOW()
-            );
-            """))
+            );"""))
             c.execute(_q("""
             CREATE TABLE IF NOT EXISTS batches(
                 id SERIAL PRIMARY KEY,
@@ -188,16 +196,14 @@ def _ensure_schema():
                 batch_code TEXT UNIQUE,
                 qty_sold INTEGER DEFAULT 0,
                 created_at TIMESTAMP DEFAULT NOW()
-            );
-            """))
+            );"""))
             c.execute(_q("""
             CREATE TABLE IF NOT EXISTS categories(
                 name TEXT PRIMARY KEY,
                 base_percent DOUBLE PRECISION DEFAULT 0.0,
                 extra_percent DOUBLE PRECISION DEFAULT 3.0,
                 tax_percent DOUBLE PRECISION DEFAULT 0.0
-            );
-            """))
+            );"""))
             c.execute(_q("CREATE INDEX IF NOT EXISTS idx_batches_sku ON batches(sku)"))
             c.execute(_q("CREATE INDEX IF NOT EXISTS idx_batches_date ON batches(date)"))
 
@@ -205,9 +211,8 @@ def _ensure_schema():
                 c.execute(_q("ALTER TABLE batches ADD COLUMN qty_sold INTEGER DEFAULT 0"))
 
             # cleanup dupes (safety)
-            dup = c.execute(_q("""
-                SELECT sku, COUNT(*) AS c FROM products GROUP BY sku HAVING COUNT(*)>1
-            """)).all()
+            dup = c.execute(_q("""SELECT sku, COUNT(*) AS c
+                                  FROM products GROUP BY sku HAVING COUNT(*)>1""")).all()
             if dup:
                 c.execute(_q("""
                     DELETE FROM products p USING (
@@ -274,6 +279,7 @@ def _ensure_schema():
                 DELETE FROM products
                  WHERE rowid NOT IN (SELECT MIN(rowid) FROM products GROUP BY sku);
             """)
+            _commit(c)
 
 def _seed_categories_if_empty():
     _ensure_schema()
@@ -301,9 +307,10 @@ def _seed_categories_if_empty():
                     "INSERT OR IGNORE INTO categories(name,base_percent,extra_percent,tax_percent) VALUES(?,?,?,?)",
                     defaults
                 )
+                _commit(c)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# UPSERT products (price_only — не трогаем qty/active)
+# UPSERT & SYNC
 # ──────────────────────────────────────────────────────────────────────────────
 def _upsert_products(items: List[Dict[str, Any]], *, price_only: bool = True) -> Tuple[int, int]:
     _ensure_schema()
@@ -366,10 +373,46 @@ def _upsert_products(items: List[Dict[str, Any]], *, price_only: bool = True) ->
                 """, (params["sku"], params["name"], params["brand"], params["category"],
                       params["price"], params["quantity"], params["active"], params["barcode"],
                       po, po))
+                _commit(c)
+
             if existed: updated += 1
             else: inserted += 1
 
     return inserted, updated
+
+def _deactivate_missing(keep_skus: List[str]) -> int:
+    if not keep_skus:
+        return 0
+    with _db() as c:
+        if _USE_PG:
+            placeholders = ", ".join([f":s{i}" for i in range(len(keep_skus))])
+            sql = _q(f"UPDATE products SET active=0 WHERE sku NOT IN ({placeholders}) AND active<>0")
+            params = {f"s{i}": s for i, s in enumerate(keep_skus)}
+            r = c.execute(sql, params)
+            return r.rowcount or 0
+        else:
+            placeholders = ", ".join(["?"] * len(keep_skus))
+            r = c.execute(f"UPDATE products SET active=0 WHERE sku NOT IN ({placeholders}) AND active<>0", keep_skus)
+            n = r.rowcount or 0
+            _commit(c)
+            return n
+
+def _delete_missing(keep_skus: List[str]) -> int:
+    if not keep_skus:
+        return 0
+    with _db() as c:
+        if _USE_PG:
+            placeholders = ", ".join([f":s{i}" for i in range(len(keep_skus))])
+            sql = _q(f"DELETE FROM products WHERE sku NOT IN ({placeholders})")
+            params = {f"s{i}": s for i, s in enumerate(keep_skus)}
+            r = c.execute(sql, params)
+            return r.rowcount or 0
+        else:
+            placeholders = ", ".join(["?"] * len(keep_skus))
+            r = c.execute(f"DELETE FROM products WHERE sku NOT IN ({placeholders})", keep_skus)
+            n = r.rowcount or 0
+            _commit(c)
+            return n
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Parsers (Kaspi XML / Excel)
@@ -449,7 +492,7 @@ def _parse_excel_smart(raw: bytes) -> List[Dict[str, Any]]:
         "brand":{"brand","vendor","producer","manufacturer","бренд","производитель"},
         "category":{"category","categoryname","group","группа","категория"},
         "price":{"price","baseprice","saleprice","currentprice","totalprice","cityprice","цена"},
-        "qty":{"qty","quantity","stock","stockqty","stockquantity","stockcount","availableamount","остаток","количество"},
+        "qty":{"qty","quantity","stock","stockqty","stockquantity","stockcount","availableamount","остаток","количество","шт"},
         "barcode":{"barcode","ean","штрихкод","баркод"},
         "active":{"active","isactive","ispublished","visible","isvisible","status","опубликован","статус"},
     }
@@ -506,7 +549,22 @@ def _parse_excel_smart(raw: bytes) -> List[Dict[str, Any]]:
         }
     return list(out.values())
 
-# helper: find existing skus (for dry-run)
+# ──────────────────────────────────────────────────────────────────────────────
+# Import/sync core
+# ──────────────────────────────────────────────────────────────────────────────
+def _dedupe(items: List[Dict[str,Any]]) -> Tuple[List[Dict[str,Any]], List[str]]:
+    uniq: Dict[str,Dict[str,Any]] = {}
+    dups: List[str] = []
+    for it in items:
+        sku = _sku_of(it)
+        if not sku:
+            continue
+        if sku in uniq:
+            dups.append(sku)
+            continue
+        uniq[sku] = it
+    return list(uniq.values()), sorted(list(set(dups)))
+
 def _existing_sku_set(skus: List[str]) -> set[str]:
     if not skus:
         return set()
@@ -522,7 +580,7 @@ def _existing_sku_set(skus: List[str]) -> set[str]:
             rows = c.execute(f"SELECT sku FROM products WHERE sku IN ({placeholders})", skus).fetchall()
             return {r["sku"] for r in rows}
 
-def _smart_import_bytes(filename: str, content: bytes, *, city_id: str, price_only: bool, dry_run: bool=False) -> Dict[str, Any]:
+def _smart_import_bytes(filename: str, content: bytes, *, city_id: str) -> List[Dict[str,Any]]:
     fn = (filename or "").lower()
     if fn.endswith(".xml"):
         items = _parse_xml_smart(content, city_id=city_id)
@@ -530,26 +588,38 @@ def _smart_import_bytes(filename: str, content: bytes, *, city_id: str, price_on
         items = _parse_excel_smart(content)
     else:
         raise HTTPException(400, "Поддерживаются XML и Excel (.xlsx/.xls).")
+    cleaned, _ = _dedupe(items)
+    return cleaned
 
-    # dedup by SKU
-    unique: Dict[str, Dict[str, Any]] = {}
-    for r in items:
-        sku = _sku_of(r)
-        if sku: unique[sku] = r
-    items = list(unique.values())
+def _sync_with_file(
+    items: List[Dict[str,Any]],
+    *, mode: str = "replace",
+    only_prices: bool = False,
+    hard_delete_missing: bool = False
+) -> Dict[str,Any]:
+    """
+    mode:
+      - 'replace' => привести состав БД к файлу (отсутствующие деактивировать/удалить)
+      - 'merge'   => ничего не удалять, только upsert
+    """
+    # upsert
+    inserted, updated = _upsert_products(items, price_only=only_prices)
 
-    if dry_run:
-        # no writes; just estimate insert/update
-        skus = [ _sku_of(r) for r in items ]
-        exists = _existing_sku_set(skus)
-        inserted = len([s for s in skus if s not in exists])
-        updated  = len([s for s in skus if s in exists])
-        items.sort(key=lambda x: (x.get("name") or x.get("sku") or "").lower())
-        return {"dry_run": True, "count": len(items), "inserted": inserted, "updated": updated, "items": items[:50]}
+    deactivated = deleted = 0
+    if mode.lower() != "merge":
+        keep = [_sku_of(x) for x in items if _sku_of(x)]
+        if hard_delete_missing:
+            deleted = _delete_missing(keep)
+        else:
+            deactivated = _deactivate_missing(keep)
 
-    inserted, updated = _upsert_products(items, price_only=price_only)
-    items.sort(key=lambda x: (x.get("name") or x.get("sku") or "").lower())
-    return {"count": len(items), "inserted": inserted, "updated": updated, "items": items}
+    return {
+        "items_in_file": len(items),
+        "inserted": inserted,
+        "updated": updated,
+        "deactivated": deactivated,
+        "deleted": deleted,
+    }
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Pydantic models (batches)
@@ -606,6 +676,7 @@ def _recount_qty_sold_from_ledger() -> int:
                 )
                 updated += cur.rowcount or 0
             c.execute("UPDATE batches SET qty_sold = qty WHERE qty_sold > qty")
+            _commit(c)
     return updated
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -613,7 +684,7 @@ def _recount_qty_sold_from_ledger() -> int:
 # ──────────────────────────────────────────────────────────────────────────────
 def get_products_router(*_, **__) -> APIRouter:
     """
-    *_, **__ — на случай старых вызовов get_products_router(client)
+    Возвращает готовый APIRouter для include_router(..., prefix="/products")
     """
     router = APIRouter(tags=["products"])
 
@@ -698,19 +769,18 @@ def get_products_router(*_, **__) -> APIRouter:
                 )).all()
                 left_by_sku = {r._mapping["sku"]: int(r._mapping["left"] or 0) for r in left_rows}
             else:
-                with _db() as cc:
-                    bc = {r["sku"]: r["cnt"] for r in cc.execute(
-                        "SELECT sku, COUNT(*) AS cnt FROM batches GROUP BY sku"
-                    )}
-                    last = {}
-                    for r in cc.execute(
-                        "SELECT sku, unit_cost, commission_pct FROM batches ORDER BY sku, date DESC, id DESC"
-                    ):
-                        if r["sku"] not in last:
-                            last[r["sku"]] = (r["unit_cost"], r["commission_pct"])
-                    left_by_sku = {r["sku"]: int(r["left"] or 0) for r in cc.execute(
-                        "SELECT sku, SUM(qty - COALESCE(qty_sold,0)) AS left FROM batches GROUP BY sku"
-                    ).fetchall()}
+                bc = {r["sku"]: r["cnt"] for r in c.execute(
+                    "SELECT sku, COUNT(*) AS cnt FROM batches GROUP BY sku"
+                )}
+                last = {}
+                for r in c.execute(
+                    "SELECT sku, unit_cost, commission_pct FROM batches ORDER BY sku, date DESC, id DESC"
+                ):
+                    if r["sku"] not in last:
+                        last[r["sku"]] = (r["unit_cost"], r["commission_pct"])
+                left_by_sku = {r["sku"]: int(r["left"] or 0) for r in c.execute(
+                    "SELECT sku, SUM(qty - COALESCE(qty_sold,0)) AS left FROM batches GROUP BY sku"
+                ).fetchall()}
 
         items: List[Dict[str, Any]] = []
         for r in rows:
@@ -828,42 +898,95 @@ def get_products_router(*_, **__) -> APIRouter:
                         media_type="text/csv; charset=utf-8",
                         headers={"Content-Disposition": 'attachment; filename="products-db.csv"'})
 
-    # Импорт (XML/XLSX) → умный upsert с дедупом (+dry_run)
-    @router.post("/import", dependencies=[Depends(_require_api_key)])
-    async def import_products(
+    # ──────────────────────────────────────────────────────────────────────
+    # ИМПОРТ / СИНХРОНИЗАЦИЯ
+    # ──────────────────────────────────────────────────────────────────────
+    @router.post("/import/sync", dependencies=[Depends(_require_api_key)])
+    async def import_sync(
         file: UploadFile = File(...),
-        price_only: int = Query(1),
+        mode: str = Query("replace", regex="^(replace|merge)$"),
+        only_prices: int = Query(0),
+        hard_delete_missing: int = Query(0),
         city_id: str = Query(os.getenv("KASPI_CITY_ID", "196220100")),
-        dry_run: int = Query(0, description="1 — только посчитать, без записи в БД"),
+        dry_run: int = Query(0),
     ):
-        content = await file.read()
-        try:
-            res = _smart_import_bytes(
-                file.filename or "", content,
-                city_id=city_id, price_only=bool(price_only), dry_run=bool(dry_run)
-            )
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(400, f"Не удалось обработать файл: {e}")
+        raw = await file.read()
+        items = _smart_import_bytes(file.filename or "", raw, city_id=city_id)
+        items, duplicates = _dedupe(items)
+
+        if dry_run:
+            skus = [_sku_of(x) for x in items]
+            exists = _existing_sku_set(skus)
+            return {
+                "dry_run": True,
+                "items_in_file": len(items),
+                "inserted": len([s for s in skus if s not in exists]),
+                "updated": len([s for s in skus if s in exists]),
+                "duplicates": duplicates,
+            }
+
+        res = _sync_with_file(
+            items,
+            mode=mode,
+            only_prices=bool(only_prices),
+            hard_delete_missing=bool(hard_delete_missing)
+        )
+        res["duplicates"] = duplicates
         return res
 
-    # Совместимость
-    @router.post("/manual-upload", dependencies=[Depends(_require_api_key)])
-    async def manual_upload(
+    # Совместимость (старые фронты) — делаем merge-режим по умолчанию
+    @router.post("/import", dependencies=[Depends(_require_api_key)])
+    async def import_compat(
         file: UploadFile = File(...),
         price_only: int = Query(1),
         city_id: str = Query(os.getenv("KASPI_CITY_ID", "196220100")),
         dry_run: int = Query(0),
     ):
-        content = await file.read()
-        return _smart_import_bytes(
-            file.filename or "", content,
-            city_id=city_id, price_only=bool(price_only), dry_run=bool(dry_run)
-        )
+        raw = await file.read()
+        items = _smart_import_bytes(file.filename or "", raw, city_id=city_id)
+        items, duplicates = _dedupe(items)
+        if dry_run:
+            skus = [_sku_of(x) for x in items]
+            exists = _existing_sku_set(skus)
+            return {
+                "dry_run": True,
+                "items_in_file": len(items),
+                "inserted": len([s for s in skus if s not in exists]),
+                "updated": len([s for s in skus if s in exists]),
+                "duplicates": duplicates,
+            }
+        res = _sync_with_file(items, mode="merge", only_prices=bool(price_only))
+        res["duplicates"] = duplicates
+        return res
+
+    @router.post("/manual-upload", dependencies=[Depends(_require_api_key)])
+    async def manual_upload(
+        file: UploadFile = File(...),
+        mode: str = Query("replace"),
+        only_prices: int = Query(0),
+        city_id: str = Query(os.getenv("KASPI_CITY_ID", "196220100")),
+        dry_run: int = Query(0),
+    ):
+        # пробрасываем на новый синхро-эндпоинт
+        raw = await file.read()
+        items = _smart_import_bytes(file.filename or "", raw, city_id=city_id)
+        items, duplicates = _dedupe(items)
+        if dry_run:
+            skus = [_sku_of(x) for x in items]
+            exists = _existing_sku_set(skus)
+            return {
+                "dry_run": True,
+                "items_in_file": len(items),
+                "inserted": len([s for s in skus if s not in exists]),
+                "updated": len([s for s in skus if s in exists]),
+                "duplicates": duplicates,
+            }
+        res = _sync_with_file(items, mode=mode, only_prices=bool(only_prices))
+        res["duplicates"] = duplicates
+        return res
 
     # ──────────────────────────────────────────────────────────────────────
-    # Партии
+    # ПАРТИИ
     # ──────────────────────────────────────────────────────────────────────
     @router.get("/db/price-batches/{sku}")
     async def get_batches(sku: str):
@@ -923,6 +1046,7 @@ def get_products_router(*_, **__) -> APIRouter:
                         (sku, e.date, int(e.qty), float(e.unit_cost), e.note,
                          float(e.commission_pct) if e.commission_pct is not None else None, code)
                     )
+                    _commit(c)
         return {"ok": True}
 
     @router.put("/db/price-batches/{sku}/{bid}", dependencies=[Depends(_require_api_key)])
@@ -952,6 +1076,7 @@ def get_products_router(*_, **__) -> APIRouter:
                 with _db() as cc:
                     cc.execute(f"UPDATE batches SET {', '.join(parts)} WHERE id=? AND sku=?", params)
                     cc.execute("UPDATE batches SET qty_sold = MIN(qty_sold, qty) WHERE id=? AND sku=?", (bid, sku))
+                    _commit(cc)
         return {"ok": True}
 
     @router.delete("/db/price-batches/{sku}/{bid}", dependencies=[Depends(_require_api_key)])
@@ -967,13 +1092,13 @@ def get_products_router(*_, **__) -> APIRouter:
                     raise HTTPException(400, "Cannot delete: batch has sales")
                 c.execute(_q("DELETE FROM batches WHERE id=:bid AND sku=:sku"), {"bid": bid, "sku": sku})
             else:
-                with _db() as cc:
-                    r = cc.execute("SELECT COALESCE(qty_sold,0) AS s FROM batches WHERE id=? AND sku=?", (bid, sku)).fetchone()
-                    if not r:
-                        raise HTTPException(404, "Batch not found")
-                    if int(r["s"]) > 0:
-                        raise HTTPException(400, "Cannot delete: batch has sales")
-                    cc.execute("DELETE FROM batches WHERE id=? AND sku=?", (bid, sku))
+                r = c.execute("SELECT COALESCE(qty_sold,0) AS s FROM batches WHERE id=? AND sku=?", (bid, sku)).fetchone()
+                if not r:
+                    raise HTTPException(404, "Batch not found")
+                if int(r["s"]) > 0:
+                    raise HTTPException(400, "Cannot delete: batch has sales")
+                c.execute("DELETE FROM batches WHERE id=? AND sku=?", (bid, sku))
+                _commit(c)
         return {"ok": True}
 
     @router.post("/batches/recount-sold", dependencies=[Depends(_require_api_key)])
