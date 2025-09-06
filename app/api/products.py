@@ -952,7 +952,7 @@ def get_products_router(*_, **__) -> APIRouter:
     @router.post("/sync/kaspi/run", dependencies=[Depends(_require_api_key)])
     async def run_kaspi_sync(
         mode: str = Query("merge", regex="^(merge|replace)$"),
-        price_only: int = Query(1),
+        price_only: int = Query(0),
         hard_delete_missing: int = Query(0),
     ):
         from app.services.kaspi_sync import kaspi_sync_run  # lazy import
@@ -1075,7 +1075,7 @@ def get_products_router(*_, **__) -> APIRouter:
     @router.post("/import", dependencies=[Depends(_require_api_key)])
     async def import_compat(
         file: UploadFile = File(...),
-        price_only: int = Query(1),
+        price_only: int = Query(0),
         city_id: str = Query(os.getenv("KASPI_CITY_ID", "196220100")),
         dry_run: int = Query(0),
     ):
