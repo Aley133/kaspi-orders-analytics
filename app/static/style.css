@@ -18,6 +18,12 @@
   --muted: #6b7280;
   --accent: #2563eb;
 }
+tr.needs-writeoff {
+  background: var(--err-bg); 
+}
+tr.needs-writeoff td { 
+  color: var(--err-fg); 
+}
 
 *{box-sizing:border-box}
 html,body{height:100%}
