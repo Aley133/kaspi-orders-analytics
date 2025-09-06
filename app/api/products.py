@@ -6,20 +6,27 @@ from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Body, Dep
 from fastapi.responses import Response, FileResponse
 from pydantic import BaseModel
 from contextlib import contextmanager
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, is_dataclass, dataclass
 import io
 import os
 import shutil
 import sqlite3
+import datetime as _dt
 
 # ──────────────────────────────────────────────────────────────────────────────
-# optional Excel
+# optional deps
 # ──────────────────────────────────────────────────────────────────────────────
 try:
     import openpyxl
     _OPENPYXL_OK = True
 except Exception:
     _OPENPYXL_OK = False
+
+try:
+    import requests  # для XML-фида Kaspi
+    _REQ_OK = True
+except Exception:
+    _REQ_OK = False
 
 # ──────────────────────────────────────────────────────────────────────────────
 # DB backends (PG via SQLAlchemy / fallback SQLite)
@@ -105,6 +112,18 @@ def _require_api_key(req: Request) -> bool:
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ──────────────────────────────────────────────────────────────────────────────
+def _env_bool(name: str, default: bool) -> bool:
+    v = os.getenv(name)
+    if v is None: return default
+    s = str(v).strip().lower()
+    return s in ("1","true","yes","on","+","y")
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, default))
+    except Exception:
+        return float(default)
+
 def _gen_batch_code() -> str:
     alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
     import random as _r
@@ -385,6 +404,15 @@ def bulk_upsert_products(rows: List[Dict[str, Any]], *, price_only: bool = True)
     inserted, updated = _upsert_products(rows, price_only=price_only)
     return {"inserted": inserted, "updated": updated}
 
+def _count_active_in_db() -> int:
+    with _db() as c:
+        if _USE_PG:
+            r = c.execute(_q("SELECT COUNT(*) AS c FROM products WHERE active=1")).first()
+            return int(r._mapping["c"] if r else 0)
+        else:
+            r = c.execute("SELECT COUNT(*) AS c FROM products WHERE active=1").fetchone()
+            return int(r["c"] if r else 0)
+
 def _deactivate_missing(keep_skus: List[str]) -> int:
     if not keep_skus:
         return 0
@@ -627,6 +655,109 @@ def _sync_with_file(
     }
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Simple inline Kaspi sync (XML feed) — безопасно, без внешних модулей
+# ──────────────────────────────────────────────────────────────────────────────
+@dataclass
+class KaspiSyncResult:
+    items_in_kaspi: int
+    inserted: int
+    updated: int
+    in_sale: int
+    removed: int
+    deactivated: int
+    deleted: int
+    safety_skipped: bool = False
+    reason: Optional[str] = None
+    source: str = "none"
+
+def _active_final(item: Dict[str, Any]) -> bool:
+    """Итоговая активность по правилам Kaspi/нашей логики:
+       True/False → как есть; None → qty>0? иначе дефолт из ENV."""
+    if item.get("active") is True:
+        return True
+    if item.get("active") is False:
+        return False
+    q = _maybe_int(item.get("qty"))
+    if q is not None:
+        return q > 0
+    return _env_bool("KASPI_DEFAULT_ACTIVE", True)
+
+def _fetch_kaspi_items_via_xml() -> Tuple[List[Dict[str,Any]], str]:
+    url = os.getenv("KASPI_PRICE_XML_URL") or ""
+    if not url:
+        return [], "disabled:no-url"
+    if not _REQ_OK:
+        raise HTTPException(500, "Для KASPI_PRICE_XML_URL требуется пакет 'requests'. Установите его в образ.")
+    try:
+        r = requests.get(url, timeout=60)
+        r.raise_for_status()
+    except Exception as e:
+        raise HTTPException(502, f"Не удалось скачать XML-фид Kaspi: {e}")
+    city_id = os.getenv("KASPI_CITY_ID", "196220100")
+    items = _parse_xml_smart(r.content, city_id=city_id)
+    items, _ = _dedupe(items)
+    return items, f"xml:{url}"
+
+def _run_kaspi_sync_inline(
+    *, mode: str, price_only: bool, hard_delete_missing: bool
+) -> KaspiSyncResult:
+    # 1) источник
+    items: List[Dict[str,Any]] = []
+    source = "none"
+
+    # пробуем XML-фид
+    try:
+        items, source = _fetch_kaspi_items_via_xml()
+    except HTTPException as e:
+        # отдаём понятную ошибку наверх
+        raise
+    except Exception as e:
+        # неизвестная ошибка скачивания/парсинга
+        raise HTTPException(502, f"Ошибка получения фида Kaspi: {e}")
+
+    if not items:
+        # источник не настроен — вернуть пустой результат, ничего не трогаем
+        return KaspiSyncResult(
+            items_in_kaspi=0, inserted=0, updated=0, in_sale=0, removed=0,
+            deactivated=0, deleted=0, safety_skipped=False, reason="Kaspi sync source is not configured", source=source
+        )
+
+    # 2) safety для replace (минимальная доля позиций)
+    safety_skipped = False
+    reason = None
+    if mode.lower() == "replace":
+        min_ratio = _env_float("KASPI_REPLACE_SAFETY_MIN_RATIO", 0.5)
+        active_now = _count_active_in_db()
+        if active_now > 0 and (len(items) / float(active_now)) < float(min_ratio):
+            # слишком мало позиций — пропускаем деактивацию
+            safety_skipped = True
+            reason = f"skip-deactivate: items_in_kaspi={len(items)} < {min_ratio*100:.0f}% of active_in_db={active_now}"
+            # принудительно делаем merge (без удаления)
+            mode = "merge"
+
+    # 3) синк в БД
+    sync_res = _sync_with_file(
+        items, mode=mode, only_prices=price_only, hard_delete_missing=hard_delete_missing
+    )
+
+    # 4) подсчёты
+    in_sale = sum(1 for it in items if _active_final(it))
+    removed = sum(1 for it in items if it.get("active") is False)
+
+    return KaspiSyncResult(
+        items_in_kaspi=len(items),
+        inserted=int(sync_res["inserted"]),
+        updated=int(sync_res["updated"]),
+        in_sale=int(in_sale),
+        removed=int(removed),
+        deactivated=int(sync_res["deactivated"]),
+        deleted=int(sync_res["deleted"]),
+        safety_skipped=safety_skipped,
+        reason=reason,
+        source=source,
+    )
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Pydantic models (batches)
 # ──────────────────────────────────────────────────────────────────────────────
 class BatchIn(BaseModel):
@@ -840,12 +971,21 @@ def get_products_router(*_, **__) -> APIRouter:
                     if commissions else 0.0
                 )
                 last_margin = price - (price * eff_comm/100.0) - float(ucost)
+
+            left_total = int(left_by_sku.get(sku, 0))
+            deficit = max(qty - left_total, 0)  # «не хватает партий»
+
             items.append({
                 "code": sku, "id": sku, "name": r.get("name"), "brand": r.get("brand"), "category": cat,
                 "qty": qty, "price": price, "active": bool(r.get("active")),
                 "batch_count": int(bc.get(sku, 0)),
                 "last_margin": round(last_margin, 2) if last_margin is not None else None,
-                "left_total": int(left_by_sku.get(sku, 0)),
+                "left_total": left_total,
+
+                # новое для фронта:
+                "deficit": deficit,
+                "has_deficit": bool(deficit),
+                "in_sale": bool(r.get("active")),  # «в продаже» = активен, независимо от партий
             })
         return {"count": len(items), "items": items}
 
@@ -933,24 +1073,19 @@ def get_products_router(*_, **__) -> APIRouter:
                 avgc = None if not rr or not rr["tq"] else float(rr["tc"])/float(rr["tq"])
         return {"product": prod, "batches": rows, "avg_cost": round(avgc,2) if avgc is not None else None}
 
-    # ── Синхронизация Kaspi (ленивый импорт, без циклов)
+    # ── Синхронизация Kaspi (встроенная, через XML фид)
     @router.post("/kaspi/sync", dependencies=[Depends(_require_api_key)])
     async def kaspi_sync_endpoint(
         mode: str = Query("merge", regex="^(merge|replace)$"),
         price_only: bool = Query(True),
         hard_delete_missing: bool = Query(False),
     ):
-        from app.services.kaspi_sync import kaspi_sync_run  # lazy import
-        res = kaspi_sync_run(
-            mode=mode,
-            price_only=price_only,
-            hard_delete_missing=hard_delete_missing,
+        res = _run_kaspi_sync_inline(
+            mode=mode, price_only=price_only, hard_delete_missing=hard_delete_missing
         )
         if is_dataclass(res):
             return asdict(res)
-        if isinstance(res, dict):
-            return res
-        return getattr(res, "__dict__", {"ok": True})
+        return res  # pragma: no cover
 
     # Совместимость со старым путём
     @router.post("/sync/kaspi/run", dependencies=[Depends(_require_api_key)])
@@ -959,17 +1094,12 @@ def get_products_router(*_, **__) -> APIRouter:
         price_only: int = Query(0),
         hard_delete_missing: int = Query(0),
     ):
-        from app.services.kaspi_sync import kaspi_sync_run  # lazy import
-        res = kaspi_sync_run(
-            mode=mode,
-            price_only=bool(price_only),
-            hard_delete_missing=bool(hard_delete_missing),
+        res = _run_kaspi_sync_inline(
+            mode=mode, price_only=bool(price_only), hard_delete_missing=bool(hard_delete_missing)
         )
         if is_dataclass(res):
             return asdict(res)
-        if isinstance(res, dict):
-            return res
-        return getattr(res, "__dict__", {"ok": True})
+        return res
 
     # Списки (в продаже / снятые)
     @router.get("/db/list/in-sale")
@@ -1037,7 +1167,7 @@ def get_products_router(*_, **__) -> APIRouter:
         )
         return Response(content=header + body,
                         media_type="text/csv; charset=utf-8",
-                        headers={"Content-Disposition": 'attachment; filename="products-db.csv"'})
+                        headers={"Content-Disposition": 'attachment; filename="products-db.csv'"})
 
     # ──────────────────────────────────────────────────────────────────────
     # ИМПОРТ / СИНХРОНИЗАЦИЯ
@@ -1065,6 +1195,20 @@ def get_products_router(*_, **__) -> APIRouter:
                 "updated": len([s for s in skus if s in exists]),
                 "duplicates": duplicates,
             }
+
+        # safety для replace
+        if mode.lower() == "replace":
+            min_ratio = _env_float("KASPI_REPLACE_SAFETY_MIN_RATIO", 0.5)
+            active_now = _count_active_in_db()
+            if active_now > 0 and (len(items) / float(active_now)) < float(min_ratio):
+                # пропускаем деактивацию
+                res = _sync_with_file(items, mode="merge", only_prices=bool(only_prices), hard_delete_missing=False)
+                res.update({
+                    "safety_skipped": True,
+                    "reason": f"skip-deactivate: items_in_file={len(items)} < {min_ratio*100:.0f}% of active_in_db={active_now}"
+                })
+                res["duplicates"] = duplicates
+                return res
 
         res = _sync_with_file(
             items,
