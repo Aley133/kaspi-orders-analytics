@@ -31,7 +31,7 @@ else:
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     _engine = create_engine(f"sqlite+pysqlite:///{DB_PATH}", future=True)
     DIALECT = "sqlite"
-
+SA_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg://", 1)
 IS_PG = DIALECT.startswith("postgres")
 NOW_MS = lambda: int(time.time() * 1000)
 
