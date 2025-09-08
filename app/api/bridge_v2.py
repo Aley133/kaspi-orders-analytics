@@ -32,6 +32,9 @@ else:
     _engine = create_engine(f"sqlite+pysqlite:///{DB_PATH}", future=True)
     DIALECT = "sqlite"
 SA_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg://", 1)
+
+_engine: Engine = create_engine(SA_URL, pool_pre_ping=True, future=True)
+SessionLocal = sessionmaker(bind=_engine, autoflush=False, autocommit=False)
 IS_PG = DIALECT.startswith("postgres")
 NOW_MS = lambda: int(time.time() * 1000)
 
