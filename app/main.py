@@ -23,7 +23,7 @@ from httpx import HTTPStatusError, RequestError
 # Роутеры доменных модулей
 from app.api.bridge_v2 import router as bridge_router
 from app.api.profit_fifo import get_profit_fifo_router
-
+from app.api.authz import router as auth_router
 
 # Роутер и ХЕЛПЕРЫ из debug_sku.py (для корректного извлечения позиций)
 from app.debug_sku import (
@@ -141,6 +141,7 @@ app.include_router(get_products_router(client), prefix="/products")
 app.include_router(get_profit_fifo_router(), prefix="/profit")
 app.include_router(get_debug_router())
 app.include_router(bridge_router, prefix="/profit")
+app.include_router(auth_router)
 
 # -------------------- Utils --------------------
 def tzinfo_of(name: str) -> pytz.BaseTzInfo:
