@@ -17,3 +17,4 @@ psycopg[binary]==3.1.19
 # uploads & excel
 python-multipart==0.0.9
 openpyxl==3.1.2
+python-jose[cryptography]==3.3.0
