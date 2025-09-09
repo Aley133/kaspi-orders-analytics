@@ -19,11 +19,9 @@
     const t = getToken();
     const headers = new Headers(init.headers || {});
     if (t) headers.set('Authorization', `Bearer ${t}`);
-    // JSON по умолчанию
     if (!headers.has('Accept')) headers.set('Accept', 'application/json');
     const resp = await fetch(input, { ...init, headers });
     if (resp.status === 401) {
-      // токен невалиден/протух — выкидываем на логин
       clearToken();
       const here = location.pathname + location.search;
       location.href = `/ui/login.html?next=${encodeURIComponent(here)}`;
@@ -32,7 +30,6 @@
     return resp;
   }
 
-  // requireAuth: проверяем, что токен есть и рабочий (пингуем лёгкую защищённую ручку)
   async function requireAuth() {
     const t = getToken();
     if (!t) {
@@ -41,15 +38,13 @@
       return false;
     }
     try {
-      const r = await authFetch('/settings/me'); // дешёвая и защищённая ручка
-      if (!r.ok) throw new Error('settings not ok');
+      const r = await authFetch('/settings/me');
+      if (!r.ok && r.status !== 404) throw new Error('settings not ok');
       return true;
     } catch {
       return false;
     }
   }
 
-  // Экспорт в window
   window.__auth = { getToken, setToken, clearToken, authFetch, requireAuth };
 })();
-
