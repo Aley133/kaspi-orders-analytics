@@ -126,14 +126,7 @@ if origins:
         allow_headers=["*"],
         allow_credentials=False,
     )
-app = FastAPI()
-
-@app.get("/meta")
-def meta():
-    return {
-        "SUPABASE_URL": os.environ["SUPABASE_URL"],
-        "SUPABASE_ANON_KEY": os.environ["SUPABASE_ANON_KEY"],
-    }
+    
 # Клиент к Kaspi API
 client = KaspiClient(token=KASPI_TOKEN, base_url=KASPI_BASE_URL) if KASPI_TOKEN else None
 
@@ -515,6 +508,14 @@ def _job_progress_cb(job_id: Optional[str]):
                 prog = 0.6 + min(0.4, 0.4 * (done / total))
         _job_update(job_id, phase=phase, progress=prog, done=done, total=total, message=extra_msg or Jobs[job_id].get("message",""))
     return cb
+
+@app.get("/auth/meta", tags=["auth"])
+def auth_meta():
+    url = os.getenv("SUPABASE_URL")
+    key = os.getenv("SUPABASE_ANON_KEY")
+    if not url or not key:
+        raise HTTPException(status_code=500, detail="Missing SUPABASE_URL or SUPABASE_ANON_KEY")
+    return {"SUPABASE_URL": url, "SUPABASE_ANON_KEY": key}
 
 # -------------------- Endpoints: META --------------------
 @app.get("/meta")
