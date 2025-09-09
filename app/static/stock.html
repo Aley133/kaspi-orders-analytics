@@ -304,6 +304,15 @@
     </main>
   </div>
 <script src="/ui/lib/auth.js"></script>
+<script>
+  // блокируем страницу до проверки авторизации
+  (async () => {
+    const ok = await window.__auth.requireAuth();
+    if (!ok) return; // тебя перекинет на login
+    // дальше — твоя инициализация страницы
+    // все запросы — через __auth.authFetch(...)
+  })();
+</script>
 <script type="module">
 /* ───────────────── helpers ───────────────── */
 const qs=(s,el=document)=>el.querySelector(s);
