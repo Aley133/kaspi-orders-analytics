@@ -126,7 +126,14 @@ if origins:
         allow_headers=["*"],
         allow_credentials=False,
     )
+app = FastAPI()
 
+@app.get("/meta")
+def meta():
+    return {
+        "SUPABASE_URL": os.environ["SUPABASE_URL"],
+        "SUPABASE_ANON_KEY": os.environ["SUPABASE_ANON_KEY"],
+    }
 # Клиент к Kaspi API
 client = KaspiClient(token=KASPI_TOKEN, base_url=KASPI_BASE_URL) if KASPI_TOKEN else None
 
