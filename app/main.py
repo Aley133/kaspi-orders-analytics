@@ -24,7 +24,6 @@ from starlette.staticfiles import StaticFiles
 from app.api.bridge_v2 import router as bridge_router
 from app.api.profit_fifo import get_profit_fifo_router
 from app.api.authz import router as auth_router
-from app.api.settings import router as settings_router
 
 
 # Роутер и ХЕЛПЕРЫ из debug_sku.py (для корректного извлечения позиций)
