@@ -60,9 +60,9 @@ def require_api_key(request: Request):
 # ──────────────────────────────────────────────────────────────────────────────
 # Инициализация только наших таблиц (batches/products/categories уже создаёт products.py)
 # ──────────────────────────────────────────────────────────────────────────────
-def _init_bridge_tables():
-
-     with _engine.begin() as con:
+def _init_bridge_tables() -> None:
+    with _engine.begin() as con:
+        # batches
         con.execute(text("""
             create table if not exists public.batches (
               id             bigserial primary key,
@@ -76,31 +76,31 @@ def _init_bridge_tables():
         con.execute(text("""
             create index if not exists idx_batches_sku on public.batches(sku)
         """))
-    
-    with db() as con:
+
+        # bridge_lines
         con.execute(text("""
-            CREATE TABLE IF NOT EXISTS bridge_lines(
-              order_id     TEXT NOT NULL,
-              order_code   TEXT,
-              state        TEXT,
-              date_utc_ms  BIGINT,
-              sku          TEXT,
-              title        TEXT,
-              qty          INTEGER DEFAULT 1,
-              unit_price   DOUBLE PRECISION DEFAULT 0,
-              total_price  DOUBLE PRECISION DEFAULT 0,
-              line_index   INTEGER NOT NULL,
-              created_at   BIGINT,
-              updated_at   BIGINT,
-              PRIMARY KEY(order_id, line_index)
+            create table if not exists bridge_lines(
+              order_id     text not null,
+              order_code   text,
+              state        text,
+              date_utc_ms  bigint,
+              sku          text,
+              title        text,
+              qty          integer default 1,
+              unit_price   double precision default 0,
+              total_price  double precision default 0,
+              line_index   integer not null,
+              created_at   bigint,
+              updated_at   bigint,
+              primary key(order_id, line_index)
             )
         """))
-        # Индексы
-        con.execute(text("CREATE INDEX IF NOT EXISTS ix_lines_date  ON bridge_lines(date_utc_ms)"))
-        con.execute(text("CREATE INDEX IF NOT EXISTS ix_lines_state ON bridge_lines(state)"))
-        con.execute(text("CREATE INDEX IF NOT EXISTS ix_lines_sku   ON bridge_lines(sku)"))
-        con.execute(text("CREATE INDEX IF NOT EXISTS ix_lines_code  ON bridge_lines(order_code)"))
+        con.execute(text("create index if not exists ix_lines_date  on bridge_lines(date_utc_ms)"))
+        con.execute(text("create index if not exists ix_lines_state on bridge_lines(state)"))
+        con.execute(text("create index if not exists ix_lines_sku   on bridge_lines(sku)"))
+        con.execute(text("create index if not exists ix_lines_code  on bridge_lines(order_code)"))
 
+# вызывать один раз при импорте модуля
 _init_bridge_tables()
 
 # ──────────────────────────────────────────────────────────────────────────────
