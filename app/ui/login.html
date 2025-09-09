@@ -144,23 +144,53 @@
     }
   })();
 
-  // ---------- Supabase client
+  <script>
+  // !!! Подставь свои реальные значения:
+  const FALLBACK_META = {
+    SUPABASE_URL: 'https://evmdqyngzleandtfkanv.supabase.co',
+    SUPABASE_ANON_KEY: '...твой anon key...'
+  };
+
   let supa, meta;
-  (async function init(){
-    try{
-      meta = await fetch('/meta', {cache: 'no-store'}).then(r => r.json());
+
+  async function loadMeta() {
+    const attempts = [
+      () => fetch('/meta', { cache: 'no-store' }),
+      () => fetch('/api/meta', { cache: 'no-store' }),
+    ];
+    let lastErr;
+    for (const attempt of attempts) {
+      try {
+        const r = await attempt();
+        if (r.ok) return await r.json();
+        lastErr = new Error(`GET ${r.url || '/meta'} → ${r.status} ${r.statusText}`);
+      } catch (e) { lastErr = e; }
+    }
+    // если все попытки не удались — используем запасные ключи
+    console.warn('Using FALLBACK_META due to error:', lastErr);
+    return FALLBACK_META;
+  }
+
+  (async function init() {
+    try {
+      meta = await loadMeta();
       if (!meta?.SUPABASE_URL || !meta?.SUPABASE_ANON_KEY) {
-        throw new Error('Метаданные не получены: /meta вернуло пусто');
+        throw new Error('Meta keys missing');
       }
       supa = window.supabase.createClient(meta.SUPABASE_URL, meta.SUPABASE_ANON_KEY);
-
-      // покажем домен отправителя в подсказке
       document.getElementById('mail-from').textContent = new URL(meta.SUPABASE_URL).host;
-    }catch(e){
-      showErr(document.getElementById('email-err'), 'Не удалось инициализировать клиент Supabase. Проверьте эндпоинт /meta.');
-      debugDump('init error', e);
+    } catch (e) {
+      // это и показывает «Клиент Supabase не инициализирован.»
+      const err = document.getElementById('email-err');
+      err.textContent = 'Не удалось инициализировать Supabase. Проверьте /meta или включите FALLBACK_META.';
+      err.classList.add('err'); err.style.display = 'block';
+      const dbgCheck = document.getElementById('dbg-check');
+      const dbg = document.getElementById('dbg'); const pre = document.getElementById('dbg-pre');
+      dbgCheck.checked = true; dbg.style.display = 'block';
+      pre.textContent = (e?.message || '') + '\n' + (e?.stack || '');
     }
   })();
+</script>
 
   // ---------- Утилиты ошибок
   function showOk(el, msg){ el.textContent = msg; el.classList.remove('err'); el.classList.add('ok'); el.style.display='block'; }
