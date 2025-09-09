@@ -7,6 +7,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
+from sqlalchemy.orm import sessionmaker
 
 # ──────────────────────────────────────────────────────────────────────────────
 # DB backend: всегда через SQLAlchemy (и для Postgres, и для SQLite)
