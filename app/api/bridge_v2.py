@@ -22,19 +22,23 @@ PFX = ("/profit/bridge", "/bridge")
 REQ_API_KEY = (os.getenv("BRIDGE_API_KEY") or "").strip() or None
 
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+
+def _sa_url(url: str) -> str:
+    # для SQLAlchemy на psycopg3
+    return url.replace("postgresql://", "postgresql+psycopg://", 1)
+
 if DATABASE_URL:
-    _engine: Engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True)
-    DIALECT = _engine.dialect.name  # 'postgresql'
+    SA_URL = _sa_url(DATABASE_URL)
+    _engine = create_engine(SA_URL, pool_pre_ping=True, future=True)
+    DIALECT = _engine.dialect.name
 else:
-    # fallback для single-file/dev
     DB_PATH = os.getenv("DB_PATH", "/data/kaspi-orders.sqlite3")
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     _engine = create_engine(f"sqlite+pysqlite:///{DB_PATH}", future=True)
     DIALECT = "sqlite"
-SA_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg://", 1)
 
-_engine: Engine = create_engine(SA_URL, pool_pre_ping=True, future=True)
 SessionLocal = sessionmaker(bind=_engine, autoflush=False, autocommit=False)
+
 IS_PG = DIALECT.startswith("postgres")
 NOW_MS = lambda: int(time.time() * 1000)
 
