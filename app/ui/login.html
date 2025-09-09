@@ -144,30 +144,28 @@
     }
   })();
 
-  <script>
-  // !!! Подставь свои реальные значения:
+
   const FALLBACK_META = {
     SUPABASE_URL: 'https://evmdqyngzleandtfkanv.supabase.co',
-    SUPABASE_ANON_KEY: '...твой anon key...'
+    SUPABASE_ANON_KEY: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImV2bWRxeW5nemxlYW5kdGZrYW52Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTczNTg4NTIsImV4cCI6MjA3MjkzNDg1Mn0.9cd3U-CflWZlIaSfPonCYg0zaI9HCPs9qYcqbKPI7hw'
   };
 
   let supa, meta;
 
   async function loadMeta() {
     const attempts = [
-      () => fetch('/meta', { cache: 'no-store' }),
-      () => fetch('/api/meta', { cache: 'no-store' }),
+      () => fetch('/auth/meta', { cache: 'no-store' }),  // <-- новое место
+      () => fetch('/meta',      { cache: 'no-store' }),
     ];
     let lastErr;
     for (const attempt of attempts) {
       try {
         const r = await attempt();
         if (r.ok) return await r.json();
-        lastErr = new Error(`GET ${r.url || '/meta'} → ${r.status} ${r.statusText}`);
+        lastErr = new Error(`GET ${r.url || 'meta'} -> ${r.status} ${r.statusText}`);
       } catch (e) { lastErr = e; }
     }
-    // если все попытки не удались — используем запасные ключи
-    console.warn('Using FALLBACK_META due to error:', lastErr);
+    console.warn('Using FALLBACK_META due to:', lastErr);
     return FALLBACK_META;
   }
 
@@ -178,19 +176,19 @@
         throw new Error('Meta keys missing');
       }
       supa = window.supabase.createClient(meta.SUPABASE_URL, meta.SUPABASE_ANON_KEY);
+      // необязательно, но красиво: показать домен из Supabase URL
       document.getElementById('mail-from').textContent = new URL(meta.SUPABASE_URL).host;
     } catch (e) {
-      // это и показывает «Клиент Supabase не инициализирован.»
       const err = document.getElementById('email-err');
-      err.textContent = 'Не удалось инициализировать Supabase. Проверьте /meta или включите FALLBACK_META.';
-      err.classList.add('err'); err.style.display = 'block';
+      err.textContent = 'Не удалось инициализировать Supabase. Проверьте /auth/meta.';
+      err.style.display = 'block';
       const dbgCheck = document.getElementById('dbg-check');
       const dbg = document.getElementById('dbg'); const pre = document.getElementById('dbg-pre');
       dbgCheck.checked = true; dbg.style.display = 'block';
       pre.textContent = (e?.message || '') + '\n' + (e?.stack || '');
     }
   })();
-</script>
+
 
   // ---------- Утилиты ошибок
   function showOk(el, msg){ el.textContent = msg; el.classList.remove('err'); el.classList.add('ok'); el.style.display='block'; }
