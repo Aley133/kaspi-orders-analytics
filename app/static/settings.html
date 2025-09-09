@@ -66,38 +66,11 @@
     </div>
   </div>
 <script src="/ui/lib/auth.js"></script>
-  <script>
-  let supa;
-
-  async function initSupabase() {
-    const meta = await fetch('/auth/meta').then(r => r.json());
-    if (!meta?.SUPABASE_URL || !meta?.SUPABASE_ANON_KEY) {
-      throw new Error('Нет ключей Supabase. Проверь /auth/meta и ENV на сервере.');
-    }
-    supa = supabase.createClient(meta.SUPABASE_URL, meta.SUPABASE_ANON_KEY);
-  }
-
-  async function requireSession() {
-    if (!supa) await initSupabase();
-    // 1) нормальный путь — через Supabase SDK
-    const { data: { session } } = await supa.auth.getSession();
-    if (session?.access_token) return session;
-    // 2) фолбэк — токен из localStorage (после magic-link)
-    const t = localStorage.getItem('SUPA_JWT');
-    if (t) return { access_token: t };
-    // 3) нет токена — назад на логин
-    location.href = '/ui/login.html';
-    return null;
-  }
-
-  function authHeader(session) {
-    return { 'Authorization': `Bearer ${session.access_token}`, 'Content-Type': 'application/json' };
-  }
-
-  async function loadSettings(session) {
+<script>
+  async function loadSettings(sessionToken) {
     try {
-      const res = await fetch('/settings/me', { headers: authHeader(session) });
-      if (res.status === 404) return; // настроек ещё нет — ок
+      const res = await __auth.authFetch('/settings/me');
+      if (res.status === 404) return;
       if (!res.ok) throw new Error(await res.text());
       const s = await res.json();
       if (s.partner_id) partner_id.value = s.partner_id;
@@ -113,20 +86,20 @@
     }
   }
 
-  async function saveSettings(session) {
+  async function saveSettings() {
     const payload = {
       partner_id: partner_id.value ? Number(partner_id.value) : null,
       shop_name: shop_name.value || null,
-      kaspi_token: kaspi_token.value || null, // пусто => не менять
+      kaspi_token: kaspi_token.value || null,
       city_id: city_id.value ? Number(city_id.value) : null,
       business_day_start: bds.value || null,
       timezone: tz.value || null,
       min_margin_pct: min_margin.value ? Number(min_margin.value) : null,
       auto_reprice: auto_reprice.value === "" ? null : (auto_reprice.value === "true")
     };
-    const res = await fetch('/settings/me', {
+    const res = await __auth.authFetch('/settings/me', {
       method: 'POST',
-      headers: authHeader(session),
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
     });
     if (!res.ok) {
@@ -134,14 +107,14 @@
       alert('Ошибка сохранения: ' + t);
       return;
     }
-    location.href = '/ui/'; // готово
+    location.href = '/ui/';
   }
 
   (async () => {
-    const session = await requireSession();
-    if (!session) return;
-    await loadSettings(session);
-    document.getElementById('saveBtn').addEventListener('click', () => saveSettings(session));
+    const ok = await __auth.requireAuth();
+    if (!ok) return;
+    await loadSettings();
+    document.getElementById('saveBtn').addEventListener('click', saveSettings);
   })();
 </script>
 </body>
