@@ -19,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from cachetools import TTLCache
 from httpx import HTTPStatusError, RequestError
-
+from starlette.staticfiles import StaticFiles
 # Роутеры доменных модулей
 from app.api.bridge_v2 import router as bridge_router
 from app.api.profit_fifo import get_profit_fifo_router
@@ -134,7 +134,7 @@ client = KaspiClient(token=KASPI_TOKEN, base_url=KASPI_BASE_URL) if KASPI_TOKEN 
 orders_cache = TTLCache(maxsize=512, ttl=CACHE_TTL)
 
 # Статический UI
-app.mount("/ui", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static"), html=True), name="static")
+app.mount("/ui", StaticFiles(directory="app/ui", html=True), name="ui")
 
 # Подключаем доменные роутеры
 app.include_router(get_products_router(client), prefix="/products")
