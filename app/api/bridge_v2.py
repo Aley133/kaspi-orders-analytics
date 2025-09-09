@@ -8,7 +8,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import sessionmaker
-
+from sqlalchemy import create_engine, text
 # ──────────────────────────────────────────────────────────────────────────────
 # DB backend: всегда через SQLAlchemy (и для Postgres, и для SQLite)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -61,6 +61,22 @@ def require_api_key(request: Request):
 # Инициализация только наших таблиц (batches/products/categories уже создаёт products.py)
 # ──────────────────────────────────────────────────────────────────────────────
 def _init_bridge_tables():
+
+     with _engine.begin() as con:
+        con.execute(text("""
+            create table if not exists public.batches (
+              id             bigserial primary key,
+              sku            text not null,
+              unit_cost      numeric not null default 0,
+              commission_pct numeric not null default 0,
+              date           date,
+              created_at     timestamptz not null default now()
+            )
+        """))
+        con.execute(text("""
+            create index if not exists idx_batches_sku on public.batches(sku)
+        """))
+    
     with db() as con:
         con.execute(text("""
             CREATE TABLE IF NOT EXISTS bridge_lines(
