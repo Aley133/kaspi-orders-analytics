@@ -1,1 +1,176 @@
+<!-- app/ui/login.html -->
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Вход / Регистрация</title>
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" />
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <style>
+    :root { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    body { display:flex; align-items:center; justify-content:center; min-height:100vh; background:#0f172a; color:#e2e8f0; margin:0; }
+    .card { width:100%; max-width:440px; background:#111827; border:1px solid #1f2937; border-radius:16px; padding:28px; box-shadow:0 10px 30px rgba(0,0,0,.35); }
+    h1 { margin:0 0 16px; font-size:22px; }
+    .tabbar{ display:flex; gap:6px; margin:6px 0 18px }
+    .tabbar button{ flex:1; padding:10px 12px; border-radius:10px; border:1px solid #374151; background:#111827; color:#cbd5e1; cursor:pointer }
+    .tabbar button.active{ background:#1f2937; color:#fff; border-color:#475569 }
+    label{ font-size:13px; color:#93c5fd; }
+    input{ width:100%; padding:12px 14px; margin:6px 0 14px; border-radius:10px; border:1px solid #334155; background:#0b1220; color:#e2e8f0; outline:none }
+    input:focus{ border-color:#60a5fa; box-shadow:0 0 0 3px rgba(96,165,250,.2) }
+    .row{ display:flex; gap:10px }
+    .btn{ width:100%; padding:12px 14px; border-radius:10px; border:0; background:#3b82f6; color:#fff; cursor:pointer; font-weight:600 }
+    .btn:disabled{ opacity:.6; cursor:not-allowed }
+    .muted{ color:#9ca3af; font-size:12px; text-align:center; margin-top:10px }
+    .err{ color:#fecaca; background:#7f1d1d; border:1px solid #991b1b; padding:10px 12px; border-radius:10px; margin:8px 0; display:none }
+    .ok{ color:#bbf7d0; background:#14532d; border:1px solid #166534; padding:10px 12px; border-radius:10px; margin:8px 0; display:none }
+    .hidden{ display:none }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Вход или регистрация</h1>
+    <div class="tabbar">
+      <button id="tab-email" class="active">По e-mail</button>
+      <button id="tab-phone">По телефону (SMS)</button>
+    </div>
+
+    <!-- EMAIL FORM -->
+    <form id="form-email">
+      <label>Ваш e-mail</label>
+      <input id="email" type="email" placeholder="you@example.com" autocomplete="email" required />
+      <button class="btn" id="btn-send-email" type="submit">Отправить код</button>
+
+      <div class="ok" id="ok-email">Код отправлен. Проверьте почту и введите код ниже.</div>
+      <div class="err" id="err-email"></div>
+
+      <div id="email-verify" class="hidden">
+        <label>Код из письма</label>
+        <input id="email-code" inputmode="numeric" placeholder="6-значный код" />
+        <button class="btn" id="btn-verify-email" type="button">Подтвердить и войти</button>
+      </div>
+    </form>
+
+    <!-- PHONE FORM -->
+    <form id="form-phone" class="hidden">
+      <label>Номер телефона (в формате +7701…)</label>
+      <input id="phone" type="tel" placeholder="+7701XXXXXXX" autocomplete="tel" />
+      <button class="btn" id="btn-send-sms" type="submit">Отправить SMS-код</button>
+
+      <div class="ok" id="ok-sms">Код отправлен. Введите код ниже.</div>
+      <div class="err" id="err-sms"></div>
+
+      <div id="sms-verify" class="hidden">
+        <label>Код из SMS</label>
+        <input id="sms-code" inputmode="numeric" placeholder="6-значный код" />
+        <button class="btn" id="btn-verify-sms" type="button">Подтвердить и войти</button>
+      </div>
+    </form>
+
+    <p class="muted">Нажимая «Отправить код», вы соглашаетесь с обработкой персональных данных.</p>
+  </div>
+
+  <script>
+    // ——— UI переключение вкладок
+    const tabEmail = document.getElementById('tab-email');
+    const tabPhone = document.getElementById('tab-phone');
+    const formEmail = document.getElementById('form-email');
+    const formPhone = document.getElementById('form-phone');
+    tabEmail.onclick = () => { tabEmail.classList.add('active'); tabPhone.classList.remove('active'); formEmail.classList.remove('hidden'); formPhone.classList.add('hidden'); }
+    tabPhone.onclick = () => { tabPhone.classList.add('active'); tabEmail.classList.remove('active'); formPhone.classList.remove('hidden'); formEmail.classList.add('hidden'); }
+
+    // ——— Запоминаем SUPA_JWT если пришёл в hash (страховка для magic-link)
+    (() => {
+      const p = new URLSearchParams(location.hash.slice(1));
+      const t = p.get('access_token');
+      if (t) { localStorage.setItem('SUPA_JWT', t); history.replaceState(null,'', location.pathname + location.search); }
+    })();
+
+    // ——— Загружаем ключи Supabase из /meta и создаём клиент
+    let supa;
+    (async function init() {
+      const meta = await fetch('/meta').then(r=>r.json());
+      supa = window.supabase.createClient(meta.SUPABASE_URL, meta.SUPABASE_ANON_KEY);
+    })();
+
+    // ——— E-MAIL: отправить код
+    formEmail.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const email = document.getElementById('email').value.trim();
+      const err = document.getElementById('err-email');
+      const ok = document.getElementById('ok-email');
+      err.style.display='none'; ok.style.display='none';
+
+      if (!email) return;
+      document.getElementById('btn-send-email').disabled = true;
+      const { error } = await supa.auth.signInWithOtp({
+        email,
+        options: {
+          shouldCreateUser: true,
+          emailRedirectTo: location.origin + '/ui/'   // на всякий случай
+        }
+      });
+      document.getElementById('btn-send-email').disabled = false;
+
+      if (error) { err.textContent = error.message; err.style.display='block'; return; }
+      ok.style.display='block';
+      document.getElementById('email-verify').classList.remove('hidden');
+    });
+
+    // ——— E-MAIL: верифицировать код и войти
+    document.getElementById('btn-verify-email').addEventListener('click', async () => {
+      const email = document.getElementById('email').value.trim();
+      const token = document.getElementById('email-code').value.trim();
+      const err = document.getElementById('err-email');
+      err.style.display='none';
+      if (!email || !token) return;
+
+      const { data, error } = await supa.auth.verifyOtp({ email, token, type: 'email' });
+      if (error) { err.textContent = error.message; err.style.display='block'; return; }
+
+      // Сохраняем access_token как SUPA_JWT для нашего бекенда
+      if (data?.session?.access_token) {
+        localStorage.setItem('SUPA_JWT', data.session.access_token);
+      }
+      // Переходим в UI
+      location.href = '/ui/';
+    });
+
+    // ——— PHONE: отправить SMS
+    formPhone.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const phone = document.getElementById('phone').value.trim();
+      const err = document.getElementById('err-sms');
+      const ok = document.getElementById('ok-sms');
+      err.style.display='none'; ok.style.display='none';
+      if (!phone.startsWith('+')) { err.textContent = 'Введите номер в формате +77…'; err.style.display='block'; return; }
+
+      document.getElementById('btn-send-sms').disabled = true;
+      const { error } = await supa.auth.signInWithOtp({ phone, options: { shouldCreateUser: true }});
+      document.getElementById('btn-send-sms').disabled = false;
+
+      if (error) { err.textContent = error.message; err.style.display='block'; return; }
+      ok.style.display='block';
+      document.getElementById('sms-verify').classList.remove('hidden');
+    });
+
+    // ——— PHONE: верифицировать SMS-код и войти
+    document.getElementById('btn-verify-sms').addEventListener('click', async () => {
+      const phone = document.getElementById('phone').value.trim();
+      const token = document.getElementById('sms-code').value.trim();
+      const err = document.getElementById('err-sms');
+      err.style.display='none';
+      if (!phone || !token) return;
+
+      const { data, error } = await supa.auth.verifyOtp({ phone, token, type: 'sms' });
+      if (error) { err.textContent = error.message; err.style.display='block'; return; }
+
+      if (data?.session?.access_token) {
+        localStorage.setItem('SUPA_JWT', data.session.access_token);
+      }
+      location.href = '/ui/';
+    });
+  </script>
+</body>
+</html>
 
