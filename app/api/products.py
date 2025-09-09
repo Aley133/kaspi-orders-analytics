@@ -12,7 +12,8 @@ import os
 import shutil
 import sqlite3
 import datetime as _dt
-
+from app.kaspi_client import KaspiClient
+from app.deps.kaspi_client import get_kaspi_client
 # ──────────────────────────────────────────────────────────────────────────────
 # optional deps
 # ──────────────────────────────────────────────────────────────────────────────
@@ -874,6 +875,12 @@ def get_products_router(*_, **__) -> APIRouter:
             with _db() as c:
                 ok = c.execute("PRAGMA integrity_check").fetchone()[0]
             return {"ok": ok == "ok", "driver": "sqlite"}
+
+    @router.get("/my-skus")
+    async def my_skus(kaspi: KaspiClient = Depends(get_kaspi_client)):
+    # пример вызова
+    # for order in kaspi.iter_orders(...): ...
+        return {"ok": True}
 
     # Список из БД (для таблицы «Мой склад») + пагинация
     @router.get("/db/list")
