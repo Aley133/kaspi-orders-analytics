@@ -153,13 +153,6 @@
       </form>
 
       <div id="note" class="note"></div>
-
-<script>
-  if (!localStorage.getItem('SUPA_JWT')) {
-    location.href = '/ui/login.html';
-  }
-</script>
-
       <!-- KPI ПЕРИОДА -->
       <section class="kpi">
         <div class="kpi-item"><div class="kpi-label">Период</div><div class="kpi-value" id="periodLabel">—</div><div class="kpi-sub">до <span id="periodCutoff">—:—</span></div></div>
@@ -199,6 +192,12 @@
     </main>
   </div>
 
+<script>
+  if (!localStorage.getItem('SUPA_JWT')) {
+    location.href = '/ui/login.html';
+  }
+</script>
+  
 <script>
 /* ─────────── ХЕЛПЕРЫ ─────────── */
 const nf = new Intl.NumberFormat('ru-RU');
