@@ -67,34 +67,38 @@
   </div>
 
   <script>
-    // ИНИЦИАЛИЗАЦИЯ SUPABASE — возьми те же переменные, что и на login.html
-    const SB_URL = window.SUPABASE_URL || (window._SB_URL ?? "");
-    const SB_ANON = window.SUPABASE_ANON_KEY || (window._SB_ANON ?? "");
-    // Фолбэк: если на странице не объявлено — можно захардкодить как на login.html
+  let supa;
 
-    const supabase = window.supabase?.createClient(SB_URL, SB_ANON);
-
-    async function requireSession() {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session) {
-        location.href = '/ui/login.html';
-        return null;
-      }
-      return session;
+  async function initSupabase() {
+    const meta = await fetch('/auth/meta').then(r => r.json());
+    if (!meta?.SUPABASE_URL || !meta?.SUPABASE_ANON_KEY) {
+      throw new Error('Нет ключей Supabase. Проверь /auth/meta и ENV на сервере.');
     }
+    supa = supabase.createClient(meta.SUPABASE_URL, meta.SUPABASE_ANON_KEY);
+  }
 
-    function authHeader(session) {
-      return { 'Authorization': `Bearer ${session.access_token}`, 'Content-Type': 'application/json' };
-    }
+  async function requireSession() {
+    if (!supa) await initSupabase();
+    // 1) нормальный путь — через Supabase SDK
+    const { data: { session } } = await supa.auth.getSession();
+    if (session?.access_token) return session;
+    // 2) фолбэк — токен из localStorage (после magic-link)
+    const t = localStorage.getItem('SUPA_JWT');
+    if (t) return { access_token: t };
+    // 3) нет токена — назад на логин
+    location.href = '/ui/login.html';
+    return null;
+  }
 
-    async function loadSettings(session) {
+  function authHeader(session) {
+    return { 'Authorization': `Bearer ${session.access_token}`, 'Content-Type': 'application/json' };
+  }
+
+  async function loadSettings(session) {
+    try {
       const res = await fetch('/settings/me', { headers: authHeader(session) });
-      if (res.status === 404) return; // нет настроек — пустая форма
-      if (!res.ok) {
-        const t = await res.text();
-        alert('Ошибка загрузки настроек: ' + t);
-        return;
-      }
+      if (res.status === 404) return; // настроек ещё нет — ок
+      if (!res.ok) throw new Error(await res.text());
       const s = await res.json();
       if (s.partner_id) partner_id.value = s.partner_id;
       if (s.shop_name) shop_name.value = s.shop_name;
@@ -104,39 +108,41 @@
       if (s.timezone) tz.value = s.timezone;
       if (s.min_margin_pct != null) min_margin.value = s.min_margin_pct;
       if (s.auto_reprice != null) auto_reprice.value = String(s.auto_reprice);
+    } catch (e) {
+      alert('Ошибка загрузки настроек: ' + e.message);
     }
+  }
 
-    async function saveSettings(session) {
-      const payload = {
-        partner_id: partner_id.value ? Number(partner_id.value) : null,
-        shop_name: shop_name.value || null,
-        kaspi_token: kaspi_token.value || null, // пусто => не менять
-        city_id: city_id.value ? Number(city_id.value) : null,
-        business_day_start: bds.value || null,
-        timezone: tz.value || null,
-        min_margin_pct: min_margin.value ? Number(min_margin.value) : null,
-        auto_reprice: auto_reprice.value === "" ? null : (auto_reprice.value === "true")
-      };
-      const res = await fetch('/settings/me', {
-        method: 'POST',
-        headers: authHeader(session),
-        body: JSON.stringify(payload)
-      });
-      if (!res.ok) {
-        const t = await res.text();
-        alert('Ошибка сохранения: ' + t);
-        return;
-      }
-      // после первого успешного сохранения кидаем на главную
-      location.href = '/ui/';
+  async function saveSettings(session) {
+    const payload = {
+      partner_id: partner_id.value ? Number(partner_id.value) : null,
+      shop_name: shop_name.value || null,
+      kaspi_token: kaspi_token.value || null, // пусто => не менять
+      city_id: city_id.value ? Number(city_id.value) : null,
+      business_day_start: bds.value || null,
+      timezone: tz.value || null,
+      min_margin_pct: min_margin.value ? Number(min_margin.value) : null,
+      auto_reprice: auto_reprice.value === "" ? null : (auto_reprice.value === "true")
+    };
+    const res = await fetch('/settings/me', {
+      method: 'POST',
+      headers: authHeader(session),
+      body: JSON.stringify(payload)
+    });
+    if (!res.ok) {
+      const t = await res.text();
+      alert('Ошибка сохранения: ' + t);
+      return;
     }
+    location.href = '/ui/'; // готово
+  }
 
-    (async () => {
-      const session = await requireSession();
-      if (!session) return;
-      await loadSettings(session);
-      document.getElementById('saveBtn').addEventListener('click', () => saveSettings(session));
-    })();
-  </script>
+  (async () => {
+    const session = await requireSession();
+    if (!session) return;
+    await loadSettings(session);
+    document.getElementById('saveBtn').addEventListener('click', () => saveSettings(session));
+  })();
+</script>
 </body>
 </html>
