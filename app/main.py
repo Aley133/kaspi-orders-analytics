@@ -19,14 +19,14 @@ from fastapi.responses import RedirectResponse, PlainTextResponse, JSONResponse
 from pydantic import BaseModel
 from cachetools import TTLCache
 from httpx import HTTPStatusError, RequestError
-from starlette.staticfiles import StaticFiles
-# Роутеры доменных модулей
+
+# ── Доменные роутеры
 from app.api.bridge_v2 import router as bridge_router
 from app.api.profit_fifo import get_profit_fifo_router
 from app.api.authz import router as auth_router
-from starlette.staticfiles import StaticFiles
+from app.api.settings import router as settings_router  # <- ВАЖНО: был пропущен импорт
 
-# Роутер и ХЕЛПЕРЫ из debug_sku.py (для корректного извлечения позиций)
+# Вспомогательные функции для извлечения SKU/названий
 from app.debug_sku import (
     get_debug_router,
     _index_included,
@@ -45,7 +45,7 @@ except Exception:
     except Exception:
         from kaspi_client import KaspiClient  # type: ignore
 
-# Products router
+# products router (оставляем совместимость с аргументом client)
 try:
     from app.api.products import get_products_router
 except Exception as _e1:
@@ -59,8 +59,8 @@ except Exception as _e1:
 
 load_dotenv()
 
-# -------------------- ENV --------------------
-KASPI_TOKEN = os.getenv("KASPI_TOKEN", "").strip()
+# ─────────────────────────── ENV ───────────────────────────
+KASPI_TOKEN = os.getenv("KASPI_TOKEN", "").strip()  # пока используется как глобальный fallback
 DEFAULT_TZ = os.getenv("TZ", "Asia/Almaty")
 KASPI_BASE_URL = os.getenv("KASPI_BASE_URL", "https://kaspi.kz/shop/api/v2").rstrip("/")
 CURRENCY = os.getenv("CURRENCY", "KZT")
@@ -81,11 +81,11 @@ CACHE_TTL = int(os.getenv("CACHE_TTL", "300") or 300)
 SHOP_NAME = os.getenv("SHOP_NAME", "LeoXpress")
 PARTNER_ID = os.getenv("PARTNER_ID", "")
 
-# --- Business day defaults ---
+# Бизнес-день
 BUSINESS_DAY_START = os.getenv("BUSINESS_DAY_START", "20:00")  # HH:MM
 USE_BUSINESS_DAY = os.getenv("USE_BUSINESS_DAY", "true").lower() in ("1", "true", "yes", "on")
 
-# Cutoff приёма заказов магазином (после него незакомплектованные уедут на завтра)
+# Cutoff приёма заказов магазином
 STORE_ACCEPT_UNTIL = os.getenv("STORE_ACCEPT_UNTIL", "17:00")  # HH:MM
 
 # Параллельность обогащения SKU (базовая)
@@ -94,7 +94,7 @@ ENRICH_CONCURRENCY = int(os.getenv("ENRICH_CONCURRENCY", "8") or 8)
 # По умолчанию включаем доставленные + архивные
 DEFAULT_INCLUDE_STATES: set[str] = {"KASPI_DELIVERY", "ARCHIVE", "ARCHIVED"}
 
-# -------------------- микс утилит --------------------
+# ─────────────────────────── Вспомогательные ───────────────────────────
 def _bd_delta(hhmm: str) -> timedelta:
     try:
         hh, mm = hhmm.split(":")
@@ -112,23 +112,24 @@ def _parse_hhmm_to_time(hhmm: str) -> time:
 def _days_between(a: datetime, b: datetime) -> int:
     return max(1, (b.date() - a.date()).days + 1)
 
-# runtime flags
+# runtime-флаги (важно: глобалки ⇒ аккуратнее с параллельными запросами)
 _EFF_USE_BD: bool = USE_BUSINESS_DAY
 _EFF_BDS: str = BUSINESS_DAY_START
 
-# -------------------- FastAPI --------------------
+# ─────────────────────────── FastAPI ───────────────────────────
 app = FastAPI(title="Kaspi Orders Analytics")
+
 origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
 if origins:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=origins,
-        allow_methods=["GET","POST","PUT","DELETE","OPTIONS"],
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
         allow_headers=["*"],
         allow_credentials=False,
     )
-    
-# Клиент к Kaspi API
+
+# Глобальный (временный) Kaspi-клиент
 client = KaspiClient(token=KASPI_TOKEN, base_url=KASPI_BASE_URL) if KASPI_TOKEN else None
 
 # Кэш ответов (включая entries по заказам)
@@ -145,7 +146,7 @@ app.include_router(bridge_router, prefix="/profit")
 app.include_router(auth_router)
 app.include_router(settings_router)
 
-# -------------------- Utils --------------------
+# ─────────────────────────── Утилиты времени/парсинга ───────────────────────────
 def tzinfo_of(name: str) -> pytz.BaseTzInfo:
     try:
         return pytz.timezone(name)
@@ -189,7 +190,6 @@ def parse_states_csv(s: Optional[str]) -> Optional[set[str]]:
         return None
     return {norm_state(x) for x in re.split(r"[\s,;]+", s) if x.strip()}
 
-# Подсказки для извлечения города
 _CITY_KEY_HINTS = {"city", "cityname", "town", "locality", "settlement"}
 
 def _normalize_city(s: str) -> str:
@@ -265,7 +265,7 @@ def _guess_number(attrs: dict, fallback_id: str) -> str:
             return v.strip()
     return str(fallback_id)
 
-# -------------------- HTTPX и ретраи --------------------
+# ─────────────────────────── HTTPX и ретраи ───────────────────────────
 BASE_TIMEOUT = httpx.Timeout(connect=10.0, read=80.0, write=20.0, pool=60.0)
 HTTPX_LIMITS = httpx.Limits(max_connections=20, max_keepalive_connections=10)
 
@@ -311,7 +311,7 @@ async def _get_json_with_retries(cli: httpx.AsyncClient, url: str, *, params: Di
             backoff = min(0.9 * (2 ** i), 16.0) + random.uniform(0.0, 0.4)
             await asyncio.sleep(backoff)
 
-# -------------------- «Умное» назначение операционного дня --------------------
+# ─────────────────────────── Бизнес-день ───────────────────────────
 _DELIVERED_STATES = {"KASPI_DELIVERY", "ARCHIVE", "ARCHIVED"}
 
 def _smart_operational_day(attrs: dict, state: str, tzinfo: pytz.BaseTzInfo,
@@ -342,7 +342,7 @@ def _smart_operational_day(attrs: dict, state: str, tzinfo: pytz.BaseTzInfo,
 
     return datetime.now(tzinfo).date().isoformat(), "fallback_now"
 
-# -------------------- Вытягивание позиций (ВСЕ SKU) --------------------
+# ─────────────────────────── Entries (все SKU) ───────────────────────────
 async def _all_items_details(order_id: str, return_candidates: bool = True, timeout_scale: float = 1.0) -> List[Dict[str, object]]:
     """
     Список позиций заказа. Кэшируем на TTLCache. Масштабируем таймауты под объём.
@@ -425,7 +425,7 @@ async def _all_items_details(order_id: str, return_candidates: bool = True, time
     orders_cache[cache_key] = [dict(x) for x in items]
     return items
 
-# -------------------- (совместимость) первая позиция --------------------
+# ─────────────────────────── Первая позиция (совместимость) ───────────────────────────
 async def _first_item_details(order_id: str, return_candidates: bool = False, timeout_scale: float = 1.0) -> Optional[Dict[str, object]]:
     items = await _all_items_details(order_id, return_candidates=return_candidates, timeout_scale=timeout_scale)
     if not items:
@@ -437,7 +437,7 @@ async def _first_item_details(order_id: str, return_candidates: bool = False, ti
         out["title_candidates"] = first.get("title_candidates", {})
     return out
 
-# -------------------- Models --------------------
+# ─────────────────────────── Модели ───────────────────────────
 class DayPoint(BaseModel):
     x: str
     count: int
@@ -459,7 +459,7 @@ class AnalyticsResponse(BaseModel):
     cities: List[CityCount] = []
     state_breakdown: Dict[str, int] = {}
 
-# -------------------- Вспомогательное расширение состояний --------------------
+# ─────────────────────────── States helpers ───────────────────────────
 _ARCHIVE_ALIASES = {"ARCHIVE", "ARCHIVED"}
 
 def _expand_with_archive(states_inc: Optional[set[str]]) -> set[str]:
@@ -469,7 +469,7 @@ def _expand_with_archive(states_inc: Optional[set[str]]) -> set[str]:
         return set(states_inc) | _ARCHIVE_ALIASES
     return set(states_inc)
 
-# -------------------- Прогресс-джобы --------------------
+# ─────────────────────────── Прогресс-джобы ───────────────────────────
 Jobs: Dict[str, Dict[str, object]] = {}  # job_id -> state
 
 def _new_job() -> str:
@@ -490,7 +490,8 @@ def _new_job() -> str:
 
 def _job_update(job_id: str, **patch):
     st = Jobs.get(job_id)
-    if not st: return
+    if not st:
+        return
     st.update(patch)
     st["updated"] = datetime.utcnow().isoformat() + "Z"
 
@@ -511,6 +512,7 @@ def _job_progress_cb(job_id: Optional[str]):
         _job_update(job_id, phase=phase, progress=prog, done=done, total=total, message=extra_msg or Jobs[job_id].get("message",""))
     return cb
 
+# ─────────────────────────── Auth meta ───────────────────────────
 @app.get("/auth/meta", tags=["auth"])
 def auth_meta():
     url = os.getenv("SUPABASE_URL")
@@ -519,7 +521,7 @@ def auth_meta():
         raise HTTPException(status_code=500, detail="Missing SUPABASE_URL or SUPABASE_ANON_KEY")
     return {"SUPABASE_URL": url, "SUPABASE_ANON_KEY": key}
 
-# -------------------- Endpoints: META --------------------
+# ─────────────────────────── META ───────────────────────────
 @app.get("/meta")
 async def meta():
     return {
@@ -538,7 +540,7 @@ async def meta():
         "store_accept_until": STORE_ACCEPT_UNTIL,
     }
 
-# -------------------- Внутреннее ядро сбора --------------------
+# ─────────────────────────── Ядро сбора ───────────────────────────
 def _calc_timeout_scale(days_span: int, targets: int) -> float:
     scale = 1.0
     if days_span >= 10:
@@ -554,10 +556,6 @@ def _calc_timeout_scale(days_span: int, targets: int) -> float:
     return min(5.0, scale)
 
 def _calc_enrich_params(total_targets: int) -> Tuple[int, float]:
-    """
-    Возвращает (concurrency, per_item_sleep)
-    бережно троттлим при больших объёмах, чтобы Kaspi не душил.
-    """
     if total_targets >= 2000:
         return max(2, ENRICH_CONCURRENCY // 3), 0.12
     if total_targets >= 1000:
@@ -678,7 +676,7 @@ async def _collect_range(
 
     return out_days, city_counts, total_orders, round(total_amount, 2), state_counts, flat_out
 
-# -------------------- Публичные эндпоинты аналитики --------------------
+# ─────────────────────────── /orders/analytics ───────────────────────────
 @app.get("/orders/analytics", response_model=AnalyticsResponse)
 async def analytics(start: str = Query(...), end: str = Query(...), tz: str = Query(DEFAULT_TZ),
                     date_field: str = Query(DATE_FIELD_DEFAULT),
@@ -752,10 +750,8 @@ async def analytics(start: str = Query(...), end: str = Query(...), tz: str = Qu
         "state_breakdown": st_counts,
     }
 
-# -------------------- Вспомогательная «ядровая» функция list_ids --------------------
+# ─────────────────────────── Helper выбора целей для обогащения ───────────────────────────
 def _select_targets(out: List[Dict[str, object]], enrich_day: str, enrich_scope: str, limit: int) -> List[Dict[str, object]]:
-    # В режиме "all" возвращаем все элементы периода без учёта limit —
-    # ограничение, если задано, применяем позже к финальному out.
     if enrich_scope == "all":
         return out
     if enrich_scope == "last_day":
@@ -770,8 +766,9 @@ def _select_targets(out: List[Dict[str, object]], enrich_day: str, enrich_scope:
         last_dt = date(y, m, d)
         scope = {(last_dt - timedelta(days=i)).isoformat() for i in range(30)}
         return [it for it in out if str(it["op_day"]) in scope]
-    return []  # none
+    return []
 
+# ─────────────────────────── list_ids ядро ───────────────────────────
 async def _list_ids_core(
     start: str, end: str, tz: str, date_field: str,
     states: Optional[str], exclude_states: Optional[str],
@@ -889,7 +886,7 @@ async def _list_ids_core(
         "currency": CURRENCY,
     }
 
-# -------------------- Синхронная версия /orders/ids --------------------
+# ─────────────────────────── /orders/ids ───────────────────────────
 @app.get("/orders/ids")
 async def list_ids(
     start: str = Query(...),
@@ -916,7 +913,7 @@ async def list_ids(
         enrich_scope, items_mode, return_candidates, assign_mode, store_accept_until, None
     )
 
-# -------------------- CSV --------------------
+# ─────────────────────────── CSV ───────────────────────────
 @app.get("/orders/ids.csv", response_class=PlainTextResponse)
 async def list_ids_csv(
     start: str = Query(...),
@@ -941,7 +938,7 @@ async def list_ids_csv(
     csv = "\n".join([str(it["number"]) for it in data["items"]])
     return csv
 
-# -------------------- Асинхронная версия с прогрессом --------------------
+# ─────────────────────────── async с прогрессом ───────────────────────────
 @app.post("/orders/ids.async")
 async def list_ids_async(
     start: str = Query(...),
@@ -1011,7 +1008,7 @@ async def job_cancel(job_id: str):
     st["cancel"] = True
     return {"ok": True}
 
-# -------------------- ROOT --------------------
+# ─────────────────────────── ROOT ───────────────────────────
 @app.get("/", include_in_schema=False)
 async def root():
     return RedirectResponse(url="/ui/")
