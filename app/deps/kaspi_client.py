@@ -1,7 +1,7 @@
 from __future__ import annotations
 from typing import Dict, Iterator, Optional
 from datetime import datetime, timezone
-import httpx
+import httpx, asyncio
 
 DEFAULT_BASE = "https://kaspi.kz/shop/api/v2"
 
@@ -15,7 +15,7 @@ class KaspiClient:
         self.base_url = (base_url or DEFAULT_BASE).rstrip("/")
         self.token = token
         self.timeout = httpx.Timeout(connect=10.0, read=read_timeout, write=20.0, pool=60.0)
-        self.limits = httpx.Limits(max_connections=20, max_keepalive_connections=10)
+        self.limits = httpx.Limits(max_connections=10, max_keepalive_connections=5)
 
     def _headers(self) -> Dict[str, str]:
         return {
@@ -26,15 +26,11 @@ class KaspiClient:
         }
 
     def iter_orders(self, *, start: datetime, end: datetime, filter_field: str = "creationDate") -> Iterator[Dict]:
-        """
-        Итератор по заказам в интервале [start; end].
-        filter_field ∈ {"creationDate","plannedShipmentDate","shipmentDate","deliveryDate"}
-        """
         page = 0
         while True:
             params = {
                 "page[number]": str(page),
-                "page[size]": "200",
+                "page[size]": "1",
                 f"filter[{filter_field}][ge]": str(_to_ms(start)),
                 f"filter[{filter_field}][le]": str(_to_ms(end)),
                 "include": "attributes",
@@ -50,3 +46,15 @@ class KaspiClient:
             for it in data:
                 yield it
             page += 1
+
+    async def verify_token(self) -> bool:
+        url = f"{self.base_url}/orders"
+        params = {"page[number]": "0", "page[size]": "1"}
+        async with httpx.AsyncClient(timeout=self.timeout, limits=self.limits) as cli:
+            r = await cli.get(url, headers=self._headers(), params=params)
+            if r.status_code == 200:
+                return True
+            if r.status_code in (401, 403):
+                return False
+            r.raise_for_status()
+            return True
