@@ -3,6 +3,11 @@ from fastapi import Depends
 from app.deps.auth import get_current_user
 from app import db
 
+def require_tenant_optional(user = Depends(get_current_user)) -> str | None:
+    uid = user["sub"] if isinstance(user, dict) else user
+    row = db.fetchrow("select tenant_id from org_members where user_id=%s limit 1", [uid])
+    return row["tenant_id"] if row else None
+
 def require_tenant(user = Depends(get_current_user)) -> str:
     # пробуем найти привязку
     row = db.fetchrow(
