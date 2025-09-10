@@ -7,52 +7,97 @@
   <link rel="stylesheet" href="style.css"/>
 </head>
 <body data-theme="light" style="display:flex;align-items:center;justify-content:center;height:100vh">
-  <div class="card" style="max-width:420px;width:100%;padding:24px;border:1px solid #e5e7eb;border-radius:16px">
+  <div class="card" style="max-width:460px;width:100%;padding:24px;border:1px solid #e5e7eb;border-radius:16px">
     <h1 style="margin:0 0 12px">Вход</h1>
-    <p class="muted" style="margin:0 0 16px">Введите e-mail, мы пришлём 6-значный код.</p>
-    <div>
+    <p class="muted" style="margin:0 0 16px">Войдите по SMS-коду. Формат телефона: +7…</p>
+
+    <div id="modeSwitch" style="margin-bottom:8px">
+      <button id="modeSms"  class="chip">SMS</button>
+      <button id="modeEmail" class="chip">Email</button>
+    </div>
+
+    <div id="smsForm">
+      <label>Телефон (E.164)</label>
+      <input id="phone" placeholder="+77001234567" style="width:100%;padding:10px;border:1px solid #e5e7eb;border-radius:10px"/>
+      <button id="sendSms" style="margin-top:12px;padding:10px 14px;border-radius:10px">Получить код</button>
+
+      <div id="smsOtpBlock" style="display:none;margin-top:16px">
+        <label>Код из SMS</label>
+        <input id="smsOtp" inputmode="numeric" maxlength="6" placeholder="123456" style="width:100%;padding:10px;border:1px solid #e5e7eb;border-radius:10px"/>
+        <button id="verifySms" style="margin-top:12px;padding:10px 14px;border-radius:10px">Войти</button>
+      </div>
+    </div>
+
+    <div id="emailForm" style="display:none">
       <label>E-mail</label>
       <input id="email" type="email" placeholder="you@company.kz" style="width:100%;padding:10px;border:1px solid #e5e7eb;border-radius:10px"/>
-    </div>
-    <button id="send" style="margin-top:12px;padding:10px 14px;border-radius:10px">Получить код</button>
+      <button id="sendEmail" style="margin-top:12px;padding:10px 14px;border-radius:10px">Получить код</button>
 
-    <div id="otpBlock" style="display:none;margin-top:16px">
-      <label>Код из e-mail</label>
-      <input id="otp" inputmode="numeric" maxlength="6" placeholder="123456" style="width:100%;padding:10px;border:1px solid #e5e7eb;border-radius:10px"/>
-      <button id="verify" style="margin-top:12px;padding:10px 14px;border-radius:10px">Войти</button>
+      <div id="emailOtpBlock" style="display:none;margin-top:16px">
+        <label>Код из письма</label>
+        <input id="emailOtp" inputmode="numeric" maxlength="6" placeholder="123456" style="width:100%;padding:10px;border:1px solid #e5e7eb;border-radius:10px"/>
+        <button id="verifyEmail" style="margin-top:12px;padding:10px 14px;border-radius:10px">Войти</button>
+      </div>
     </div>
 
     <p id="msg" style="margin-top:12px;color:#6b7280"></p>
   </div>
 
-  <!-- Supabase helper -->
   <script src="./Lib/auth.js"></script>
   <script>
     const $ = sel => document.querySelector(sel);
-    $('#send').onclick = async () => {
-      const email = $('#email').value.trim();
-      if (!email) return $('#msg').textContent = 'Введите e-mail';
-      $('#msg').textContent = 'Отправляем код...';
-      try{
-        await Auth.signInEmailOtp(email);
-        $('#otpBlock').style.display = 'block';
-        $('#msg').textContent = 'Код отправлен. Проверьте почту.';
-      }catch(e){
-        $('#msg').textContent = 'Ошибка: ' + (e?.message || e);
-      }
+    (async () => { await Auth.bounceIfAuthed(); })();
+
+    function setMode(m){
+      $('#smsForm').style.display = (m==='sms'?'block':'none');
+      $('#emailForm').style.display = (m==='email'?'block':'none');
+    }
+    setMode('sms');
+    $('#modeSms').onclick = () => setMode('sms');
+    $('#modeEmail').onclick = () => setMode('email');
+
+    // SMS
+    $('#sendSms').onclick = async () => {
+      const phone = $('#phone').value.trim();
+      if (!phone) return $('#msg').textContent = 'Укажите телефон';
+      $('#msg').textContent = 'Отправляем SMS...';
+      try { await Auth.signInPhoneOtp(phone);
+        $('#smsOtpBlock').style.display='block';
+        $('#msg').textContent = 'Код отправлен';
+      } catch(e){ $('#msg').textContent = 'Ошибка: ' + (e?.message||e); }
     };
-    $('#verify').onclick = async () => {
-      const email = $('#email').value.trim();
-      const code = $('#otp').value.trim();
+    $('#verifySms').onclick = async () => {
+      const phone = $('#phone').value.trim();
+      const code = $('#smsOtp').value.trim();
       if (!code) return $('#msg').textContent = 'Введите код';
       $('#msg').textContent = 'Проверяем...';
-      try{
-        const ok = await Auth.verifyEmailOtp(email, code);
-        if (ok) window.location.href = '/ui/settings.html';
+      try {
+        const ok = await Auth.verifyPhoneOtp(phone, code);
+        if (ok) await Auth.redirectAfterLogin();
         else $('#msg').textContent = 'Не удалось войти';
-      }catch(e){
-        $('#msg').textContent = 'Ошибка: ' + (e?.message || e);
-      }
+      } catch(e){ $('#msg').textContent = 'Ошибка: ' + (e?.message||e); }
+    };
+
+    // Email (fallback)
+    $('#sendEmail').onclick = async () => {
+      const email = $('#email').value.trim();
+      if (!email) return $('#msg').textContent = 'Укажите e-mail';
+      $('#msg').textContent = 'Отправляем код...';
+      try { await Auth.signInEmailOtp(email);
+        $('#emailOtpBlock').style.display='block';
+        $('#msg').textContent = 'Код отправлен';
+      } catch(e){ $('#msg').textContent = 'Ошибка: ' + (e?.message||e); }
+    };
+    $('#verifyEmail').onclick = async () => {
+      const email = $('#email').value.trim();
+      const code = $('#emailOtp').value.trim();
+      if (!code) return $('#msg').textContent = 'Введите код';
+      $('#msg').textContent = 'Проверяем...';
+      try {
+        const ok = await Auth.verifyEmailOtp(email, code);
+        if (ok) await Auth.redirectAfterLogin();
+        else $('#msg').textContent = 'Не удалось войти';
+      } catch(e){ $('#msg').textContent = 'Ошибка: ' + (e?.message||e); }
     };
   </script>
 </body>
