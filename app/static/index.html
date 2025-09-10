@@ -4,29 +4,783 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Kaspi Orders Analytics</title>
-  <script src="/ui/lib/auth.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    :root{ --bg:#0b0c0f; --fg:#e5e7eb; --muted:#9ca3af; --line:#2a2f3a; --card:#111318; --accent:#10b981; --danger:#ef4444; --warn:#f59e0b; }
+    [data-theme="light"]{ --bg:#f8fafc; --fg:#0f172a; --muted:#64748b; --line:#e2e8f0; --card:#ffffff; --accent:#059669; --danger:#dc2626; --warn:#d97706; }
+
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Helvetica Neue","Noto Sans",Arial}
+    a{color:inherit}
+    .muted{color:var(--muted)}
+    .layout{display:flex;min-height:100vh}
+    .sidebar{width:240px;border-right:1px solid var(--line);padding:16px;background:var(--card)}
+    .content{flex:1;min-width:0;padding:16px 18px}
+
+    .brand{font-weight:800;letter-spacing:.3px;margin-bottom:12px}
+    .nav{display:flex;flex-direction:column;gap:6px;margin:6px 0 16px}
+    .nav a{padding:6px 8px;border-radius:8px;color:var(--fg);text-decoration:none}
+    .nav a:hover{background:var(--bg)}
+
+    .row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+    .filters input,.filters select{height:32px;border:1px solid var(--line);background:var(--card);color:var(--fg);border-radius:8px;padding:0 10px}
+    .btn{height:32px;padding:0 12px;border:1px solid var(--line);background:var(--card);color:var(--fg);border-radius:8px;cursor:pointer}
+    .btn.secondary{opacity:.9}
+    .btn[disabled]{opacity:.5;pointer-events:none}
+
+    .shell{border:1px solid var(--line);background:var(--card);border-radius:14px;padding:12px;margin:16px 0}
+    .kpi{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px}
+    .kpi-item{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 12px;min-width:170px}
+    .kpi-label{font-size:12px;color:var(--muted)}
+    .kpi-value{font-size:22px;font-weight:700}
+    .kpi-sub{font-size:12px;color:var(--muted)}
+
+    .chip{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:999px;padding:4px 8px;background:var(--card);font-size:12px}
+    .dot{width:8px;height:8px;border-radius:50%;background:#9ca3af;display:inline-block}
+    .dot.on{background:var(--accent)} .dot.warn{background:var(--warn)} .dot.err{background:var(--danger)}
+
+    .table{width:100%;border-collapse:collapse}
+    .table th,.table td{border-bottom:1px solid var(--line);padding:8px 10px;vertical-align:top;text-align:left}
+    .table thead th{font-size:12px;color:var(--muted);font-weight:600}
+    .nowrap{white-space:nowrap}
+    .order-table{width:100%;border-collapse:collapse;margin:6px 0 12px}
+    .order-table th,.order-table td{padding:6px 8px;border-bottom:1px solid var(--line);font-size:13px}
+
+    /* уведомления — НЕ перекрывают контент */
+    .note{margin:12px 0 12px;padding:10px 12px;border-radius:10px;display:none;border:1px solid transparent}
+    .note.ok{display:block;background:color-mix(in oklab, var(--accent) 14%, transparent);border-color:color-mix(in oklab, var(--accent) 48%, transparent);color:var(--fg)}
+    .note.err{display:block;background:color-mix(in oklab, var(--danger) 14%, transparent);border-color:color-mix(in oklab, var(--danger) 48%, transparent);color:var(--fg)}
+    .note .small{font-size:12px;color:var(--muted)}
+
+    /* верхний «лоадер»-бар */
+    #topLoader{position:sticky; top:0; left:0; right:0; height:3px; z-index:7000; background:transparent}
+    #topLoader .bar{height:100%; width:0%; background:var(--accent); transition:width .2s cubic-bezier(.4,0,.2,1)}
+
+    .ids-summary{margin:8px 0}
+    .ids-actions{display:flex;gap:8px;margin:8px 0;flex-wrap:wrap}
+    .ids-groups details{margin:8px 0}
+    .pill{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:4px 8px;margin:2px 4px 0 0;background:var(--card)}
+
+    /* меню выбора статусов */
+    .status-menu{display:none;margin-top:6px;border:1px solid var(--line);background:var(--card);border-radius:10px;padding:10px}
+    .status-menu.open{display:block}
+    .status-grid label{display:block;margin:4px 0}
+    .menu-actions{display:flex;gap:8px;margin-top:8px}
+
+    /* переключатель темы */
+    .switch{position:relative;display:inline-block;width:38px;height:22px;margin-right:6px;vertical-align:middle}
+    .switch input{display:none}
+    .switch .slider{position:absolute;inset:0;background:var(--line);border-radius:999px;cursor:pointer}
+    .switch .slider::before{content:"";position:absolute;width:18px;height:18px;left:2px;top:2px;background:#fff;border-radius:50%;transition:transform .2s}
+    .switch input:checked + .slider{background:var(--accent)}
+    .switch input:checked + .slider::before{transform:translateX(16px)}
+  </style>
 </head>
-<body>
-  <h1>Kaspi Orders Analytics</h1>
-  <p>Эта страница требует входа. Если вы видите её — токен валиден.</p>
-  <div id="out"></div>
+<body data-theme="light">
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="brand">⚡ LeoXpress</div>
+      <nav class="nav">
+        <a href="stock.html">Мой склад</a>
+        <a href="#">Предзаказ</a>
+        <a href="#">Демпинг</a>
+        <a href="#">WhatsApp Рассылка</a>
+      </nav>
+      <div class="theme-switch">
+        <label class="switch"><input type="checkbox" id="themeToggle"><span class="slider"></span></label>
+        <span>Тёмная тема</span>
+      </div>
+    </aside>
+
+    <main class="content">
+      <div id="topLoader"><div class="bar"></div></div>
+
+      <h1 style="margin:0 0 12px">Аналитика заказов Kaspi</h1>
+
+      <!-- ФИЛЬТРЫ -->
+      <form id="f" class="filters shell" style="margin-top:12px">
+        <div class="row">
+          <label>Начало</label><input type="date" id="start" required>
+          <label>Конец</label><input type="date" id="end" required>
+          <label>Часовой пояс</label><input type="text" id="tz" value="Asia/Almaty" style="width:140px">
+          <label>Поле даты</label><select id="date_field" style="width:220px"></select>
+        </div>
+
+        <div class="row" style="margin-top:8px">
+          <div class="status-control">
+            <label>Статусы (включить)</label>
+            <input type="text" id="states" placeholder="через запятую: NEW, DELIVERED…" style="min-width:320px" />
+            <button class="btn secondary" id="btnStates" type="button">Выбрать</button>
+            <div id="statusChips" class="chips"></div>
+
+            <div id="statusMenu" class="status-menu">
+              <div style="font-weight:600">Выберите статусы</div>
+              <div class="status-grid" id="statusGrid"></div>
+              <div class="menu-actions">
+                <button class="btn secondary" type="button" id="btnStatusesAll">Все</button>
+                <button class="btn secondary" type="button" id="btnStatusesClear">Очистить</button>
+                <button class="btn" type="button" id="btnStatusesApply">Готово</button>
+              </div>
+            </div>
+          </div>
+
+          <label class="chk"><input type="checkbox" id="exclude_states" checked> Исключить CANCELED</label>
+        </div>
+
+        <div class="row" style="margin-top:8px">
+          <label class="chk"><input type="checkbox" id="use_bd" checked> День магазина</label>
+          <label>Начало дня</label><input type="time" id="bd_start" value="20:00" step="60">
+          <label>Режим дня</label>
+          <select id="assign_mode" title="Как определяем, к какому дню относится заказ" style="width:220px">
+            <option value="smart">Умный: приём до HH:MM + бизнес-день</option>
+            <option value="business">Бизнес-день (до времени «Начало дня»)</option>
+            <option value="raw">По выбранному полю даты (без сдвигов)</option>
+          </select>
+          <label>Приём до</label><input type="time" id="store_until" value="17:00" step="60" title="Заказы после этого времени и без комплектации идут на завтра">
+          <label>Обогащение</label>
+          <select id="enrich_scope" title="Глубина обогащения SKU" style="width:180px">
+            <option value="none">Не обогащать</option>
+            <option value="last_day">За последний день</option>
+            <option value="last_week">За последнюю неделю</option>
+            <option value="last_month">За последний месяц</option>
+            <option value="all" selected>За весь период</option>
+          </select>
+
+          <span id="bdInfo" class="muted"></span>
+          <button type="submit" class="btn" id="btn-run" style="margin-left:auto">Показать</button>
+        </div>
+      </form>
+
+      <div id="note" class="note"></div>
+      <!-- KPI ПЕРИОДА -->
+      <section class="kpi">
+        <div class="kpi-item"><div class="kpi-label">Период</div><div class="kpi-value" id="periodLabel">—</div><div class="kpi-sub">до <span id="periodCutoff">—:—</span></div></div>
+        <div class="kpi-item"><div class="kpi-label">Заказы</div><div class="kpi-value" id="kpiOrders">0</div></div>
+        <div class="kpi-item"><div class="kpi-label">Оборот</div><div class="kpi-value" id="kpiAmount">0</div></div>
+      </section>
+
+      <!-- FIFO: Заказы и позиции -->
+      <section class="shell">
+        <div class="row" style="justify-content:space-between;align-items:center;">
+          <h2 style="margin:0">FIFO: Заказы и позиции</h2>
+          <div class="row" style="gap:10px;align-items:center">
+            <span id="profitKeyBadge" class="chip" title="Ключ для защищённых эндпоинтов"><span class="dot"></span><span>ключ не задан</span></span>
+            <button class="btn secondary" id="btnProfitApiKey" type="button">API-Key</button>
+            <button class="btn secondary" id="btnSyncMsCosts" type="button" title="Обновить себестоимость из МойСклад">MS себестоимость</button>
+          </div>
+        </div>
+        <div id="fifoBridgeInfo" class="muted" style="margin:6px 0"></div>
+        <div id="fifoBridgeTable" style="margin-top:8px"></div>
+      </section>
+
+      <!-- ГОРОДА / ДИАГНОСТИКА -->
+      <section class="shell">
+        <h2>Топ города</h2>
+        <div id="chart-cities"><canvas id="cities"></canvas></div>
+      </section>
+
+      <section class="shell">
+        <h2>Состояния (диагностика)</h2>
+        <div id="statesBox" class="pillbox"></div>
+      </section>
+
+      <section class="shell">
+        <h2>Номера заказов (для сверки)</h2>
+        <div id="ids"></div>
+      </section>
+    </main>
+  </div>
+
 <script>
-  (async () => {
-    const ok = await window.__auth.requireAuth();
-    if (!ok) return;
-    const r = await window.__auth.authFetch('/meta');
-    document.getElementById('out').textContent = JSON.stringify(await r.json(), null, 2);
-  })();
+  if (!localStorage.getItem('SUPA_JWT')) {
+    location.href = '/ui/login.html';
+  }
 </script>
-  <script type="module">
-  import { ensureSessionAndSettings } from './lib/auth.js';
-  (async () => {
-    const me = await ensureSessionAndSettings();
-    if (!me) return; // уже редиректнули
-    // здесь запускаем приложение
-    window.__ME__ = me;
-    // initApp();
-  })();
+  
+<script>
+/* ─────────── ХЕЛПЕРЫ ─────────── */
+const nf = new Intl.NumberFormat('ru-RU');
+function num(x, d=0){ const n = Number(String(x).replace(/\s| |,/g,'').replace(/[^\d.-]/g,'')); return Number.isFinite(n) ? (d?n.toFixed(d):n) : 0; }
+function fmt(n){ return nf.format(Math.round((Number(n) + Number.EPSILON) * 100) / 100); }
+
+let BUSY = false;
+function setBusy(on){
+  BUSY = !!on;
+  for(const id of ['btn-run','btnSyncMsCosts']){
+    const b = document.getElementById(id);
+    if(!b) continue;
+    b.disabled = on;
+    b.dataset.label ??= b.textContent;
+    b.textContent = on ? ('⏳ ' + b.dataset.label) : b.dataset.label;
+  }
+}
+
+function setTopLoader(p){
+  const bar = document.querySelector('#topLoader .bar');
+  if(bar) bar.style.width = (p>0 ? `${Math.min(100, Math.max(2, Math.round(p*100)))}%` : '0%');
+}
+
+function setNote(msg, mode='ok'){
+  const el = document.getElementById('note');
+  el.className = 'note ' + (mode==='progress' ? 'ok' : mode); // без «липкого» режима
+  el.textContent = msg;
+  el.style.display = 'block';
+  if(mode==='progress'){ setTopLoader(0.04); } else { setTopLoader(0); }
+}
+window.addEventListener('error', e => setNote(e?.error?.message || e.message || 'Ошибка', 'err'));
+window.addEventListener('unhandledrejection', e => setNote(e?.reason?.message || String(e.reason) || 'Ошибка', 'err'));
+
+function fmtMs(ms){
+  if(!ms && ms!==0) return '';
+  try{
+    const tz = document.getElementById('tz')?.value || 'Asia/Almaty';
+    const d  = new Date(Number(ms));
+    const parts = new Intl.DateTimeFormat('ru-RU', { timeZone: tz, year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit' }).formatToParts(d);
+    const g = k => parts.find(p=>p.type===k)?.value || '';
+    return `${g('year')}-${g('month')}-${g('day')} ${g('hour')}:${g('minute')}`;
+  }catch(_){ return new Date(Number(ms)).toISOString().slice(0,16).replace('T',' '); }
+}
+
+/* qty×цена → сумма строки, единый нормализатор */
+function firstNonEmpty(arr){
+  for(const v of arr){ if(v!==undefined && v!==null && String(v).trim()!=='') return v; }
+  return undefined;
+}
+function deriveLine(raw){
+  const qty = Math.max(1, Number(firstNonEmpty([raw.qty, raw.quantity, 1])) || 1);
+  let unit = num(firstNonEmpty([raw.unit_price, raw.unitPrice, raw.price, raw.unit]));
+  let total = num(firstNonEmpty([raw.total_price, raw.total, raw.sum, raw.amount]));
+  if(!total && unit) total = unit * qty;
+  if(!unit && total) unit = qty>0 ? (total/qty) : total;
+  if(!unit && !total){ unit = num(firstNonEmpty([raw.price, raw.unit_price])); total = unit * qty; }
+  return { qty, unit, total };
+}
+</script>
+
+<script>
+/* ─────────── API-Key инъекция для /profit/* ─────────── */
+(()=>{
+  const KEY="KASPI_API_KEY";
+  const badge=()=>document.getElementById('profitKeyBadge');
+  function refreshBadge(){
+    const v=localStorage.getItem(KEY)||"";
+    const el=badge(); if(!el) return;
+    const dot=el.querySelector('.dot'); if(dot) dot.className='dot ' + (v?'on':'');
+    const label=el.querySelector('span:last-child'); if(label) label.textContent = v ? 'ключ установлен' : 'ключ не задан';
+  }
+  window.KASPI_API_KEY=localStorage.getItem(KEY)||""; refreshBadge();
+
+  const origFetch=window.fetch.bind(window);
+  window.fetch=function(input,init){
+    try{
+      let urlStr=typeof input==='string'?input:(input&&input.url)||'';
+      if(urlStr.startsWith('/profit/')){
+        init=init||{};
+        const k=window.KASPI_API_KEY||'';
+        let headers=init.headers instanceof Headers?init.headers:new Headers(init.headers||{});
+        if(k) headers.set('X-API-Key', k);
+        init.headers=headers;
+        if(k){
+          const u=new URL(urlStr,location.origin);
+          if(!u.searchParams.has('api_key')) u.searchParams.set('api_key',k);
+          input=(typeof input==='string')?(u.pathname+u.search):new Request(u.toString(),init);
+        }
+      }
+    }catch(_){}
+    return origFetch(input,init);
+  };
+
+  window.setApiKey=function(k){ localStorage.setItem(KEY,k||''); window.KASPI_API_KEY=k||''; refreshBadge(); };
+
+  document.addEventListener('DOMContentLoaded', ()=>{
+    document.getElementById('btnProfitApiKey')?.addEventListener('click', ()=>{
+      const v=prompt('Введите X-API-Key для блока FIFO:', window.KASPI_API_KEY||'');
+      if(v!==null){ setApiKey(v.trim()); alert('Сохранено. Повторите действие, если было 401.'); }
+    });
+  });
+})();
+async function fetchBridgeJSON(url, opts, _retry){
+  const r=await fetch(url, opts||{});
+  if(r.status===401||r.status===403){
+    if(!_retry){
+      const v=prompt('Требуется X-API-Key для FIFO:', window.KASPI_API_KEY||'');
+      if(v!==null){ window.setApiKey(v.trim()); return fetchBridgeJSON(url, opts, true); }
+    }
+    throw new Error(await r.text()||'Unauthorized');
+  }
+  if(!r.ok){ const body=await r.text(); throw new Error(body||r.statusText||('HTTP '+r.status)); }
+  const ct=r.headers.get('content-type')||''; return ct.includes('application/json')?r.json():r.text();
+}
+</script>
+
+<script>
+/* ─────────── UI/STATE ─────────── */
+let citiesChart=null;
+window.APP_CURRENCY='KZT';
+window.__ordersByPeriod={};
+window.__orderToSkus={};
+window.__allOrderCodes=[];
+let CURRENT_JOB_ID=null;
+
+/* ─────────── multiselect статусов ─────────── */
+const STATUS_DICT = { NEW:'Новый', APPROVED_BY_BANK:'Оплата подтверждена', ACCEPTED_BY_MERCHANT:'Принят магазином', READY_FOR_SHIPMENT:'Готов к отгрузке', KASPI_DELIVERY:'Kaspi Доставка (передан)', DELIVERED:'Доставлен', ARCHIVE:'Завершён (архив)', ARCHIVED:'Архив (история)', RETURNED:'Возврат', CANCELED:'Отменён' };
+const STATUS_ORDER = ['NEW','APPROVED_BY_BANK','ACCEPTED_BY_MERCHANT','READY_FOR_SHIPMENT','KASPI_DELIVERY','DELIVERED','ARCHIVE','ARCHIVED','RETURNED','CANCELED'];
+const LABEL_TO_CODE = Object.fromEntries(Object.entries(STATUS_DICT).map(([k,v])=>[v.toLowerCase(),k]));
+window.STATUS_SELECTED = new Set();
+function ruLabel(code){ return STATUS_DICT[code] || code; }
+function renderStatusGrid(){ const g=document.getElementById('statusGrid'); g.innerHTML=''; STATUS_ORDER.forEach(code=>{ const id='st_'+code; const lab=document.createElement('label'); lab.innerHTML=`<input type="checkbox" id="${id}" value="${code}"> <span>${ruLabel(code)}</span>`; lab.querySelector('input').checked = window.STATUS_SELECTED.has(code); lab.querySelector('input').addEventListener('change', (e)=>{ if(e.target.checked) window.STATUS_SELECTED.add(code); else window.STATUS_SELECTED.delete(code); renderStatusChips(); syncStatesInput(); }); g.appendChild(lab); }); }
+function renderStatusChips(){ const box=document.getElementById('statusChips'); box.innerHTML=''; if(window.STATUS_SELECTED.size===0){ box.innerHTML='<span class="muted">ничего не выбрано</span>'; return; } [...window.STATUS_SELECTED].forEach(code=>{ const c=document.createElement('span'); c.className='chip'; c.innerHTML=`${ruLabel(code)}<span class="x" title="убрать">×</span>`; c.querySelector('.x').onclick=()=>{ window.STATUS_SELECTED.delete(code); renderStatusChips(); renderStatusGrid(); syncStatesInput(); }; box.appendChild(c); }); }
+function normalizeStatesValue(val){ if(!val) return ''; const merged = new Set(); val.split(/[\s,;]+/).filter(Boolean).forEach(raw=>{ const t = raw.trim(); const code = LABEL_TO_CODE[t.toLowerCase()] || t.toUpperCase(); merged.add(code); }); return [...merged].join(','); }
+function syncStatesInput(){ const inp=document.getElementById('states'); const manual = normalizeStatesValue((inp.value||'').trim()); const fromSet = [...window.STATUS_SELECTED]; const merged = new Set(); if(manual){ manual.split(',').forEach(x=>merged.add(x)); } fromSet.forEach(x=>merged.add(x)); inp.value = [...merged].filter(Boolean).join(','); }
+function openStatusMenu(){ const m=document.getElementById('statusMenu'); m.classList.add('open'); renderStatusGrid(); const close=(ev)=>{ if(!m.contains(ev.target) && !document.getElementById('btnStates').contains(ev.target)){ m.classList.remove('open'); document.removeEventListener('click', close, true); } }; setTimeout(()=>document.addEventListener('click', close, true),0); }
+
+const DATE_FIELD_LABELS = { creationDate:'Создание заказа', plannedShipmentDate:'План передачи', shipmentDate:'Фактическая передача', deliveryDate:'Фактическая доставка' };
+
+async function loadMeta(){
+  try {
+    const meta = await fetch('/meta').then(r=>r.json());
+    const sel = document.getElementById('date_field');
+    sel.innerHTML = '';
+    (meta.date_field_options || ['creationDate']).forEach(v=>{ const o=document.createElement('option'); o.value=v; o.textContent=DATE_FIELD_LABELS[v] || v; sel.appendChild(o); });
+    sel.value = meta.date_field_default || 'creationDate';
+    document.getElementById('tz').value = meta.timezone || 'Asia/Almaty';
+    document.getElementById('bd_start').value = meta.business_day_start || '20:00';
+    document.getElementById('store_until').value = meta.store_accept_until || '17:00';
+  } catch(_){}
+  // по умолчанию — сегодня
+  const d=new Date(); const z=n=>String(n).padStart(2,'0'); const ymd=`${d.getFullYear()}-${z(d.getMonth()+1)}-${z(d.getDate())}`;
+  document.getElementById('start').value = ymd;
+  document.getElementById('end').value   = ymd;
+  renderStatusChips();
+}
+
+function uiModeHint(){
+  const use_bd = document.getElementById('use_bd')?.checked;
+  const bd = document.getElementById('bd_start').value || '20:00';
+  const cutoff = document.getElementById('store_until').value || '17:00';
+  const mode = document.getElementById('assign_mode').value;
+  const el = document.getElementById('bdInfo');
+  if(mode==='smart') el.textContent = `Умный режим: приём до ${cutoff}; доставленные — бизнес-день ${bd}`;
+  else if(mode==='business') el.textContent = `Бизнес-день: ${bd} → ${bd}`;
+  else el.textContent = 'Режим: по выбранному полю даты';
+  if(!use_bd) el.textContent += ' · День магазина: выключен';
+}
+
+async function run(e){
+  if(e) e.preventDefault();
+  try{
+    setBusy(true);
+    const start = document.getElementById('start').value;
+    const end   = document.getElementById('end').value;
+    const tz    = document.getElementById('tz').value || 'Asia/Almaty';
+    const date_field = document.getElementById('date_field').value;
+    const states = normalizeStatesValue(document.getElementById('states').value);
+    document.getElementById('states').value = states;
+    const exc    = document.getElementById('exclude_states').checked ? 'CANCELED' : '';
+    const use_bd = document.getElementById('use_bd')?.checked ? '1' : '0';
+    const bd_start = document.getElementById('bd_start')?.value || '';
+    const assign_mode = document.getElementById('assign_mode').value || 'smart';
+    const store_until = document.getElementById('store_until').value || '17:00';
+
+    const p = new URLSearchParams({ start, end, tz, date_field, use_bd, assign_mode, store_accept_until: store_until });
+    if(states) p.set('states', states); if(exc) p.set('exclude_states', exc);
+    if(bd_start) p.set('business_day_start', bd_start);
+
+    const data = await fetch(`/orders/analytics?${p.toString()}`).then(r=>r.json());
+
+    window.APP_CURRENCY = data.currency || 'KZT';
+    document.getElementById('kpiOrders').textContent = fmt(data.total_orders||0);
+    document.getElementById('kpiAmount').textContent = `${fmt(data.total_amount||0)} ${window.APP_CURRENCY}`;
+    document.getElementById('periodLabel').textContent = `${data.range?.start||start} → ${data.range?.end||end}`;
+    document.getElementById('periodCutoff').textContent = (use_bd==='1' ? (bd_start || '20:00') : '24:00');
+    uiModeHint();
+
+    // состояния
+    const sb = document.getElementById('statesBox');
+    sb.innerHTML = '';
+    const entries = Object.entries(data.state_breakdown||{}).sort((a,b)=>b[1]-a[1]);
+    entries.forEach(([k,v])=>{ const span=document.createElement('span'); span.className='pill'; span.textContent=`${k}: ${v}`; sb.appendChild(span); });
+    if(!entries.length) sb.innerHTML = '<div class="muted">Нет данных</div>';
+
+    // города
+    const labels = (data.cities||[]).map(c=>c.city);
+    const counts = (data.cities||[]).map(c=>c.count);
+    const holder = document.getElementById('chart-cities');
+    holder.innerHTML = labels.length ? '<canvas id="cities"></canvas>' : '<div class="muted" style="padding:12px">Нет данных по городам</div>';
+    if(labels.length && typeof Chart!=='undefined'){
+      try{ if(citiesChart) citiesChart.destroy(); }catch(_){}
+      const ctx = document.getElementById('cities').getContext('2d');
+      citiesChart = new Chart(ctx,{type:'bar',data:{labels,datasets:[{label:'Заказы',data:counts}]},options:{responsive:true,plugins:{legend:{display:false}}}});
+    }
+
+    // → выгружаем ids, синхронизируем мост и рисуем FIFO ровно по этим кодам
+    await runIdsJob();
+    await renderBridgeTable();
+
+    setNote('Данные обновлены', 'ok');
+  }catch(err){ setNote('Ошибка загрузки: ' + (err?.message || err), 'err'); }
+  finally{ setBusy(false); }
+}
+</script>
+
+<script>
+/* ─────────── НОМЕРА ЗАКАЗОВ: async-джоба + мост + рендер ─────────── */
+function buildOrderItemsTable(group, currency){
+  const table = document.createElement('table'); table.className = 'order-table';
+  table.innerHTML = `
+    <thead><tr>
+      <th class="nowrap">№ заказа</th><th>SKU</th><th>Название</th><th class="nowrap">Qty</th>
+      <th class="nowrap">Сумма строки</th><th class="nowrap">Состояние</th><th class="nowrap">Время</th>
+    </tr></thead><tbody></tbody>`;
+  const tb = table.querySelector('tbody');
+
+  for(const o of (group.items||[])){
+    const baseLines = (o.items && o.items.length)
+      ? o.items
+      : (o.sku ? [{sku:o.sku, title:o.title||o.name, qty:1, amount:o.amount}] : []);
+
+    for(const liRaw of baseLines){
+      const {qty,total} = deriveLine(liRaw);
+      const tr=document.createElement('tr');
+      [ String(o.number||''), String(liRaw.sku||''), String(liRaw.title||''), String(qty),
+        `${fmt(total||0)} ${currency}`, String(o.state||''), (String(o.date||'').slice(0,16).replace('T',' ')||'') ]
+      .forEach(v=>{ const td=document.createElement('td'); td.textContent=v; tr.appendChild(td); });
+      tb.appendChild(tr);
+    }
+  }
+  return table;
+}
+
+/* → СИНХРОНИЗАЦИЯ МОСТА (qty×цена корректно) */
+async function syncBridgeFromIdsData(data){
+  try{
+    const items = [];
+    for(const g of (data.groups||[])){
+      for(const o of (g.items||[])){
+        const orderId   = String(o.id ?? o.order_id ?? o.number ?? '').trim();
+        const orderCode = String(o.number ?? o.order_code ?? '').trim() || null;
+        const state     = String(o.state||'').trim() || null;
+        const date      = o.date_ms ?? o.date ?? null;
+
+        let idx = 0;
+        const lines = Array.isArray(o.items) && o.items.length
+          ? o.items
+          : (o.sku ? [{ sku:o.sku, qty:1, sum:o.amount, title:o.title||o.name }] : []);
+
+        for(const li of (lines||[])){
+          const {qty,unit,total} = deriveLine(li);
+          const sku = String(firstNonEmpty([li.sku, li.code, li.offerId, li.vendorCode, li.productCode, li.variant_code,
+            li.barcode, li.ean, ''
+          ]) || '').trim();
+          items.push({
+            id: orderId, code: orderCode, date, state,
+            sku: sku || null, title: (li.title ?? li.name ?? null),
+            qty, unit_price: unit, total_price: total, line_index: idx++,
+          });
+        }
+      }
+    }
+    if(!items.length) return;
+
+    const res = await fetch('/profit/bridge/sync-by-ids', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(items)
+    });
+    if(!res.ok) throw new Error(await res.text()||res.statusText);
+  }catch(e){
+    console.warn('bridge sync failed:', e);
+    setNote('Синхронизация моста не удалась: ' + (e.message||e), 'err');
+  }
+}
+
+/* ——— FIFO таблица по ТОЧНОМУ СПИСКУ заказов из ids ——— */
+async function fetchEnrichedByCodes(codes, order='asc'){
+  if(!codes || !codes.length) return {orders:[], stats:{orders:0,lines:0,revenue:0,cost:0,profit:0}};
+  const chunkSize = 150;
+  const parts = [];
+  for(let i=0;i<codes.length;i+=chunkSize) parts.push(codes.slice(i,i+chunkSize));
+
+  let mergedOrders=[], stats={orders:0,lines:0,revenue:0,cost:0,profit:0};
+  for(const chunk of parts){
+    const url = '/profit/bridge/by-orders-enriched?' + new URLSearchParams({ codes: chunk.join(','), order }).toString();
+    const data = await fetchBridgeJSON(url);
+    mergedOrders = mergedOrders.concat(data.orders||[]);
+    const s = data.stats||{};
+    stats.revenue += Number(s.revenue||0); stats.cost += Number(s.cost||0); stats.profit += Number(s.profit||0);
+    stats.lines  += Number(s.lines||0);
+  }
+  mergedOrders.sort((a,b)=> String(a.date||'').localeCompare(String(b.date||'')));
+  stats.orders = mergedOrders.length;
+  stats.revenue = Math.round(stats.revenue*100)/100;
+  stats.cost    = Math.round(stats.cost*100)/100;
+  stats.profit  = Math.round(stats.profit*100)/100;
+  return {orders:mergedOrders, stats};
+}
+
+async function renderBridgeTable(){
+  const box=document.getElementById('fifoBridgeTable');
+  const info=document.getElementById('fifoBridgeInfo');
+  box.innerHTML='Загружаем…'; box.classList.remove('muted');
+
+  try{
+    const codes = window.__allOrderCodes||[];
+    if(!codes.length){ box.classList.add('muted'); box.textContent='Нет данных'; info.textContent=''; return; }
+
+    const data = await fetchEnrichedByCodes(codes, 'asc');
+    const orders = data.orders||[];
+    const cur = window.APP_CURRENCY || 'KZT';
+
+    if(!orders.length){ box.classList.add('muted'); box.textContent='Нет данных'; info.textContent=''; return; }
+
+    const tbl=document.createElement('table'); tbl.className='table';
+    tbl.innerHTML=`<thead>
+      <tr>
+        <th style="width:170px">№ заказа</th>
+        <th style="width:150px">Время</th>
+        <th style="width:160px">Статус</th>
+        <th>SKU</th>
+        <th>Название</th>
+        <th class="nowrap">Qty</th>
+        <th class="nowrap">Сумма строки</th>
+        <th class="nowrap">Себестоимость</th>
+        <th class="nowrap">Прибыль</th>
+      </tr>
+    </thead><tbody></tbody>`;
+    const tb=tbl.querySelector('tbody');
+
+    let totalLines=0, totalRevenue=0, totalCost=0, totalProfit=0;
+
+    for(const ord of orders){
+      const items = ord.items||[];
+      if(!items.length) continue;
+      totalLines += items.length;
+      let first=true;
+
+      items.forEach((it)=>{
+        const tr=document.createElement('tr');
+
+        if(first){
+          const tdNum=document.createElement('td'); tdNum.textContent = ord.order_code || ord.order_id || ''; tdNum.rowSpan = items.length; tdNum.className='nowrap'; tr.appendChild(tdNum);
+          const tdTime=document.createElement('td'); tdTime.textContent = ord.date || ''; tdTime.rowSpan = items.length; tr.appendChild(tdTime);
+          const tdState=document.createElement('td'); tdState.textContent = ord.state || ''; tdState.rowSpan = items.length; tr.appendChild(tdState);
+          first=false;
+        }
+
+        const tdSku=document.createElement('td'); tdSku.textContent = it.sku || ''; tr.appendChild(tdSku);
+        const tdTitle=document.createElement('td'); tdTitle.textContent = it.title || ''; tr.appendChild(tdTitle);
+        const tdQty=document.createElement('td'); tdQty.textContent = String(it.qty||1); tdQty.className='nowrap'; tr.appendChild(tdQty);
+
+        const sum=Number(it.total_price||0), cost=Number(it.cost||0), profit=Number(it.profit|| (sum-cost));
+        totalRevenue += sum; totalCost += cost; totalProfit += profit;
+
+        const tdSum=document.createElement('td'); tdSum.textContent = `${fmt(sum)} ${cur}`; tdSum.className='nowrap'; tr.appendChild(tdSum);
+        const tdCost=document.createElement('td'); tdCost.textContent = `${fmt(cost)} ${cur}`; tdCost.className='nowrap'; tr.appendChild(tdCost);
+        const tdProfit=document.createElement('td'); tdProfit.textContent = `${fmt(profit)} ${cur}`; tdProfit.className='nowrap'; tr.appendChild(tdProfit);
+
+        tb.appendChild(tr);
+      });
+
+      // строка «Итого по заказу»
+      const rev = Number(ord?.totals?.revenue||items.reduce((a,x)=>a+(Number(x.total_price||0)),0));
+      const cc  = Number(ord?.totals?.cost   ||items.reduce((a,x)=>a+(Number(x.cost||0)),0));
+      const pp  = Number(ord?.totals?.profit ||(rev-cc));
+      const trTotal=document.createElement('tr'); trTotal.className='muted';
+      const tdSpacer=document.createElement('td'); tdSpacer.colSpan=3; trTotal.appendChild(tdSpacer);
+      const tdLabel=document.createElement('td'); tdLabel.colSpan=3; tdLabel.textContent='Итого по заказу'; trTotal.appendChild(tdLabel);
+      const tdRev=document.createElement('td'); tdRev.textContent=`${fmt(rev)} ${cur}`; trTotal.appendChild(tdRev);
+      const tdC=document.createElement('td'); tdC.textContent=`${fmt(cc)} ${cur}`; trTotal.appendChild(tdC);
+      const tdP=document.createElement('td'); tdP.textContent=`${fmt(pp)} ${cur}`; trTotal.appendChild(tdP);
+      tb.appendChild(trTotal);
+    }
+
+    info.textContent = `Заказов: ${fmt(orders.length)} · Позиции: ${fmt(totalLines)} · Выручка: ${fmt(totalRevenue)} ${cur} · Себестоимость: ${fmt(totalCost)} ${cur} · Прибыль: ${fmt(totalProfit)} ${cur}`;
+    box.innerHTML=''; box.appendChild(tbl);
+  }catch(e){
+    box.className='muted'; box.textContent='Ошибка: ' + (e.message||e);
+    info.textContent='';
+  }
+}
+</script>
+
+<script>
+/* ─────────── сбор параметров и ids.async ─────────── */
+function buildParams(){
+  const start = document.getElementById('start').value;
+  const end   = document.getElementById('end').value;
+  const tz    = document.getElementById('tz').value || 'Asia/Almaty';
+  const date_field = document.getElementById('date_field').value;
+  const states = normalizeStatesValue(document.getElementById('states').value);
+  document.getElementById('states').value = states;
+  const exc    = document.getElementById('exclude_states').checked ? 'CANCELED' : '';
+  const use_bd = document.getElementById('use_bd')?.checked ? '1' : '0';
+  const bd_start = document.getElementById('bd_start')?.value || '';
+  const assign_mode = document.getElementById('assign_mode').value || 'smart';
+  const store_until = document.getElementById('store_until').value || '17:00';
+  const enrich_scope = document.getElementById('enrich_scope').value || 'all';
+
+  const p = new URLSearchParams({
+    start,end,tz,date_field,order:'asc',grouped:'1',limit:'0',with_items:'1',
+    use_bd,business_day_start:bd_start,assign_mode,store_accept_until:store_until,items_mode:'all',enrich_scope
+  });
+  if(states) p.set('states', states); if(exc) p.set('exclude_states', exc);
+  return p;
+}
+
+async function runIdsJob(){
+  if(CURRENT_JOB_ID){
+    try{ await fetch(`/jobs/${CURRENT_JOB_ID}`, {method:'DELETE'}); }catch(_){}
+    CURRENT_JOB_ID = null;
+  }
+
+  setNote('Готовим данные…', 'progress');
+  setBusy(true);
+
+  const params = buildParams();
+  const res = await fetch(`/orders/ids.async?${params.toString()}`, {method:'POST'});
+  if(!res.ok){ const txt = await res.text(); setNote(txt || res.statusText, 'err'); setBusy(false); return; }
+  const { job_id } = await res.json();
+  CURRENT_JOB_ID = job_id;
+
+  const cancelBtn = document.getElementById('btnCancelJob');
+  if(cancelBtn) cancelBtn.onclick = async () => { try{ await fetch(`/jobs/${job_id}`, {method:'DELETE'}); }catch(_){} };
+
+  let done=false, errored=false;
+  while(!done && !errored){
+    await new Promise(r=>setTimeout(r, 700));
+    let st;
+    try{
+      const r = await fetch(`/jobs/${job_id}`);
+      if(!r.ok){ throw new Error(await r.text()||r.statusText); }
+      st = await r.json();
+    }catch(e){
+      errored=true; setNote('Ошибка статуса: '+(e.message||e), 'err'); break;
+    }
+
+    if(st.status==='error'){ errored=true; setNote('Ошибка: '+(st.message||'неизвестно'), 'err'); break; }
+    if(st.status==='canceled'){ errored=true; setNote('Операция отменена', 'err'); break; }
+
+    setTopLoader(Math.max(0, Math.min(1, st.progress||0)));
+
+    if(st.status==='done'){
+      done=true;
+      const rr = await fetch(`/jobs/${job_id}/result`);
+      const data = await rr.json();
+      CURRENT_JOB_ID=null;
+
+      // список кодов — основа для FIFO
+      window.__allOrderCodes = Array.from(new Set((data.items||[]).map(it=>it.number).filter(Boolean).map(String)));
+
+      // ← прокидываем строки в мост
+      await syncBridgeFromIdsData(data);
+
+      await renderIdsResult(data);
+      await renderBridgeTable(); // сразу перерисуем FIFO
+      break;
+    }
+  }
+
+  setBusy(false);
+}
+
+async function renderIdsResult(data){
+  window.__ordersByPeriod = {};
+  for(const g of (data.groups||[])){
+    const nums = (g.items||[]).map(it=>it.number).filter(Boolean);
+    window.__ordersByPeriod[g.day] = Array.from(new Set(nums));
+  }
+
+  window.__orderToSkus = {};
+  for(const g of (data.groups||[])){
+    for(const o of (g.items||[])){
+      const arr = Array.isArray(o.items)&&o.items.length
+        ? o.items.map(li=>String(li.sku||'').trim()).filter(Boolean)
+        : (o.sku ? [String(o.sku)] : []);
+      if(!arr.length) continue;
+      const key = String(o.number||'').trim(); if(!key) continue;
+      window.__orderToSkus[key] = Array.from(new Set([...(window.__orderToSkus[key]||[]), ...arr]));
+    }
+  }
+
+  const container = document.getElementById('ids'); container.innerHTML='';
+  const currency = data.currency || window.APP_CURRENCY || 'KZT';
+  const totalCount = (typeof data.period_total_count === 'number') ? data.period_total_count : (data.items||[]).length;
+  const totalAmount = (typeof data.period_total_amount === 'number') ? data.period_total_amount : (data.items||[]).reduce((a,it)=>a+(num(it.amount)),0);
+
+  const summary = document.createElement('div'); summary.className='ids-summary';
+  summary.innerHTML = `<span>Итого за период:</span> <b>${fmt(totalCount)}</b><span> шт.</span> · <b>${fmt(totalAmount)}</b> <span>${currency}</span>`;
+  container.appendChild(summary);
+
+  const bar = document.createElement('div'); bar.className='ids-actions';
+  const btnCopy=document.createElement('button'); btnCopy.className='btn'; btnCopy.textContent='Скопировать номера';
+  btnCopy.onclick=()=>{ try{ const all=(data.items||[]).map(it=>it.number).join('\n'); navigator.clipboard?.writeText(all); setNote('Скопировано', 'ok'); }catch(_){ setNote('Не удалось скопировать', 'err'); } };
+  const btnCsv=document.createElement('a'); btnCsv.className='btn'; btnCsv.textContent='Скачать CSV';
+
+  const params = buildParams(); params.set('grouped','0'); params.set('with_items','0'); params.set('limit','100000');
+  btnCsv.href=`/orders/ids.csv?${params.toString()}`; btnCsv.setAttribute('download','ids.csv');
+
+  const btnExpand=document.createElement('button'); btnExpand.className='btn'; btnExpand.textContent='Раскрыть всё';
+  const btnCollapse=document.createElement('button'); btnCollapse.className='btn'; btnCollapse.textContent='Свернуть всё';
+  bar.append(btnCopy,btnCsv,btnExpand,btnCollapse); container.appendChild(bar);
+
+  const wrapper=document.createElement('div'); wrapper.className='ids-groups'; container.appendChild(wrapper);
+  const detailsList=[];
+  for(const group of (data.groups||[])){
+    const det=document.createElement('details'); det.open=true;
+    const dayTotal=(typeof group.total_amount==='number')?group.total_amount:group.items.reduce((acc,it)=>acc+(deriveLine(it).total||0),0);
+    const sum=document.createElement('summary'); sum.textContent=`${group.day} — ${group.items.length} шт. · ${fmt(dayTotal)} ${currency}`;
+    det.appendChild(sum); det.appendChild(buildOrderItemsTable(group, currency));
+    detailsList.push(det); wrapper.appendChild(det);
+  }
+  btnExpand.onclick=()=>detailsList.forEach(d=>d.open=true);
+  btnCollapse.onclick=()=>detailsList.forEach(d=>d.open=false);
+
+  setNote('Данные обновлены', 'ok');
+}
+</script>
+
+<script>
+/* ─────────── MS: синхронизация себестоимости (опционально) ─────────── */
+document.addEventListener('DOMContentLoaded', ()=>{
+  document.getElementById('btnSyncMsCosts')?.addEventListener('click', syncMsCosts);
+});
+async function syncMsCosts(){
+  try{
+    setBusy(true);
+    const df=document.getElementById('start').value;
+    const dt=document.getElementById('end').value;
+    const url='/profit/bridge/ms/sync-costs?'+new URLSearchParams({date_from:df,date_to:dt}).toString();
+    const j=await fetchBridgeJSON(url,{method:'POST'});
+    setNote(`Себестоимость из МС обновлена: ${j.synced||0} SKU`, 'ok');
+    await renderBridgeTable();
+  }catch(e){ setNote('MS sync: ' + (e.message||e), 'err'); }
+  finally{ setBusy(false); }
+}
+</script>
+
+<script>
+/* ─────────── BOOT ─────────── */
+document.addEventListener('DOMContentLoaded', async () => {
+  try{
+    await loadMeta();
+
+    document.getElementById('btnStates')?.addEventListener('click', openStatusMenu);
+    document.getElementById('btnStatusesAll')?.addEventListener('click', ()=>{ STATUS_ORDER.forEach(k=>window.STATUS_SELECTED.add(k)); renderStatusGrid(); renderStatusChips(); syncStatesInput(); });
+    document.getElementById('btnStatusesClear')?.addEventListener('click', ()=>{ window.STATUS_SELECTED.clear(); renderStatusGrid(); renderStatusChips(); syncStatesInput(); });
+    document.getElementById('btnStatusesApply')?.addEventListener('click', ()=>{ document.getElementById('statusMenu').classList.remove('open'); syncStatesInput(); });
+
+    document.getElementById('states')?.addEventListener('blur', ()=>{ document.getElementById('states').value = normalizeStatesValue(document.getElementById('states').value); });
+
+    document.getElementById('f')?.addEventListener('submit', run);
+    document.getElementById('themeToggle')?.addEventListener('change', (e)=>{ document.body.setAttribute('data-theme', e.target.checked ? 'dark' : 'light'); });
+
+    ['use_bd','bd_start','assign_mode','store_until'].forEach(id=>{ const el=document.getElementById(id); if(el) el.addEventListener('change', uiModeHint); });
+
+    uiModeHint();
+    await run(); // initial
+  }catch(e){ setNote('Ошибка инициализации: ' + (e?.message||e), 'err'); }
+});
 </script>
 </body>
 </html>
