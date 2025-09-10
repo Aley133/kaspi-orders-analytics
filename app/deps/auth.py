@@ -1,15 +1,16 @@
 # app/deps/auth.py
 from __future__ import annotations
-import os, time
+import os, time, json
 from typing import Any, Dict, Optional, Tuple
-import requests
 from fastapi import Request, HTTPException
 from jose import jwt, JWTError
+import urllib.request
+import urllib.error
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Конфиг
 # ──────────────────────────────────────────────────────────────────────────────
-SUPABASE_PROJECT_REF = os.getenv("SUPABASE_PROJECT_REF")  # напр. "abcd1234"
+SUPABASE_PROJECT_REF = os.getenv("SUPABASE_PROJECT_REF")  # напр. "evmdqyngzleandtfkanv"
 SUPABASE_JWKS_URL    = os.getenv("SUPABASE_JWKS_URL") or (
     f"https://{SUPABASE_PROJECT_REF}.supabase.co/auth/v1/keys" if SUPABASE_PROJECT_REF else None
 )
@@ -21,10 +22,10 @@ CLOCK_SKEW_SECONDS   = int(os.getenv("JWT_CLOCK_SKEW", "60"))
 _JWKS_CACHE: Tuple[float, Dict[str, Any]] = (0.0, {})
 
 def _get_jwks() -> Dict[str, Any]:
-    """Берём JWKS с лёгким кэшем на 5 минут."""
-    global _JWKS_CACHE  # <- важно объявить ПЕРЕД любым использованием
+    """Берём JWKS с лёгким кэшем на 5 минут (без внешних зависимостей)."""
+    global _JWKS_CACHE
     if not SUPABASE_JWKS_URL:
-        # Конфиг не задан — лучше 401, чем 500, чтобы UI мог отреагировать
+        # лучше 401, чтобы фронт корректно редиректил на логин
         raise HTTPException(401, "Invalid token")
 
     ts, jwks = _JWKS_CACHE
@@ -33,16 +34,18 @@ def _get_jwks() -> Dict[str, Any]:
         return jwks
 
     try:
-        resp = requests.get(SUPABASE_JWKS_URL, timeout=5)
-        resp.raise_for_status()
-        data = resp.json()
+        req = urllib.request.Request(
+            SUPABASE_JWKS_URL,
+            headers={"User-Agent": "kaspi-orders-analytics/1.0"}
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="ignore"))
         if not isinstance(data, dict) or "keys" not in data:
             raise HTTPException(401, "Invalid token")
-
         _JWKS_CACHE = (now, data)
         return data
-    except Exception:
-        # Любая ошибка сети/парсинга — как битый токен
+    except (urllib.error.URLError, urllib.error.HTTPError, ValueError):
+        # любые сетевые/парсинговые ошибки — как битый токен
         raise HTTPException(401, "Invalid token")
 
 def _get_bearer_token(req: Request) -> Optional[str]:
@@ -57,7 +60,7 @@ def _get_bearer_token(req: Request) -> Optional[str]:
         tok = req.cookies.get(name)
         if tok:
             return tok
-    # на крайний случай — из query
+    # запасной вариант — query
     tok = req.query_params.get("access_token")
     if tok:
         return tok
@@ -80,8 +83,7 @@ def _decode_hs256(token: str) -> Dict[str, Any]:
         raise HTTPException(401, "Invalid token")
 
 def _decode_rs256_with_jwks(token: str) -> Dict[str, Any]:
-    """RS256 через JWKS (дефолт для Supabase)."""
-    # Быстрая проверка структуры
+    """RS256 через JWKS (дефолт для Supabase без HS-секрета)."""
     if token.count(".") != 2:
         raise HTTPException(401, "Invalid token")
     try:
@@ -94,7 +96,6 @@ def _decode_rs256_with_jwks(token: str) -> Dict[str, Any]:
                 key = k
                 break
         if not key:
-            # fallback: первый ключ
             keys = jwks.get("keys", [])
             if keys:
                 key = keys[0]
@@ -116,8 +117,8 @@ def _decode_rs256_with_jwks(token: str) -> Dict[str, Any]:
 
 def get_current_user(req: Request) -> Dict[str, Any]:
     """
-    Обязательная авторизация. Любая проблема с токеном => 401 без 500.
-    Возвращает claims (dict). Ожидается поле sub (uuid), но downstream-код готов к его отсутствию.
+    Обязательная авторизация. Любая проблема с токеном => 401 (не 500).
+    Возвращает claims (dict).
     """
     token = _get_bearer_token(req)
     if not token:
@@ -128,6 +129,6 @@ def get_current_user(req: Request) -> Dict[str, Any]:
     else:
         claims = _decode_rs256_with_jwks(token)
 
-    # мягкая проверка наличия sub (у нас tenant.py уже умеет работать без sub)
+    # мягкая проверка, sub может отсутствовать
     _ = claims.get("sub") or claims.get("user_id") or claims.get("uid") or claims.get("id")
     return claims
