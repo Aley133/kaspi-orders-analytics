@@ -1,46 +1,38 @@
 # app/deps/tenant.py
-from __future__ import annotations
-from typing import Optional, Any, Dict, Union
-from fastapi import Depends, HTTPException
-from app.deps.auth import get_current_user as _get_current_user
+from fastapi import Depends
+from app.deps.auth import get_current_user
+from app import db
 
+def require_tenant(user = Depends(get_current_user)) -> str:
+    # пробуем найти привязку
+    row = db.fetchrow(
+        "select tenant_id from org_members where user_id = %s limit 1",
+        [user["user_id"]],
+    )
+    if row:
+        return row["tenant_id"]
 
-Claim = Union[Dict[str, Any], str, None]
+    # нет — создаём тенант и членство
+    ten = db.fetchrow(
+        "insert into tenants(name) values (%s) returning id",
+        [user.get("email") or "My Shop"]
+    )
+    db.execute(
+        "insert into org_members(user_id, tenant_id, role) values (%s,%s,'owner') "
+        "on conflict (user_id, tenant_id) do nothing",
+        [user["user_id"], ten["id"]],
+    )
 
+    # (опционально) создаём пустые настройки для удобства
+    db.execute(
+        """
+        insert into tenant_settings(tenant_id, key, value)
+        values
+          (%s, 'kaspi.partner_id', jsonb_build_object('v','')),
+          (%s, 'kaspi.token',       jsonb_build_object('v',''))
+        on conflict (tenant_id, key) do nothing
+        """,
+        [ten["id"], ten["id"]],
+    )
+    return ten["id"]
 
-def _extract_uid(user: Claim) -> Optional[str]:
-if not user:
-return None
-if isinstance(user, dict):
-for k in ("sub", "user_id", "uid", "id"):
-v = user.get(k)
-if v:
-return str(v)
-inner = user.get("user")
-if isinstance(inner, dict):
-for k in ("sub", "user_id", "uid", "id"):
-v = inner.get(k)
-if v:
-return str(v)
-return None
-return str(user)
-
-
-def get_current_user_optional(*args, **kwargs):
-try:
-return _get_current_user(*args, **kwargs)
-except HTTPException as e:
-if e.status_code in (401, 403):
-return None
-raise
-
-
-def require_tenant_optional(user: Claim = Depends(get_current_user_optional)) -> Optional[str]:
-return _extract_uid(user)
-
-
-def require_tenant(user: Claim = Depends(_get_current_user)) -> str:
-uid = _extract_uid(user)
-if not uid:
-raise HTTPException(status_code=401, detail="Unauthorized")
-return uid
