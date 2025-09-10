@@ -39,7 +39,7 @@
     }
     try {
       const r = await authFetch('/settings/me');
-      if (!r.ok && r.status !== 404) throw new Error('settings not ok');
+      if (!r.ok) throw new Error('settings not ok');
       return true;
     } catch {
       return false;
