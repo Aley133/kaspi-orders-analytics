@@ -8,28 +8,29 @@
   <script src="https://unpkg.com/@supabase/supabase-js@2"></script>
   <style>
     .container{max-width:820px;margin:24px auto;padding:16px}
-    .card{background:var(--card,#f8fafc);border:1px solid var(--line,#e5e7eb);border-radius:12px;padding:16px}
+    .card{background:#0f172a;border:1px solid #1f2937;border-radius:12px;padding:16px;color:#e5e7eb}
     .row{display:grid;grid-template-columns:1fr 2fr;gap:12px;align-items:center;margin-bottom:12px}
     label{font-weight:600}
-    input,select{width:100%;padding:10px;border:1px solid var(--line,#e5e7eb);border-radius:10px}
+    input,select{width:100%;padding:10px;border:1px solid #334155;border-radius:10px;background:#0b1220;color:#e5e7eb}
     .actions{display:flex;gap:12px;justify-content:flex-end;margin-top:16px}
-    button{padding:10px 16px;border-radius:10px;border:1px solid var(--line);background:#1f7aee;color:#fff;cursor:pointer}
-    .note{font-size:12px;color:#6b7280}
+    button{padding:10px 16px;border-radius:10px;border:1px solid #334155;background:#1f7aee;color:#fff;cursor:pointer}
+    .note{font-size:12px;color:#9ca3af}
+    body{background:#0b1220;font-family:system-ui,-apple-system,Segoe UI,Roboto}
   </style>
 </head>
 <body>
   <div class="container">
-    <h1>Настройки магазина</h1>
+    <h1 style="color:#e5e7eb">Настройки магазина</h1>
     <p class="note">После входа укажите параметры Kaspi. Токен хранится в базе и больше не запрашивается.</p>
 
     <div class="card">
       <div class="row">
         <label for="partner_id">ID магазина (PARTNER_ID / MERCHANT_ID)</label>
-        <input id="partner_id" type="number" placeholder="например, 30295031"/>
+        <input id="partner_id" type="number" placeholder="напр., 30295031"/>
       </div>
       <div class="row">
         <label for="shop_name">Название магазина</label>
-        <input id="shop_name" type="text" placeholder="например, LeoXpress"/>
+        <input id="shop_name" type="text" placeholder="напр., LeoXpress"/>
       </div>
       <div class="row">
         <label for="kaspi_token">Kaspi API Token</label>
@@ -37,7 +38,7 @@
       </div>
       <div class="row">
         <label for="city_id">Город (city_id)</label>
-        <input id="city_id" type="number" placeholder="например, 196220100"/>
+        <input id="city_id" type="number" placeholder="напр., 196220100"/>
       </div>
       <div class="row">
         <label for="bds">Начало бизнес-дня</label>
@@ -49,7 +50,7 @@
       </div>
       <div class="row">
         <label for="min_margin">Мин. маржа, %</label>
-        <input id="min_margin" type="number" step="0.01" placeholder="например, 10"/>
+        <input id="min_margin" type="number" step="0.01" placeholder="напр., 10"/>
       </div>
       <div class="row">
         <label for="auto_reprice">Автопереоценка</label>
@@ -67,26 +68,28 @@
   </div>
 <script src="/ui/lib/auth.js"></script>
 <script>
-  async function loadSettings(sessionToken) {
-    try {
-      const res = await __auth.authFetch('/settings/me');
-      if (res.status === 404) return;
-      if (!res.ok) throw new Error(await res.text());
-      const s = await res.json();
-      if (s.partner_id) partner_id.value = s.partner_id;
-      if (s.shop_name) shop_name.value = s.shop_name;
-      if (s.kaspi_token_masked) kaspi_token.placeholder = s.kaspi_token_masked + ' (оставьте пустым, чтобы не менять)';
-      if (s.city_id) city_id.value = s.city_id;
-      if (s.business_day_start) bds.value = s.business_day_start;
-      if (s.timezone) tz.value = s.timezone;
-      if (s.min_margin_pct != null) min_margin.value = s.min_margin_pct;
-      if (s.auto_reprice != null) auto_reprice.value = String(s.auto_reprice);
-    } catch (e) {
-      alert('Ошибка загрузки настроек: ' + e.message);
-    }
+  async function requireSession() {
+    const ok = await window.__auth.requireAuth();
+    if (!ok) return null;
+    return { access_token: window.__auth.getToken() };
   }
-
-  async function saveSettings() {
+  function authHeader(session) {
+    return { 'Authorization': `Bearer ${session.access_token}`, 'Content-Type': 'application/json' };
+  }
+  async function loadSettings(session) {
+    const res = await window.__auth.authFetch('/settings/me');
+    if (res.status === 404) return;
+    const s = await res.json();
+    if (s.partner_id) partner_id.value = s.partner_id;
+    if (s.shop_name) shop_name.value = s.shop_name;
+    if (s.kaspi_token_masked) kaspi_token.placeholder = s.kaspi_token_masked + ' (оставьте пустым, чтобы не менять)';
+    if (s.city_id) city_id.value = s.city_id;
+    if (s.business_day_start) bds.value = s.business_day_start;
+    if (s.timezone) tz.value = s.timezone;
+    if (s.min_margin_pct != null) min_margin.value = s.min_margin_pct;
+    if (s.auto_reprice != null) auto_reprice.value = String(s.auto_reprice);
+  }
+  async function saveSettings(session) {
     const payload = {
       partner_id: partner_id.value ? Number(partner_id.value) : null,
       shop_name: shop_name.value || null,
@@ -97,24 +100,18 @@
       min_margin_pct: min_margin.value ? Number(min_margin.value) : null,
       auto_reprice: auto_reprice.value === "" ? null : (auto_reprice.value === "true")
     };
-    const res = await __auth.authFetch('/settings/me', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+    const res = await window.__auth.authFetch('/settings/me', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
       body: JSON.stringify(payload)
     });
-    if (!res.ok) {
-      const t = await res.text();
-      alert('Ошибка сохранения: ' + t);
-      return;
-    }
+    if (!res.ok) { alert(await res.text()); return; }
     location.href = '/ui/';
   }
-
   (async () => {
-    const ok = await __auth.requireAuth();
-    if (!ok) return;
-    await loadSettings();
-    document.getElementById('saveBtn').addEventListener('click', saveSettings);
+    const session = await requireSession(); if (!session) return;
+    await loadSettings(session);
+    document.getElementById('saveBtn').addEventListener('click', () => saveSettings(session));
   })();
 </script>
 </body>

@@ -4,8 +4,8 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Вход — Kaspi Orders Analytics</title>
-  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin />
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="/ui/lib/auth.js"></script>
   <style>
     :root { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
     html,body{height:100%} body{margin:0; background:#0b1220; color:#e5e7eb; display:flex; align-items:center; justify-content:center}
@@ -20,12 +20,8 @@
     input:focus{border-color:#60a5fa; box-shadow:0 0 0 3px rgba(96,165,250,.2)}
     .btn{width:100%; padding:12px 14px; border-radius:10px; border:0; background:#3b82f6; color:#fff; cursor:pointer; font-weight:600}
     .btn:disabled{opacity:.6; cursor:not-allowed}
-    .row{display:flex; gap:10px}
     .msg{margin-top:8px; font-size:12px}
-    .ok{color:#bbf7d0}
-    .err{color:#fecaca; white-space:pre-wrap}
-    .hidden{display:none}
-    .footer{margin-top:14px; padding:10px 12px; border:1px dashed #334155; border-radius:10px; font-size:12px; color:#9ca3af}
+    .ok{color:#bbf7d0}.err{color:#fecaca}.hidden{display:none}
   </style>
 </head>
 <body>
@@ -38,61 +34,34 @@
       <button id="tab-phone">Телефон (SMS)</button>
     </div>
 
-    <!-- EMAIL -->
     <form id="form-email">
       <label>E-mail</label>
-      <input id="email" type="email" placeholder="you@example.com" autocomplete="email" required />
+      <input id="email" type="email" placeholder="you@example.com" required/>
       <button class="btn" id="btn-email" type="submit">Отправить код/ссылку</button>
       <div class="msg ok hidden" id="ok-email">Письмо отправлено. Введите код ниже или перейдите по ссылке.</div>
-
       <div id="email-verify" class="hidden">
         <label>Код из письма</label>
-        <input id="email-code" inputmode="numeric" placeholder="6-значный код" />
+        <input id="email-code" inputmode="numeric" placeholder="6-значный код"/>
         <button class="btn" id="btn-verify-email" type="button">Подтвердить и войти</button>
       </div>
       <div class="msg err hidden" id="err-email"></div>
     </form>
 
-    <!-- PHONE -->
     <form id="form-phone" class="hidden">
-      <label>Номер телефона (в формате +7701…)</label>
-      <input id="phone" type="tel" placeholder="+7701XXXXXXX" autocomplete="tel" />
+      <label>Телефон (+7701…)</label>
+      <input id="phone" type="tel" placeholder="+7701XXXXXXX"/>
       <button class="btn" id="btn-sms" type="submit">Отправить SMS-код</button>
-
       <div class="msg ok hidden" id="ok-sms">Код отправлен. Введите код ниже.</div>
       <div id="sms-verify" class="hidden">
         <label>Код из SMS</label>
-        <input id="sms-code" inputmode="numeric" placeholder="6-значный код" />
+        <input id="sms-code" inputmode="numeric" placeholder="6-значный код"/>
         <button class="btn" id="btn-verify-sms" type="button">Подтвердить и войти</button>
       </div>
       <div class="msg err hidden" id="err-sms"></div>
     </form>
-
-    <div class="footer">Если письма/SMS нет — подождите и попробуйте ещё раз. Проверьте «Спам».</div>
   </div>
 
-<script src="/ui/lib/auth.js"></script>
 <script>
-  // Перенос токена из hash (magic-link)
-  (function readHashToken() {
-    const p = new URLSearchParams(location.hash.slice(1));
-    const t = p.get('access_token');
-    if (t) {
-      window.__auth.setToken(t);
-      history.replaceState(null,'', location.pathname + location.search);
-      afterLogin();
-    }
-  })();
-
-  let supa, sbHost = '…';
-  async function init() {
-    const meta = await fetch('/auth/meta').then(r => r.json());
-    supa = supabase.createClient(meta.SUPABASE_URL, meta.SUPABASE_ANON_KEY);
-    sbHost = new URL(meta.SUPABASE_URL).host;
-  }
-  init();
-
-  // tabs
   const tEmail = document.getElementById('tab-email');
   const tPhone = document.getElementById('tab-phone');
   const fEmail = document.getElementById('form-email');
@@ -100,102 +69,70 @@
   tEmail.onclick = () => { tEmail.classList.add('active'); tPhone.classList.remove('active'); fEmail.classList.remove('hidden'); fPhone.classList.add('hidden'); };
   tPhone.onclick = () => { tPhone.classList.add('active'); tEmail.classList.remove('active'); fPhone.classList.remove('hidden'); fEmail.classList.add('hidden'); };
 
-  function show(id, yes) {
-    const el = document.getElementById(id);
-    if (!el) return;
-    if (yes) el.classList.remove('hidden'); else el.classList.add('hidden');
+  (function readHashToken() {
+    const p = new URLSearchParams(location.hash.slice(1));
+    const t = p.get('access_token');
+    if (t) { window.__auth.setToken(t); history.replaceState(null,'', location.pathname + location.search); afterLogin(); }
+  })();
+
+  let supa;
+  async function init() {
+    const meta = await fetch('/auth/meta').then(r => r.json());
+    supa = supabase.createClient(meta.SUPABASE_URL, meta.SUPABASE_ANON_KEY);
   }
-  function text(id, val) {
-    const el = document.getElementById(id);
-    if (el) { el.textContent = val; el.classList.remove('hidden'); }
-  }
+  init();
 
   async function afterLogin() {
     try {
-      const next = new URLSearchParams(location.search).get('next');
       const r = await window.__auth.authFetch('/settings/me');
-      if (r.ok) {
-        location.href = next || '/ui/';
-      } else if (r.status === 404) {
-        location.href = '/ui/settings.html';
-      } else {
-        location.href = '/ui/';
-      }
+      const next = new URLSearchParams(location.search).get('next');
+      if (r.ok) location.href = next || '/ui/'; else if (r.status === 404) location.href = '/ui/settings.html'; else location.href = '/ui/';
     } catch {}
   }
 
-  // EMAIL: отправка
   fEmail.addEventListener('submit', async (e) => {
     e.preventDefault();
-    if (!supa) return;
-    show('err-email', false);
-
     const email = document.getElementById('email').value.trim();
-    if (!email) return;
-
-    const btn = document.getElementById('btn-email');
-    btn.disabled = true;
+    if (!email || !supa) return;
+    const btn = document.getElementById('btn-email'); btn.disabled = true;
     try {
       const redirectTo = location.origin + '/ui/login.html';
-      const { data, error } = await supa.auth.signInWithOtp({
-        email,
-        options: { shouldCreateUser: true, emailRedirectTo: redirectTo }
-      });
+      const { error } = await supa.auth.signInWithOtp({ email, options:{ shouldCreateUser:true, emailRedirectTo: redirectTo }});
       if (error) throw error;
-      show('ok-email', true);
-      show('email-verify', true);
+      document.getElementById('ok-email').classList.remove('hidden');
+      document.getElementById('email-verify').classList.remove('hidden');
     } catch (e2) {
-      text('err-email', e2.message || 'Ошибка отправки письма');
-    } finally {
-      btn.disabled = false;
-    }
+      const el = document.getElementById('err-email'); el.textContent = e2.message || 'Ошибка'; el.classList.remove('hidden');
+    } finally { btn.disabled = false; }
   });
 
-  // EMAIL: подтверждение кода
   document.getElementById('btn-verify-email').addEventListener('click', async () => {
     const email = document.getElementById('email').value.trim();
     const token = document.getElementById('email-code').value.trim();
-    if (!email || !token) return;
-    try {
-      const { data, error } = await supa.auth.verifyOtp({ email, token, type: 'email' });
-      if (error) throw error;
-      if (data?.session?.access_token) window.__auth.setToken(data.session.access_token);
-      afterLogin();
-    } catch (e2) {
-      text('err-email', e2.message || 'Ошибка подтверждения');
-    }
+    if (!email || !token || !supa) return;
+    const { data, error } = await supa.auth.verifyOtp({ email, token, type:'email' });
+    if (error) { alert(error.message); return; }
+    if (data?.session?.access_token) window.__auth.setToken(data.session.access_token);
+    afterLogin();
   });
 
-  // PHONE: отправка
   fPhone.addEventListener('submit', async (e) => {
-    e.preventDefault(); show('err-sms', false);
+    e.preventDefault();
     const phone = document.getElementById('phone').value.trim();
-    if (!phone.startsWith('+')) { text('err-sms', 'Введите номер в формате +77…'); return; }
-    const btn = document.getElementById('btn-sms'); btn.disabled = true;
-    try {
-      const { data, error } = await supa.auth.signInWithOtp({ phone, options: { shouldCreateUser: true }});
-      if (error) throw error;
-      show('ok-sms', true);
-      show('sms-verify', true);
-    } catch (e2) {
-      text('err-sms', e2.message || 'Ошибка отправки SMS');
-    } finally {
-      btn.disabled = false;
-    }
+    if (!phone.startsWith('+') || !supa) return alert('Формат: +77…');
+    const { error } = await supa.auth.signInWithOtp({ phone, options:{ shouldCreateUser:true }});
+    if (error) return alert(error.message);
+    document.getElementById('ok-sms').classList.remove('hidden');
+    document.getElementById('sms-verify').classList.remove('hidden');
   });
 
-  // PHONE: подтверждение
   document.getElementById('btn-verify-sms').addEventListener('click', async () => {
     const phone = document.getElementById('phone').value.trim();
     const token = document.getElementById('sms-code').value.trim();
-    try {
-      const { data, error } = await supa.auth.verifyOtp({ phone, token, type: 'sms' });
-      if (error) throw error;
-      if (data?.session?.access_token) window.__auth.setToken(data.session.access_token);
-      afterLogin();
-    } catch (e2) {
-      text('err-sms', e2.message || 'Ошибка подтверждения');
-    }
+    const { data, error } = await supa.auth.verifyOtp({ phone, token, type:'sms' });
+    if (error) return alert(error.message);
+    if (data?.session?.access_token) window.__auth.setToken(data.session.access_token);
+    afterLogin();
   });
 </script>
 </body>

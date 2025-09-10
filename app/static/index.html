@@ -4,153 +4,18 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Kaspi Orders Analytics</title>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-  <style>
-    :root{ --bg:#0b0c0f; --fg:#e5e7eb; --muted:#9ca3af; --line:#2a2f3a; --card:#111318; --accent:#10b981; --danger:#ef4444; --warn:#f59e0b; }
-    [data-theme="light"]{ --bg:#f8fafc; --fg:#0f172a; --muted:#64748b; --line:#e2e8f0; --card:#ffffff; --accent:#059669; --danger:#dc2626; --warn:#d97706; }
-
-    *{box-sizing:border-box}
-    html,body{height:100%}
-    body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Helvetica Neue","Noto Sans",Arial}
-    a{color:inherit}
-    .muted{color:var(--muted)}
-    .layout{display:flex;min-height:100vh}
-    .sidebar{width:240px;border-right:1px solid var(--line);padding:16px;background:var(--card)}
-    .content{flex:1;min-width:0;padding:16px 18px}
-
-    .brand{font-weight:800;letter-spacing:.3px;margin-bottom:12px}
-    .nav{display:flex;flex-direction:column;gap:6px;margin:6px 0 16px}
-    .nav a{padding:6px 8px;border-radius:8px;color:var(--fg);text-decoration:none}
-    .nav a:hover{background:var(--bg)}
-
-    .row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-    .filters input,.filters select{height:32px;border:1px solid var(--line);background:var(--card);color:var(--fg);border-radius:8px;padding:0 10px}
-    .btn{height:32px;padding:0 12px;border:1px solid var(--line);background:var(--card);color:var(--fg);border-radius:8px;cursor:pointer}
-    .btn.secondary{opacity:.9}
-    .btn[disabled]{opacity:.5;pointer-events:none}
-
-    .shell{border:1px solid var(--line);background:var(--card);border-radius:14px;padding:12px;margin:16px 0}
-    .kpi{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px}
-    .kpi-item{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 12px;min-width:170px}
-    .kpi-label{font-size:12px;color:var(--muted)}
-    .kpi-value{font-size:22px;font-weight:700}
-    .kpi-sub{font-size:12px;color:var(--muted)}
-    .note{margin:12px 0;padding:10px 12px;border-radius:10px;display:none;border:1px solid transparent}
-    .note.ok{display:block;background:color-mix(in oklab, var(--accent) 14%, transparent);border-color:color-mix(in oklab, var(--accent) 48%, transparent);color:var(--fg)}
-    .note.err{display:block;background:color-mix(in oklab, var(--danger) 14%, transparent);border-color:color-mix(in oklab, var(--danger) 48%, transparent);color:var(--fg)}
-  </style>
+  <script src="/ui/lib/auth.js"></script>
 </head>
-<body data-theme="light">
-  <div class="layout">
-    <aside class="sidebar">
-      <div class="brand">⚡ LeoXpress</div>
-      <nav class="nav">
-        <a href="stock.html">Мой склад</a>
-        <a href="settings.html">Настройки</a>
-      </nav>
-    </aside>
-
-    <main class="content">
-      <h1 style="margin:0 0 12px">Аналитика заказов Kaspi</h1>
-
-      <!-- ФИЛЬТРЫ -->
-      <form id="f" class="filters shell" style="margin-top:12px">
-        <div class="row">
-          <label>Начало</label><input type="date" id="start" required>
-          <label>Конец</label><input type="date" id="end" required>
-          <label>Часовой пояс</label><input type="text" id="tz" value="Asia/Almaty" style="width:140px">
-          <label>Поле даты</label>
-          <select id="date_field" style="width:220px">
-            <option value="creationDate" selected>Создание заказа</option>
-            <option value="plannedShipmentDate">План передачи</option>
-            <option value="shipmentDate">Фактическая передача</option>
-            <option value="deliveryDate">Фактическая доставка</option>
-          </select>
-          <button type="submit" class="btn" id="btn-run" style="margin-left:auto">Показать</button>
-        </div>
-      </form>
-
-      <div id="note" class="note"></div>
-
-      <!-- KPI ПЕРИОДА -->
-      <section class="kpi">
-        <div class="kpi-item"><div class="kpi-label">Период</div><div class="kpi-value" id="periodLabel">—</div><div class="kpi-sub">до <span id="periodCutoff">—:—</span></div></div>
-        <div class="kpi-item"><div class="kpi-label">Заказы</div><div class="kpi-value" id="kpiOrders">0</div></div>
-        <div class="kpi-item"><div class="kpi-label">Оборот</div><div class="kpi-value" id="kpiAmount">0</div></div>
-      </section>
-
-      <section class="shell">
-        <h2 style="margin:0">Номера заказов (для сверки)</h2>
-        <div id="ids"></div>
-      </section>
-    </main>
-  </div>
-
-<script src="/ui/lib/auth.js"></script>
+<body>
+  <h1>Kaspi Orders Analytics</h1>
+  <p>Эта страница требует входа. Если вы видите её — токен валиден.</p>
+  <div id="out"></div>
 <script>
-  const nf = new Intl.NumberFormat('ru-RU');
-  function fmt(n){ return nf.format(Math.round((Number(n) + Number.EPSILON) * 100) / 100); }
-  function setNote(msg, mode='ok'){
-    const el = document.getElementById('note');
-    el.className = 'note ' + mode;
-    el.textContent = msg;
-    el.style.display = 'block';
-  }
-  function setKPI(resp){
-    periodLabel.textContent = `${resp.range.start} → ${resp.range.end}`;
-    kpiOrders.textContent = fmt(resp.total_orders);
-    kpiAmount.textContent = fmt(resp.total_amount) + ' ' + resp.currency;
-  }
-  async function loadOrders(){
-    const params = new URLSearchParams({
-      start: start.value,
-      end: end.value,
-      tz: tz.value,
-      date_field: date_field.value,
-      use_bd: '1',
-      assign_mode: 'smart',
-      store_accept_until: '17:00',
-      exclude_states: 'CANCELED',
-      business_day_start: '20:00'
-    });
-    const r = await __auth.authFetch('/orders/analytics?' + params.toString());
-    if(!r.ok){
-      setNote('Ошибка: ' + await r.text(), 'err'); return;
-    }
-    const data = await r.json();
-    setKPI(data);
-
-    // ids.async
-    const p2 = new URLSearchParams({
-      start: start.value,
-      end: end.value,
-      tz: tz.value,
-      date_field: date_field.value,
-      order: 'asc',
-      grouped: '1',
-      with_items: '1',
-      use_bd: '1',
-      business_day_start: '20:00',
-      assign_mode: 'smart',
-      store_accept_until: '17:00',
-      items_mode: 'all',
-      enrich_scope: 'all',
-      exclude_states: 'CANCELED'
-    });
-    const r2 = await __auth.authFetch('/orders/ids.async?' + p2.toString(), { method: 'POST' });
-    if(!r2.ok){ document.getElementById('ids').textContent = '—'; return; }
-    const j2 = await r2.json();
-    document.getElementById('ids').textContent = 'Запущено задание: ' + j2.job_id;
-  }
-
   (async () => {
-    const ok = await __auth.requireAuth();
+    const ok = await window.__auth.requireAuth();
     if (!ok) return;
-    // init dates: today
-    const today = new Date().toISOString().slice(0,10);
-    start.value = today; end.value = today;
-    document.getElementById('f').addEventListener('submit', (e)=>{ e.preventDefault(); loadOrders(); });
-    loadOrders();
+    const r = await window.__auth.authFetch('/meta');
+    document.getElementById('out').textContent = JSON.stringify(await r.json(), null, 2);
   })();
 </script>
 </body>
