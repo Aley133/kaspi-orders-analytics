@@ -9,19 +9,17 @@ def _b64url_decode(s: str) -> bytes:
 
 def _jwt_decode_noverify(token: str) -> Dict[str, Any]:
     try:
-        header_b64, payload_b64, _sig = token.split('.', 3)
-        return {
-            "header": json.loads(_b64url_decode(header_b64)),
-            "payload": json.loads(_b64url_decode(payload_b64)),
-        }
+        header_b64, payload_b64, _sig = token.split('.', 2)
+        return {"header": json.loads(_b64url_decode(header_b64)),
+                "payload": json.loads(_b64url_decode(payload_b64))}
     except Exception:
         raise HTTPException(status_code=401, detail="Bad JWT")
 
 def _jwt_verify_hs256(token: str, secret: str) -> bool:
     try:
-        header_b64, payload_b64, sig_b64 = token.split('.', 3)
-        signing_input = f"{header_b64}.{payload_b64}".encode()
-        expected = hmac.new(secret.encode(), signing_input, hashlib.sha256).digest()
+        header_b64, payload_b64, sig_b64 = token.split('.', 2)
+        signing_input = f"{header_b64}.{payload_b64}".encode("utf-8")
+        expected = hmac.new(secret.encode("utf-8"), signing_input, hashlib.sha256).digest()
         got = _b64url_decode(sig_b64)
         return hmac.compare_digest(expected, got)
     except Exception:
@@ -29,8 +27,7 @@ def _jwt_verify_hs256(token: str, secret: str) -> bool:
 
 def _extract_tenant(payload: Dict[str, Any]) -> str:
     for path in [("app_metadata","tenant_id"), ("user_metadata","tenant_id")]:
-        cur = payload
-        ok = True
+        cur = payload; ok = True
         for p in path:
             if not isinstance(cur, dict) or p not in cur:
                 ok = False; break
@@ -40,10 +37,10 @@ def _extract_tenant(payload: Dict[str, Any]) -> str:
     sub = payload.get("sub")
     if isinstance(sub, str) and sub:
         return sub
-    raise HTTPException(status_code=401, detail="tenant_id not found")
+    raise HTTPException(status_code=401, detail="tenant_id not found in JWT")
 
 def _extract_email(payload: Dict[str, Any]) -> Optional[str]:
-    for k in ("email", "user_email", "preferred_username"):
+    for k in ("email","user_email","preferred_username"):
         v = payload.get(k)
         if isinstance(v, str) and v:
             return v
@@ -66,6 +63,25 @@ async def get_current_user(authorization: Optional[str] = Header(None)) -> Dict[
         "user_id": payload.get("sub"),
         "email": _extract_email(payload),
         "role": payload.get("role") or payload.get("app_metadata", {}).get("role"),
-        "token": token,
         "raw": payload,
+        "token": token,
     }
+
+# ── Хелпер для middleware: мягко достаём tenant_id, без исключений ────────────
+def try_extract_tenant_from_authorization(authorization: Optional[str]) -> Optional[str]:
+    try:
+        if not authorization or not authorization.lower().startswith("bearer "):
+            return None
+        token = authorization.split(" ", 1)[1].strip()
+        header_b64, payload_b64, _sig = token.split('.', 2)
+        payload = json.loads(_b64url_decode(payload_b64))
+        # тот же приоритет
+        for path in [("app_metadata","tenant_id"), ("user_metadata","tenant_id")]:
+            cur = payload; ok = True
+            for p in path:
+                if not isinstance(cur, dict) or p not in cur: ok = False; break
+                cur = cur[p]
+            if ok and str(cur): return str(cur)
+        return payload.get("sub")
+    except Exception:
+        return None
