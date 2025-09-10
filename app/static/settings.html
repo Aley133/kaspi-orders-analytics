@@ -8,7 +8,7 @@
 </head>
 <body data-theme="light" style="padding:24px;max-width:920px;margin:auto">
   <h1>Настройки</h1>
-  <p class="muted">Эти параметры используют эндпоинты аналитики и синхронизации.</p>
+  <p class="muted">Параметры используются аналитикой и синхронизацией.</p>
 
   <form id="form" style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
     <div><label>Shop name</label><input name="shop_name" placeholder="LeoXpress"/></div>
@@ -38,31 +38,25 @@
   <script>
     const $ = s => document.querySelector(s);
     (async function init(){
-      await Auth.ensureAuthOrGoLogin();
+      await Auth.getSession() || (window.location.href='/ui/login.html');
       try{
         const r = await Auth.authedFetch('/settings/me');
-        if (r.status === 404){
-          // пустая форма — норм
-          return;
+        if (r.ok){
+          const data = await r.json();
+          for (const [k,v] of Object.entries(data)){
+            const el = document.querySelector(`[name="${k}"]`);
+            if (!el) continue;
+            if (el.type === 'checkbox') el.checked = !!v;
+            else el.value = v ?? '';
+          }
         }
-        if (!r.ok) throw new Error(await r.text());
-        const data = await r.json();
-        for (const [k,v] of Object.entries(data)){
-          const el = document.querySelector(`[name="${k}"]`);
-          if (!el) continue;
-          if (el.type === 'checkbox') el.checked = !!v;
-          else el.value = v ?? '';
-        }
-      }catch(e){
-        $('#msg').textContent = 'Ошибка загрузки настроек: ' + (e?.message || e);
-      }
+      }catch(e){ console.warn(e); }
     })();
 
     function readForm(){
-      const f = $('#form');
-      const o = {};
-      for (const el of f.querySelectorAll('input')){
-        o[el.name] = (el.type === 'checkbox') ? el.checked : el.value.trim();
+      const o={};
+      for (const el of document.querySelectorAll('#form input')){
+        o[el.name] = (el.type==='checkbox')?el.checked:el.value.trim();
       }
       return o;
     }
@@ -70,15 +64,18 @@
     $('#save').onclick = async () => {
       $('#msg').textContent = 'Сохраняю...';
       try{
-        const body = readForm();
-        const r = await Auth.authedFetch('/settings/save',{
-          method: 'POST',
-          headers: {'Content-Type':'application/json'},
-          body: JSON.stringify(body)
+        const r = await Auth.authedFetch('/settings/save', {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify(readForm())
         });
         if (!r.ok) throw new Error(await r.text());
-        const j = await r.json();
-        $('#msg').textContent = 'OK — ' + (j.updated_at || '');
+
+        // быстрый self-check и переход на главную
+        const check = await Auth.authedFetch('/settings/check');
+        const ok = check.ok ? (await check.json()).ok : false;
+        $('#msg').textContent = ok ? 'OK — перенаправляю...' : 'Сохранено, но токен не прошёл проверку';
+        if (ok) setTimeout(()=> window.location.href = '/ui/', 600);
       }catch(e){
         $('#msg').textContent = 'Ошибка: ' + (e?.message || e);
       }
