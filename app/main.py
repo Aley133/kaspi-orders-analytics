@@ -20,13 +20,19 @@ from pydantic import BaseModel
 from cachetools import TTLCache
 from httpx import HTTPStatusError, RequestError
 
+# ──────────────────────────────────────────────────────────────────────────────
+# deps: tenant + db
+# ──────────────────────────────────────────────────────────────────────────────
+from app.deps.tenant import require_tenant  # берёт tenant_id из Supabase-JWT
+from app import db
+
 # роутеры
 from app.api.bridge_v2 import router as bridge_router
 from app.api.profit_fifo import get_profit_fifo_router
 from app.api.authz import router as auth_router
 from app.api.settings import router as settings_router
 
-# utils для SKU
+# utils для SKU (дебаг)
 from app.debug_sku import (
     get_debug_router,
     _index_included,
@@ -36,9 +42,8 @@ from app.debug_sku import (
     sku_candidates as _sku_candidates_from_attrs,
 )
 
-# KaspiClient и зависимость per-user
+# Kaspi client
 from app.kaspi_client import KaspiClient
-from app.deps.kaspi_client import get_kaspi_client
 
 # products router (без передачи client внутрь)
 try:
@@ -81,7 +86,7 @@ STORE_ACCEPT_UNTIL = os.getenv("STORE_ACCEPT_UNTIL", "17:00")  # HH:MM
 ENRICH_CONCURRENCY = int(os.getenv("ENRICH_CONCURRENCY", "8") or 8)
 DEFAULT_INCLUDE_STATES: set[str] = {"KASPI_DELIVERY", "ARCHIVE", "ARCHIVED"}
 
-# runtime flags
+# runtime flags (меняются запросно)
 _EFF_USE_BD: bool = USE_BUSINESS_DAY
 _EFF_BDS: str = BUSINESS_DAY_START
 
@@ -92,7 +97,7 @@ if origins:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=origins,
-        allow_methods=["GET","POST","PUT","DELETE","OPTIONS"],
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
         allow_headers=["*"],
         allow_credentials=False,
     )
@@ -109,6 +114,27 @@ app.include_router(get_debug_router())
 app.include_router(bridge_router, prefix="/profit")
 app.include_router(auth_router)
 app.include_router(settings_router)
+
+# -------------------- KV helpers (NEW) --------------------
+def _get_kv(tenant_id: str) -> dict:
+    rows = db.fetchall("select key, value from tenant_settings where tenant_id=%s", [tenant_id])
+    kv: Dict[str, object] = {}
+    for r in rows:
+        v = r["value"]
+        if isinstance(v, dict) and "v" in v:
+            kv[r["key"]] = v["v"]
+        else:
+            kv[r["key"]] = v
+    return kv
+
+def _kaspi_client_for_tenant(tenant_id: str) -> KaspiClient:
+    kv = _get_kv(tenant_id)
+    token = (kv.get("kaspi.token") or "").strip() if isinstance(kv.get("kaspi.token"), str) or kv.get("kaspi.token") is None else str(kv.get("kaspi.token")).strip()
+    if not token:
+        # У пользователя ещё нет токена — UI должен увести в /ui/settings.html
+        raise HTTPException(status_code=401, detail="Kaspi token is not configured for this tenant")
+    base_url = KASPI_BASE_URL  # при желании можно тоже вынести в KV
+    return KaspiClient(token=token, base_url=base_url)
 
 # -------------------- utils --------------------
 def tzinfo_of(name: str) -> pytz.BaseTzInfo:
@@ -157,7 +183,8 @@ def parse_states_csv(s: Optional[str]) -> Optional[set[str]]:
 _CITY_KEY_HINTS = {"city", "cityname", "town", "locality", "settlement"}
 
 def _normalize_city(s: str) -> str:
-    if not isinstance(s, str): return ""
+    if not isinstance(s, str):
+        return ""
     s = s.strip()
     s = re.sub(r"^\s*(г\.?|город)\s+", "", s, flags=re.IGNORECASE)
     s = s.split(",")[0].strip()
@@ -195,7 +222,8 @@ def extract_amount(attrs: dict) -> float:
     total = 0.0
     for k in AMOUNT_FIELDS:
         v = dict_get_path(attrs, k) if "." in k else attrs.get(k)
-        if v is None: continue
+        if v is None:
+            continue
         try:
             total += float(v)
         except Exception:
@@ -204,7 +232,8 @@ def extract_amount(attrs: dict) -> float:
 
 def extract_ms(attrs: dict, field: str) -> Optional[int]:
     v = attrs.get(field)
-    if v is None: return None
+    if v is None:
+        return None
     try:
         return int(v)
     except Exception:
@@ -456,7 +485,8 @@ def _new_job() -> str:
 
 def _job_update(job_id: str, **patch):
     st = Jobs.get(job_id)
-    if not st: return
+    if not st:
+        return
     st.update(patch)
     st["updated"] = datetime.utcnow().isoformat() + "Z"
 
@@ -464,8 +494,10 @@ def _job_progress_cb(job_id: Optional[str]):
     if not job_id:
         return None
     def cb(phase: str, done: int, total: int, extra_msg: str = ""):
-        if job_id not in Jobs: return
-        if Jobs[job_id].get("cancel"): return
+        if job_id not in Jobs:
+            return
+        if Jobs[job_id].get("cancel"):
+            return
         prog = 0.0
         if total > 0:
             prog = (0.6 * (done/total)) if phase == "scan" else (0.6 + 0.4 * (done/total))
@@ -518,14 +550,12 @@ def _calc_enrich_params(total_targets: int) -> Tuple[int, float]:
     return ENRICH_CONCURRENCY, 0.02
 
 async def _collect_range(
+    client: KaspiClient,
     start_dt: datetime, end_dt: datetime, tz: str, date_field: str,
     states_inc: Optional[set], states_ex: set,
     assign_mode: str, store_accept_until: str,
     progress: Optional[Callable[[str, int, int, str], None]] = None,
-    client: KaspiClient | None = None,
 ) -> tuple[list[DayPoint], Dict[str, int], int, float, Dict[str, int], List[Dict[str, object]]]:
-    if client is None:
-        raise HTTPException(500, "Kaspi client is not provided")
 
     tzinfo = tzinfo_of(tz)
     seen_ids: set[str] = set()
@@ -553,15 +583,19 @@ async def _collect_range(
                 try:
                     for order in client.iter_orders(start=s, end=e, filter_field=try_field):
                         oid = str(order.get("id"))
-                        if oid in seen_ids: continue
+                        if oid in seen_ids:
+                            continue
                         attrs = order.get("attributes", {}) or {}
 
                         st = norm_state(str(attrs.get("state", "")))
-                        if states_inc and st not in states_inc: continue
-                        if st in states_ex: continue
+                        if states_inc and st not in states_inc:
+                            continue
+                        if st in states_ex:
+                            continue
 
                         ms = extract_ms(attrs, date_field if date_field in attrs else try_field)
-                        if ms is None: continue
+                        if ms is None:
+                            continue
                         dtt = datetime.fromtimestamp(ms / 1000.0, tz=pytz.UTC).astimezone(tzinfo)
 
                         if assign_mode == "smart":
@@ -571,14 +605,16 @@ async def _collect_range(
                         else:
                             op_day, reason = dtt.date().isoformat(), "raw"
 
-                        if not (range_start_day <= op_day <= range_end_day): continue
+                        if not (range_start_day <= op_day <= range_end_day):
+                            continue
 
                         amt = extract_amount(attrs)
                         city = extract_city(attrs)
 
                         day_counts[op_day] = day_counts.get(op_day, 0) + 1
                         day_amounts[op_day] = day_amounts.get(op_day, 0.0) + amt
-                        if city: city_counts[city] = city_counts.get(city, 0) + 1
+                        if city:
+                            city_counts[city] = city_counts.get(city, 0) + 1
                         state_counts[st] = state_counts.get(st, 0) + 1
 
                         total_orders += 1
@@ -598,7 +634,8 @@ async def _collect_range(
                     break
                 except HTTPStatusError as ee:
                     if ee.response.status_code in (400, 422) and try_field != "creationDate":
-                        try_field = "creationDate"; continue
+                        try_field = "creationDate"
+                        continue
                     raise
         except RequestError as e:
             raise HTTPException(502, f"Network: {e}")
@@ -618,15 +655,24 @@ async def _collect_range(
 
 # -------------------- /orders/analytics --------------------
 @app.get("/orders/analytics", response_model=AnalyticsResponse)
-async def analytics(start: str = Query(...), end: str = Query(...), tz: str = Query(DEFAULT_TZ),
-                    date_field: str = Query(DATE_FIELD_DEFAULT),
-                    states: Optional[str] = Query(None), exclude_states: Optional[str] = Query(None),
-                    with_prev: bool = Query(True), exclude_canceled: bool = Query(True),
-                    start_time: Optional[str] = Query(None), end_time: Optional[str] = Query(None),
-                    use_bd: Optional[bool] = Query(None), business_day_start: Optional[str] = Query(None),
-                    assign_mode: str = Query("smart", pattern="^(smart|business|raw)$"),
-                    store_accept_until: Optional[str] = Query(None),
-                    kaspi: KaspiClient = Depends(get_kaspi_client)):
+async def analytics(
+    start: str = Query(...),
+    end: str = Query(...),
+    tz: str = Query(DEFAULT_TZ),
+    date_field: str = Query(DATE_FIELD_DEFAULT),
+    states: Optional[str] = Query(None),
+    exclude_states: Optional[str] = Query(None),
+    with_prev: bool = Query(True),
+    exclude_canceled: bool = Query(True),
+    start_time: Optional[str] = Query(None),
+    end_time: Optional[str] = Query(None),
+    use_bd: Optional[bool] = Query(None),
+    business_day_start: Optional[str] = Query(None),
+    assign_mode: str = Query("smart", pattern="^(smart|business|raw)$"),
+    store_accept_until: Optional[str] = Query(None),
+    tenant_id: str = Depends(require_tenant),
+):
+    client = _kaspi_client_for_tenant(tenant_id)
 
     tzinfo = tzinfo_of(tz)
     global _EFF_USE_BD, _EFF_BDS
@@ -642,7 +688,8 @@ async def analytics(start: str = Query(...), end: str = Query(...), tz: str = Qu
         start_dt = tzinfo.localize(datetime.combine((start_dt.date() - timedelta(days=1)), time(0, 0, 0))) + delta
         end_dt = tzinfo.localize(datetime.combine(end_dt.date(), time(0, 0, 0))) + delta - timedelta(milliseconds=1)
     else:
-        if start_time: start_dt = apply_hhmm(start_dt, start_time)
+        if start_time:
+            start_dt = apply_hhmm(start_dt, start_time)
         if end_time:
             e0 = parse_date_local(end, tz)
             end_dt = apply_hhmm(e0, end_time).replace(tzinfo=tzinfo)
@@ -652,12 +699,13 @@ async def analytics(start: str = Query(...), end: str = Query(...), tz: str = Qu
 
     inc = parse_states_csv(states)
     exc = parse_states_csv(exclude_states) or set()
-    if exclude_canceled: exc |= {"CANCELED"}
+    if exclude_canceled:
+        exc |= {"CANCELED"}
 
     days, cities_dict, tot, tot_amt, st_counts, _ = await _collect_range(
+        client,
         start_dt, end_dt, tz, date_field, inc, exc,
         assign_mode=assign_mode, store_accept_until=(store_accept_until or STORE_ACCEPT_UNTIL),
-        client=kaspi
     )
 
     cities_list = [{"city": c, "count": n} for c, n in sorted(cities_dict.items(), key=lambda x: -x[1])]
@@ -668,9 +716,9 @@ async def analytics(start: str = Query(...), end: str = Query(...), tz: str = Qu
         prev_end = start_dt - timedelta(milliseconds=1)
         prev_start = prev_end - timedelta(days=span_days) + timedelta(milliseconds=1)
         prev_days, _, _, _, _, _ = await _collect_range(
+            client,
             prev_start, prev_end, tz, date_field, inc, exc,
             assign_mode=assign_mode, store_accept_until=(store_accept_until or STORE_ACCEPT_UNTIL),
-            client=kaspi
         )
 
     return {
@@ -687,8 +735,10 @@ def _days_between(a: datetime, b: datetime) -> int:
     return max(1, (b.date() - a.date()).days + 1)
 
 def _select_targets(out: List[Dict[str, object]], enrich_day: str, enrich_scope: str, limit: int) -> List[Dict[str, object]]:
-    if enrich_scope == "all": return out
-    if enrich_scope == "last_day": return [it for it in out if str(it["op_day"]) == enrich_day]
+    if enrich_scope == "all":
+        return out
+    if enrich_scope == "last_day":
+        return [it for it in out if str(it["op_day"]) == enrich_day]
     if enrich_scope == "last_week":
         y, m, d = map(int, enrich_day.split("-"))
         last_dt = date(y, m, d)
@@ -702,6 +752,7 @@ def _select_targets(out: List[Dict[str, object]], enrich_day: str, enrich_scope:
     return []
 
 async def _list_ids_core(
+    client: KaspiClient,
     start: str, end: str, tz: str, date_field: str,
     states: Optional[str], exclude_states: Optional[str],
     use_bd: Optional[bool], business_day_start: Optional[str],
@@ -709,11 +760,7 @@ async def _list_ids_core(
     with_items: int, enrich_scope: str, items_mode: str, return_candidates: int,
     assign_mode: str, store_accept_until: Optional[str],
     progress_cb: Optional[Callable[[str, int, int, str], None]] = None,
-    client: KaspiClient | None = None,
 ) -> Dict[str, object]:
-
-    if client is None:
-        raise HTTPException(500, "Kaspi client is not provided")
 
     tzinfo = tzinfo_of(tz)
     global _EFF_USE_BD, _EFF_BDS
@@ -733,9 +780,10 @@ async def _list_ids_core(
     inc = _expand_with_archive(inc)
 
     days, cities_dict, tot, tot_amt, st_counts, out = await _collect_range(
+        client,
         start_dt, end_dt, tz, date_field, inc, exc,
         assign_mode=assign_mode, store_accept_until=(store_accept_until or STORE_ACCEPT_UNTIL),
-        progress=progress_cb, client=client
+        progress=progress_cb
     )
 
     out.sort(key=lambda it: (str(it["op_day"]), str(it["date"])), reverse=(order == "desc"))
@@ -746,7 +794,8 @@ async def _list_ids_core(
         bucket: List[Dict[str, object]] = []
         for it in out:
             d = str(it["op_day"])
-            if cur_day is None: cur_day = d
+            if cur_day is None:
+                cur_day = d
             if d != cur_day:
                 groups.append({"day": cur_day, "items": bucket,
                                "total_amount": round(sum(float(x.get("amount", 0) or 0) for x in bucket), 2)})
@@ -766,7 +815,8 @@ async def _list_ids_core(
 
         sem = asyncio.Semaphore(max(1, concurrency))
         done = 0
-        if progress_cb: progress_cb("enrich", done, total_targets, "enrich start")
+        if progress_cb:
+            progress_cb("enrich", done, total_targets, "enrich start")
 
         async def enrich(it):
             nonlocal done
@@ -788,7 +838,8 @@ async def _list_ids_core(
                                 "sku_candidates": extra.get("sku_candidates") or {},
                             }
                 done += 1
-                if progress_cb: progress_cb("enrich", done, total_targets, f"enrich {done}/{total_targets}")
+                if progress_cb:
+                    progress_cb("enrich", done, total_targets, f"enrich {done}/{total_targets}")
                 await asyncio.sleep(per_sleep)
 
         await asyncio.gather(*(enrich(it) for it in targets))
@@ -824,13 +875,15 @@ async def list_ids(
     return_candidates: int = Query(0, description="1=вернуть title_candidates/sku_candidates"),
     assign_mode: str = Query("smart", pattern="^(smart|business|raw)$"),
     store_accept_until: Optional[str] = Query(None),
-    kaspi: KaspiClient = Depends(get_kaspi_client),
+    tenant_id: str = Depends(require_tenant),
 ):
+    client = _kaspi_client_for_tenant(tenant_id)
     return await _list_ids_core(
+        client,
         start, end, tz, date_field, states, exclude_states,
         use_bd, business_day_start, limit, order, grouped, with_items,
         enrich_scope, items_mode, return_candidates, assign_mode, store_accept_until,
-        None, client=kaspi
+        progress_cb=None
     )
 
 # -------------------- CSV --------------------
@@ -847,15 +900,17 @@ async def list_ids_csv(
     order: str = Query("asc", pattern="^(asc|desc)$"),
     assign_mode: str = Query("smart", pattern="^(smart|business|raw)$"),
     store_accept_until: Optional[str] = Query(None),
-    kaspi: KaspiClient = Depends(get_kaspi_client),
+    tenant_id: str = Depends(require_tenant),
 ):
+    client = _kaspi_client_for_tenant(tenant_id)
     data = await _list_ids_core(
+        client,
         start, end, tz, date_field, states, exclude_states,
         use_bd, business_day_start,
         limit=100000, order=order, grouped=0,
         with_items=0, enrich_scope="none", items_mode="all", return_candidates=0,
         assign_mode=assign_mode, store_accept_until=store_accept_until,
-        progress_cb=None, client=kaspi
+        progress_cb=None
     )
     csv = "\n".join([str(it["number"]) for it in data["items"]])
     return csv
@@ -876,23 +931,25 @@ async def list_ids_async(
     grouped: int = Query(0),
     with_items: int = Query(1),
     enrich_scope: str = Query("all", pattern="^(none|last_day|last_week|last_month|all)$"),
-    items_mode: str = Query("all"),
+    items_mode: str = Query("all", pattern="^(first|all)$"),
     return_candidates: int = Query(0),
-    assign_mode: str = Query("smart"),
+    assign_mode: str = Query("smart", pattern="^(smart|business|raw)$"),
     store_accept_until: Optional[str] = Query(None),
-    kaspi: KaspiClient = Depends(get_kaspi_client),
+    tenant_id: str = Depends(require_tenant),
 ):
+    client = _kaspi_client_for_tenant(tenant_id)
     job_id = _new_job()
 
     async def worker():
         try:
             _job_update(job_id, status="running", message="started")
             result = await _list_ids_core(
+                client,
                 start, end, tz, date_field, states, exclude_states,
                 use_bd, business_day_start, limit, order, grouped,
                 with_items, enrich_scope, items_mode, return_candidates,
                 assign_mode, store_accept_until,
-                progress_cb=_job_progress_cb(job_id), client=kaspi
+                progress_cb=_job_progress_cb(job_id)
             )
             if Jobs.get(job_id, {}).get("cancel"):
                 _job_update(job_id, status="canceled", message="canceled by user", result=None)
