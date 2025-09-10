@@ -15,15 +15,15 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, PlainTextResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from cachetools import TTLCache
 from httpx import HTTPStatusError, RequestError
-from starlette.staticfiles import StaticFiles
 # Роутеры доменных модулей
 from app.api.bridge_v2 import router as bridge_router
 from app.api.profit_fifo import get_profit_fifo_router
 from app.api.authz import router as auth_router
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
 
 # Роутер и ХЕЛПЕРЫ из debug_sku.py (для корректного извлечения позиций)
 from app.debug_sku import (
