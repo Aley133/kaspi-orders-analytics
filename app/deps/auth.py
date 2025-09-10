@@ -1,94 +1,82 @@
-# app/deps/auth.py
 from __future__ import annotations
-import os, time, httpx, logging
-from typing import Dict, Any
-from fastapi import HTTPException, Request
-from jose import jwt, JWTError, jwk
-from jose.utils import base64url_decode
+import base64, json, hmac, hashlib, os
+from typing import Any, Dict, Optional
+from fastapi import HTTPException, Header
 
-log = logging.getLogger("auth")
+def _b64url_decode(s: str) -> bytes:
+    pad = '=' * (-len(s) % 4)
+    return base64.urlsafe_b64decode(s + pad)
 
-SUPABASE_URL = os.getenv("SUPABASE_URL")  # вида https://<ref>.supabase.co
-LEGACY_SECRET = os.getenv("SUPABASE_JWT_SECRET")  # HS256 (Legacy)
-ALGO_LEGACY = "HS256"
-
-_JWKS_CACHE: Dict[str, Any] = {}
-_JWKS_TS: float | None = None
-
-def _load_jwks() -> Dict[str, Any]:
-    """Кэшируем JWKS ключи Supabase на 10 минут."""
-    global _JWKS_CACHE, _JWKS_TS
-    if _JWKS_TS and (time.time() - _JWKS_TS) < 600 and _JWKS_CACHE:
-        return _JWKS_CACHE
-    if not SUPABASE_URL:
-        raise HTTPException(500, "Server misconfigured: SUPABASE_URL not set")
-    jwks_url = SUPABASE_URL.rstrip("/") + "/auth/v1/keys"
+def _jwt_decode_noverify(token: str) -> Dict[str, Any]:
     try:
-        with httpx.Client(timeout=10) as c:
-            resp = c.get(jwks_url)
-            resp.raise_for_status()
-            _JWKS_CACHE = resp.json()
-            _JWKS_TS = time.time()
-            return _JWKS_CACHE
-    except Exception as e:
-        log.error("Failed to fetch JWKS: %s", e)
-        raise HTTPException(500, "Auth keys fetch failed")
+        header_b64, payload_b64, _sig = token.split('.', 2)
+        payload = json.loads(_b64url_decode(payload_b64))
+        header = json.loads(_b64url_decode(header_b64))
+        return {"header": header, "payload": payload}
+    except Exception:
+        raise HTTPException(status_code=401, detail="Bad JWT")
 
-def _verify_with_jwks(token: str) -> Dict[str, Any]:
-    """Проверка подписи через публичные ключи (RS256/EdDSA)."""
-    headers = jwt.get_unverified_header(token)
-    kid = headers.get("kid")
-    if not kid:
-        raise HTTPException(401, "Invalid token header")
-    jwks = _load_jwks()
-    keys = jwks.get("keys", [])
-    key = next((k for k in keys if k.get("kid") == kid), None)
-    if not key:
-        raise HTTPException(401, "Unknown signing key")
-
-    # Проверяем подпись вручную
-    public_key = jwk.construct(key)  # jose сам выберет тип (RSA/OKP/EC)
+def _jwt_verify_hs256(token: str, secret: str) -> bool:
     try:
-        signing_input, encoded_sig = token.rsplit(".", 1)
-        decoded_sig = base64url_decode(encoded_sig.encode("utf-8"))
-        if not public_key.verify(signing_input.encode("utf-8"), decoded_sig):
-            raise HTTPException(401, "Invalid token signature")
-        # Разбираем payload без повторной верификации подписи
-        claims = jwt.get_unverified_claims(token)
-    except JWTError:
-        raise HTTPException(401, "Invalid token")
+        header_b64, payload_b64, sig_b64 = token.split('.', 2)
+        signing_input = f"{header_b64}.{payload_b64}".encode("utf-8")
+        expected = hmac.new(secret.encode("utf-8"), signing_input, hashlib.sha256).digest()
+        got = _b64url_decode(sig_b64)
+        return hmac.compare_digest(expected, got)
+    except Exception:
+        return False
 
-    # exp check
-    exp = claims.get("exp")
-    if exp is not None and time.time() > float(exp):
-        raise HTTPException(401, "Token expired")
-    return claims
+def _extract_tenant(payload: Dict[str, Any]) -> str:
+    # Порядок приоритета
+    for path in [
+        ("app_metadata", "tenant_id"),
+        ("user_metadata", "tenant_id"),
+    ]:
+        cur = payload
+        ok = True
+        for p in path:
+            if not isinstance(cur, dict) or p not in cur:
+                ok = False; break
+            cur = cur[p]
+        if ok and isinstance(cur, (str, int)) and str(cur):
+            return str(cur)
+    # Fallback — sub
+    sub = payload.get("sub")
+    if isinstance(sub, str) and sub:
+        return sub
+    raise HTTPException(status_code=401, detail="tenant_id not found in JWT")
 
-def _verify_with_legacy(token: str) -> Dict[str, Any]:
-    if not LEGACY_SECRET:
-        raise HTTPException(500, "Server misconfigured: SUPABASE_JWT_SECRET not set")
-    try:
-        return jwt.decode(
-            token, LEGACY_SECRET,
-            algorithms=[ALGO_LEGACY],
-            options={"verify_aud": False}
-        )
-    except JWTError as e:
-        raise HTTPException(401, "Invalid token")
+def _extract_email(payload: Dict[str, Any]) -> Optional[str]:
+    for k in ("email", "user_email", "preferred_username"):
+        v = payload.get(k)
+        if isinstance(v, str) and v:
+            return v
+    return None
 
-def get_current_user(req: Request) -> Dict[str, Any]:
-    auth = req.headers.get("authorization") or req.headers.get("Authorization")
-    if not auth or not auth.startswith("Bearer "):
-        raise HTTPException(401, "Missing Bearer token")
-    token = auth.split(" ", 1)[1]
+def _bearer_to_token(authorization: Optional[str]) -> str:
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Missing Bearer token")
+    return authorization.split(" ", 1)[1].strip()
 
-    # Пытаемся как HS256 (legacy). Если не вышло — JWKS.
-    try:
-        claims = _verify_with_legacy(token)
-    except HTTPException:
-        claims = _verify_with_jwks(token)
-
-    sub = claims.get("sub")
-    if not sub:
-        raise HTTPException(401, "Bad token payload")
-    return {"user_id": sub, "email": claims.get("email")}
+async def get_current_user(authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
+    """
+    Достаёт пользователя из Supabase JWT.
+    Если есть SUPABASE_JWT_SECRET — верифицируем HS256-подпись.
+    """
+    token = _bearer_to_token(authorization)
+    data = _jwt_decode_noverify(token)
+    secret = os.getenv("SUPABASE_JWT_SECRET", "").strip()
+    if secret:
+        if not _jwt_verify_hs256(token, secret):
+            raise HTTPException(status_code=401, detail="Invalid JWT signature")
+    payload = data["payload"]
+    tenant_id = _extract_tenant(payload)
+    email = _extract_email(payload)
+    return {
+        "tenant_id": tenant_id,
+        "user_id": payload.get("sub"),
+        "email": email,
+        "role": payload.get("role") or payload.get("app_metadata", {}).get("role"),
+        "raw": payload,
+        "token": token,
+    }
