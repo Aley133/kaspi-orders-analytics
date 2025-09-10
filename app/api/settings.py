@@ -1,37 +1,19 @@
 # app/api/settings.py
 from __future__ import annotations
-from typing import Optional, Any, Dict
+from typing import Optional, Any, Dict, List
 from fastapi import APIRouter, Depends, HTTPException, Body
 from pydantic import BaseModel
 
-from app.deps.auth import get_current_user          # возвращает dict/claim для авторизованного пользователя
-from app.deps.tenant import require_tenant_optional # не бросает 500; None если членство не найдено
+from app.deps.auth import get_current_user            # Supabase-JWT -> dict/claim
+from app.deps.tenant import require_tenant_optional   # ВОЗВРАЩАЕТ UID ПОЛЬЗОВАТЕЛЯ (или None)
 from app import db
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Ключи в KV
-# ──────────────────────────────────────────────────────────────────────────────
-K_PARTNER_ID    = "kaspi.partner_id"
-K_TOKEN         = "kaspi.token"
-K_SHOP_NAME     = "shop.name"
-K_CITY_ID       = "city.id"
-K_BIZDAY_START  = "bizday.start"
-K_TZ            = "tz"
-K_MIN_MARGIN    = "min.margin"
-K_AUTO_REPRICE  = "auto.reprice"
-
-ALL_KEYS = [
-    K_PARTNER_ID, K_TOKEN, K_SHOP_NAME, K_CITY_ID,
-    K_BIZDAY_START, K_TZ, K_MIN_MARGIN, K_AUTO_REPRICE,
-]
-
-# ──────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ──────────────────────────────────────────────────────────────────────────────
 def _to_uid(user: Any) -> Optional[str]:
-    """Аккуратно достаём UID из claim'а (Supabase-JWT / произвольный словарь)."""
     if not user:
         return None
     if isinstance(user, dict):
@@ -48,25 +30,6 @@ def _to_uid(user: Any) -> Optional[str]:
         return None
     return str(user)
 
-def _json_get(v: Any) -> Any:
-    """
-    value может быть jsonb/str. Поддержим варианты:
-    - {"v": ...}
-    - просто примитив (строка/число/булев)
-    """
-    if v is None:
-        return None
-    try:
-        if isinstance(v, dict) and "v" in v:
-            return v.get("v")
-        return v
-    except Exception:
-        return v
-
-def _json_wrap(v: Any) -> Any:
-    # единообразно храним как {"v": <primitive>}
-    return {"v": v} if v is not None else None
-
 def _mask_token(tok: Optional[str]) -> Optional[str]:
     if not tok:
         return None
@@ -74,18 +37,6 @@ def _mask_token(tok: Optional[str]) -> Optional[str]:
     if len(s) <= 8:
         return "*" * len(s)
     return s[:4] + "*" * (len(s) - 8) + s[-4:]
-
-def _parse_bool(x: Any) -> Optional[bool]:
-    if x is None or x == "":
-        return None
-    if isinstance(x, bool):
-        return x
-    sx = str(x).strip().lower()
-    if sx in ("1", "true", "yes", "on"):
-        return True
-    if sx in ("0", "false", "no", "off"):
-        return False
-    return None
 
 def _to_int(x: Any) -> Optional[int]:
     try:
@@ -99,88 +50,117 @@ def _to_float(x: Any) -> Optional[float]:
     except Exception:
         return None
 
+def _parse_bool(x: Any) -> Optional[bool]:
+    if x is None or x == "":
+        return None
+    if isinstance(x, bool):
+        return x
+    sx = str(x).strip().lower()
+    if sx in ("1", "true", "yes", "on"):  return True
+    if sx in ("0", "false", "no", "off"): return False
+    return None
+
 # ──────────────────────────────────────────────────────────────────────────────
-# Автопровижининг tenant/org_members
+# ORG / TENANT helpers
 # ──────────────────────────────────────────────────────────────────────────────
-def _ensure_tenant_for_user(user_id: str) -> str:
-    """Возвращает существующий tenant для user_id или создаёт новый + membership(owner)."""
+def _find_tenant_for_user(user_id: str) -> Optional[str]:
     row = db.fetchrow(
-        "select tenant_id from org_members where user_id=%s limit 1",
+        "select tenant_id from public.org_members where user_id=%s limit 1",
         [user_id],
     )
-    if row and row.get("tenant_id"):
-        return row["tenant_id"]
+    return row["tenant_id"] if row and row.get("tenant_id") else None
 
-    t = db.fetchrow("insert into tenants default values returning id", [])
+def _ensure_tenant_for_user(user_id: str) -> str:
+    t_id = _find_tenant_for_user(user_id)
+    if t_id:
+        return t_id
+    t = db.fetchrow("insert into public.tenants default values returning id", [])
     tenant_id = t["id"]
     db.execute(
-        "insert into org_members(tenant_id, user_id, role) values (%s, %s, %s)",
+        "insert into public.org_members(tenant_id, user_id, role) values (%s, %s, %s)",
         [tenant_id, user_id, "owner"],
     )
     return tenant_id
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Доступ к KV
+# SETTINGS (под плоскую таблицу public.tenant_settings)
 # ──────────────────────────────────────────────────────────────────────────────
-def _select_settings_kv(tenant_id: str) -> Dict[str, Any]:
-    rows = db.fetchall(
-        "select key, value from tenant_settings where tenant_id=%s",
+SETTINGS_COLS_ORDER: List[str] = [
+    "shop_name",
+    "partner_id",
+    "kaspi_token",
+    "city_id",
+    "business_day_start",
+    "timezone",
+    "min_margin_pct",
+    "auto_reprice",
+]
+
+def _select_settings_row(tenant_id: str) -> Optional[Dict[str, Any]]:
+    return db.fetchrow(
+        """
+        select
+            tenant_id,
+            shop_name,
+            partner_id,
+            kaspi_token,
+            city_id,
+            business_day_start,
+            timezone,
+            min_margin_pct,
+            auto_reprice,
+            updated_at
+        from public.tenant_settings
+        where tenant_id=%s
+        """,
         [tenant_id],
     )
-    out: Dict[str, Any] = {}
-    for r in rows:
-        k = r["key"]
-        v = r["value"]
-        out[k] = v if isinstance(v, str) else _json_get(v)
-    return out
 
-def _upsert_kv(tenant_id: str, key: str, value: Any) -> None:
-    # Семантика "оставить как есть"
-    if value is None:
-        return
+def _insert_settings(tenant_id: str, data: Dict[str, Any]) -> None:
+    cols = ["tenant_id"]
+    vals = [tenant_id]
+    placeholders = ["%s"]
+
+    for col in SETTINGS_COLS_ORDER:
+        if col in data and data[col] is not None:
+            cols.append(col)
+            vals.append(data[col])
+            placeholders.append("%s")
+
     db.execute(
-        """
-        insert into tenant_settings(tenant_id, key, value)
-        values (%s, %s, %s)
-        on conflict (tenant_id, key)
-        do update set value = excluded.value, updated_at = now()
-        """,
-        [tenant_id, key, _json_wrap(value)],
+        f"insert into public.tenant_settings ({', '.join(cols)}) values ({', '.join(placeholders)})",
+        vals,
     )
+
+def _update_settings(tenant_id: str, data: Dict[str, Any]) -> None:
+    # Обновляем только переданные (не None) поля
+    sets = []
+    vals = []
+    for col in SETTINGS_COLS_ORDER:
+        if col in data and data[col] is not None:
+            sets.append(f"{col} = %s")
+            vals.append(data[col])
+
+    if not sets:
+        return
+
+    sets.append("updated_at = now()")
+    vals.append(tenant_id)
+    db.execute(
+        f"update public.tenant_settings set {', '.join(sets)} where tenant_id = %s",
+        vals,
+    )
+
+def _upsert_settings(tenant_id: str, data: Dict[str, Any]) -> None:
+    exists = _select_settings_row(tenant_id) is not None
+    if exists:
+        _update_settings(tenant_id, data)
+    else:
+        _insert_settings(tenant_id, data)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # API
 # ──────────────────────────────────────────────────────────────────────────────
-@router.get("/me")
-def get_my_settings(
-    user: Any = Depends(get_current_user),
-    tenant_id: Optional[str] = Depends(require_tenant_optional),
-):
-    """
-    Возвращает плоский JSON настроек для UI.
-    Логика первого запуска:
-      - 401 — если не авторизован (бросает get_current_user)
-      - 404 — если нет membership/tenant → фронт редиректит на /ui/settings.html
-    """
-    _ = _to_uid(user)  # держим на будущее, сейчас не требуется
-    if not tenant_id:
-        raise HTTPException(status_code=404, detail="settings not initialized")
-
-    kv = _select_settings_kv(tenant_id)
-    token_raw = kv.get(K_TOKEN)
-
-    return {
-        "tenant_id": tenant_id,
-        "partner_id": _to_int(kv.get(K_PARTNER_ID)),
-        "shop_name": kv.get(K_SHOP_NAME),
-        "kaspi_token_masked": _mask_token(token_raw),
-        "city_id": _to_int(kv.get(K_CITY_ID)),
-        "business_day_start": kv.get(K_BIZDAY_START) or "20:00",
-        "timezone": kv.get(K_TZ) or "Asia/Almaty",
-        "min_margin_pct": _to_float(kv.get(K_MIN_MARGIN)),
-        "auto_reprice": _parse_bool(kv.get(K_AUTO_REPRICE)),
-    }
-
 class SettingsIn(BaseModel):
     partner_id: Optional[int] = None
     shop_name: Optional[str] = None
@@ -191,38 +171,85 @@ class SettingsIn(BaseModel):
     min_margin_pct: Optional[float] = None
     auto_reprice: Optional[bool] = None
 
+@router.get("/me")
+def get_my_settings(
+    user: Any = Depends(get_current_user),
+    uid: Optional[str] = Depends(require_tenant_optional),  # это UID пользователя (опционально)
+):
+    """
+    Возвращает плоский JSON настроек для UI.
+    401 — если не авторизован (бросает get_current_user)
+    404 — если нет membership (первый заход) ИЛИ нет строки в tenant_settings
+           → фронт редиректит на /ui/settings.html
+    """
+    user_id = _to_uid(user) or uid
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    tenant_id = _find_tenant_for_user(user_id)
+    if not tenant_id:
+        # первый запуск — нет членства
+        raise HTTPException(status_code=404, detail="settings not initialized")
+
+    row = _select_settings_row(tenant_id)
+    if not row:
+        # членство есть, но настроек ещё нет
+        raise HTTPException(status_code=404, detail="settings not initialized")
+
+    return {
+        "tenant_id": tenant_id,
+        "partner_id": _to_int(row.get("partner_id")),
+        "shop_name": row.get("shop_name"),
+        "kaspi_token_masked": _mask_token(row.get("kaspi_token")),
+        "city_id": _to_int(row.get("city_id")),
+        "business_day_start": row.get("business_day_start") or "20:00",
+        "timezone": row.get("timezone") or "Asia/Almaty",
+        "min_margin_pct": _to_float(row.get("min_margin_pct")),
+        "auto_reprice": bool(row.get("auto_reprice")) if row.get("auto_reprice") is not None else None,
+        "updated_at": row.get("updated_at"),
+    }
+
 @router.post("/me")
 def upsert_my_settings(
     payload: SettingsIn = Body(...),
     user: Any = Depends(get_current_user),
-    tenant_id: Optional[str] = Depends(require_tenant_optional),
+    uid: Optional[str] = Depends(require_tenant_optional),  # это UID пользователя (опционально)
 ):
     """
-    Создаёт tenant при первом сохранении настроек и апсертит ключи.
-    Возвращает { ok: true, tenant_id }.
+    Первый запуск:
+      - если нет membership → создаём tenant + org_members(owner)
+      - затем upsert в public.tenant_settings по переданным полям
+    Семантика: None/пустые поля — НЕ изменяем существующее значение
     """
-    user_id = _to_uid(user)
+    user_id = _to_uid(user) or uid
     if not user_id:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
+    tenant_id = _find_tenant_for_user(user_id)
     if not tenant_id:
         tenant_id = _ensure_tenant_for_user(user_id)
 
-    data = payload.model_dump(exclude_unset=True)
+    data = payload.model_dump(exclude_unset=True)  # только присланные поля
 
-    mapping = {
-        "partner_id":         (K_PARTNER_ID,    _to_int),
-        "shop_name":          (K_SHOP_NAME,     lambda v: v if v not in ("", None) else None),
-        "kaspi_token":        (K_TOKEN,         lambda v: v if v not in ("", None) else None),
-        "city_id":            (K_CITY_ID,       _to_int),
-        "business_day_start": (K_BIZDAY_START,  lambda v: v if v not in ("", None) else None),
-        "timezone":           (K_TZ,            lambda v: v if v not in ("", None) else None),
-        "min_margin_pct":     (K_MIN_MARGIN,    _to_float),
-        "auto_reprice":       (K_AUTO_REPRICE,  _parse_bool),
+    # Касты под типы таблицы
+    casted = {
+        "partner_id":         _to_int(data.get("partner_id")),
+        "shop_name":          (data.get("shop_name") or None),
+        "kaspi_token":        (data.get("kaspi_token") or None),
+        "city_id":            _to_int(data.get("city_id")),
+        "business_day_start": (data.get("business_day_start") or None),
+        "timezone":           (data.get("timezone") or None),
+        "min_margin_pct":     _to_float(data.get("min_margin_pct")),
+        "auto_reprice":       _parse_bool(data.get("auto_reprice")),
     }
+    # удалим ключи со значением None — чтобы не затирать
+    casted = {k: v for k, v in casted.items() if v is not None}
 
-    for field, (key, caster) in mapping.items():
-        if field in data:
-            _upsert_kv(tenant_id, key, caster(data.get(field)))
+    if casted:
+        _upsert_settings(tenant_id, casted)
+    else:
+        # если настроек не было — создадим пустую строку, чтобы последующие GET возвращали 200
+        if not _select_settings_row(tenant_id):
+            _insert_settings(tenant_id, {})
 
     return {"ok": True, "tenant_id": tenant_id}
