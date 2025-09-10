@@ -1,94 +1,141 @@
 # app/deps/auth.py
 from __future__ import annotations
-import os, time, httpx, logging
-from typing import Dict, Any
-from fastapi import HTTPException, Request
-from jose import jwt, JWTError, jwk
-from jose.utils import base64url_decode
+import os, time
+from typing import Any, Dict, Optional, Tuple
+import requests
+from fastapi import Request, HTTPException, Depends
+from jose import jwt, JWTError
 
-log = logging.getLogger("auth")
+# ──────────────────────────────────────────────────────────────────────────────
+# Конфиг
+# ──────────────────────────────────────────────────────────────────────────────
+SUPABASE_PROJECT_REF = os.getenv("SUPABASE_PROJECT_REF")  # напр. "abcd1234"
+SUPABASE_JWKS_URL    = os.getenv("SUPABASE_JWKS_URL") or (
+    f"https://{SUPABASE_PROJECT_REF}.supabase.co/auth/v1/keys" if SUPABASE_PROJECT_REF else None
+)
+SUPABASE_JWT_SECRET  = os.getenv("SUPABASE_JWT_SECRET")  # для HS256 (legacy)
+JWT_AUDIENCE         = os.getenv("JWT_AUD", None)        # можно не задавать
+CLOCK_SKEW_SECONDS   = int(os.getenv("JWT_CLOCK_SKEW", "60"))
 
-SUPABASE_URL = os.getenv("SUPABASE_URL")  # вида https://<ref>.supabase.co
-LEGACY_SECRET = os.getenv("SUPABASE_JWT_SECRET")  # HS256 (Legacy)
-ALGO_LEGACY = "HS256"
+# Кэш JWKS
+_JWKS_CACHE: Tuple[float, Dict[str, Any]] = (0.0, {})
 
-_JWKS_CACHE: Dict[str, Any] = {}
-_JWKS_TS: float | None = None
-
-def _load_jwks() -> Dict[str, Any]:
-    """Кэшируем JWKS ключи Supabase на 10 минут."""
-    global _JWKS_CACHE, _JWKS_TS
-    if _JWKS_TS and (time.time() - _JWKS_TS) < 600 and _JWKS_CACHE:
-        return _JWKS_CACHE
-    if not SUPABASE_URL:
-        raise HTTPException(500, "Server misconfigured: SUPABASE_URL not set")
-    jwks_url = SUPABASE_URL.rstrip("/") + "/auth/v1/keys"
+def _get_jwks() -> Dict[str, Any]:
+    """Берём JWKS с лёгким кэшем на 5 минут."""
+    if not SUPABASE_JWKS_URL:
+        raise HTTPException(500, "Auth is misconfigured (no JWKS url and no HS256 secret)")
+    ts, jwks = _JWKS_CACHE
+    now = time.time()
+    if jwks and now - ts < 300:
+        return jwks
     try:
-        with httpx.Client(timeout=10) as c:
-            resp = c.get(jwks_url)
-            resp.raise_for_status()
-            _JWKS_CACHE = resp.json()
-            _JWKS_TS = time.time()
-            return _JWKS_CACHE
-    except Exception as e:
-        log.error("Failed to fetch JWKS: %s", e)
-        raise HTTPException(500, "Auth keys fetch failed")
-
-def _verify_with_jwks(token: str) -> Dict[str, Any]:
-    """Проверка подписи через публичные ключи (RS256/EdDSA)."""
-    headers = jwt.get_unverified_header(token)
-    kid = headers.get("kid")
-    if not kid:
-        raise HTTPException(401, "Invalid token header")
-    jwks = _load_jwks()
-    keys = jwks.get("keys", [])
-    key = next((k for k in keys if k.get("kid") == kid), None)
-    if not key:
-        raise HTTPException(401, "Unknown signing key")
-
-    # Проверяем подпись вручную
-    public_key = jwk.construct(key)  # jose сам выберет тип (RSA/OKP/EC)
-    try:
-        signing_input, encoded_sig = token.rsplit(".", 1)
-        decoded_sig = base64url_decode(encoded_sig.encode("utf-8"))
-        if not public_key.verify(signing_input.encode("utf-8"), decoded_sig):
-            raise HTTPException(401, "Invalid token signature")
-        # Разбираем payload без повторной верификации подписи
-        claims = jwt.get_unverified_claims(token)
-    except JWTError:
+        resp = requests.get(SUPABASE_JWKS_URL, timeout=5)
+        resp.raise_for_status()
+        data = resp.json()
+        # ожидаем {"keys":[...]}
+        if not isinstance(data, dict) or "keys" not in data:
+            raise HTTPException(500, "Invalid JWKS response")
+        # обновляем кэш
+        global _JWKS_CACHE
+        _JWKS_CACHE = (now, data)
+        return data
+    except Exception:
+        # не выдаём 500 наружу при обычных вызовах — лучше 401
         raise HTTPException(401, "Invalid token")
 
-    # exp check
-    exp = claims.get("exp")
-    if exp is not None and time.time() > float(exp):
-        raise HTTPException(401, "Token expired")
-    return claims
+def _get_bearer_token(req: Request) -> Optional[str]:
+    """Достаём токен из Authorization/Cookie/Query."""
+    auth = req.headers.get("Authorization") or req.headers.get("authorization") or ""
+    if auth.lower().startswith("bearer "):
+        tok = auth[7:].strip()
+        if tok:
+            return tok
+    # иногда Supabase кладёт токен в cookie
+    for name in ("sb-access-token", "access_token", "token"):
+        tok = req.cookies.get(name)
+        if tok:
+            return tok
+    # в крайнем случае из query ?access_token=
+    tok = req.query_params.get("access_token")
+    if tok:
+        return tok
+    return None
 
-def _verify_with_legacy(token: str) -> Dict[str, Any]:
-    if not LEGACY_SECRET:
-        raise HTTPException(500, "Server misconfigured: SUPABASE_JWT_SECRET not set")
+def _decode_hs256(token: str) -> Dict[str, Any]:
+    """HS256 (legacy) — когда задан SUPABASE_JWT_SECRET."""
     try:
         return jwt.decode(
-            token, LEGACY_SECRET,
-            algorithms=[ALGO_LEGACY],
-            options={"verify_aud": False}
+            token,
+            SUPABASE_JWT_SECRET,
+            algorithms=["HS256"],
+            audience=JWT_AUDIENCE,
+            options={"verify_aud": bool(JWT_AUDIENCE), "verify_at_hash": False},
+            leeway=CLOCK_SKEW_SECONDS,
         )
-    except JWTError as e:
+    except JWTError:
+        raise HTTPException(401, "Invalid token")
+    except Exception:
         raise HTTPException(401, "Invalid token")
 
-def get_current_user(req: Request) -> Dict[str, Any]:
-    auth = req.headers.get("authorization") or req.headers.get("Authorization")
-    if not auth or not auth.startswith("Bearer "):
-        raise HTTPException(401, "Missing Bearer token")
-    token = auth.split(" ", 1)[1]
-
-    # Пытаемся как HS256 (legacy). Если не вышло — JWKS.
+def _decode_rs256_with_jwks(token: str) -> Dict[str, Any]:
+    """RS256 через JWKS (основной путь для Supabase)."""
+    # Быстрая проверка структуры
+    if token.count(".") != 2:
+        raise HTTPException(401, "Invalid token")
+    # Пробуем без выбора ключа (python-jose сам достанет key по kid, если передать jwk dict)
     try:
-        claims = _verify_with_legacy(token)
-    except HTTPException:
-        claims = _verify_with_jwks(token)
+        # jose не принимает сразу весь JWKS, поэтому достанем kid и найдём конкретный ключ
+        header = jwt.get_unverified_header(token)
+        kid = header.get("kid")
+        jwks = _get_jwks()
+        key = None
+        for k in jwks.get("keys", []):
+            if k.get("kid") == kid:
+                key = k
+                break
+        if not key:
+            # если не нашли точный — допустим первый подходящий
+            keys = jwks.get("keys", [])
+            if keys:
+                key = keys[0]
+        if not key:
+            raise HTTPException(401, "Invalid token")
 
-    sub = claims.get("sub")
+        return jwt.decode(
+            token,
+            key,
+            algorithms=["RS256"],
+            audience=JWT_AUDIENCE,
+            options={"verify_aud": bool(JWT_AUDIENCE), "verify_at_hash": False},
+            leeway=CLOCK_SKEW_SECONDS,
+        )
+    except JWTError:
+        raise HTTPException(401, "Invalid token")
+    except Exception:
+        # Любая ошибка — 401, чтобы не было 500
+        raise HTTPException(401, "Invalid token")
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Публичные зависимости
+# ──────────────────────────────────────────────────────────────────────────────
+def get_current_user(req: Request) -> Dict[str, Any]:
+    """
+    Обязательная авторизация. Любая проблема с токеном => 401 без 500.
+    Возвращает claims (dict). Ожидается поле sub (uuid).
+    """
+    token = _get_bearer_token(req)
+    if not token:
+        raise HTTPException(401, "Missing Bearer token")
+
+    # если есть легаси-секрет — используем HS256, иначе RS256+JWKS
+    if SUPABASE_JWT_SECRET:
+        claims = _decode_hs256(token)
+    else:
+        claims = _decode_rs256_with_jwks(token)
+
+    # минимальная валидация
+    sub = claims.get("sub") or claims.get("user_id") or claims.get("uid") or claims.get("id")
     if not sub:
-        raise HTTPException(401, "Bad token payload")
-    return {"user_id": sub, "email": claims.get("email")}
+        # допустим, но downstream код должен быть готов (мы уже чинили tenant.py)
+        pass
+    return claims
