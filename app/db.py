@@ -1,7 +1,7 @@
 import os
 import psycopg
 from psycopg.rows import dict_row
-import re
+
 def _normalize_dsn(url: str) -> str:
     # postgresql+psycopg:// -> postgresql://
     return re.sub(r"^postgresql\+[^:]+://", "postgresql://", url)
