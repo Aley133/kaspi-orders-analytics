@@ -1,122 +1,199 @@
 # app/api/settings.py
 from __future__ import annotations
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, field_validator
-from typing import Optional
-import os
-from datetime import time as dtime
-
-from app.deps.tenant import require_tenant
+from typing import Optional, Any, Dict
+from fastapi import APIRouter, Depends, HTTPException, Body
+from app.deps.auth import get_current_user  # должен возвращать dict с полем "sub" (uuid) из Supabase-JWT
+from app.deps.tenant import require_tenant_optional  # сделаем опциональным: None -> создадим
 from app import db
-
-# ── (опц.) шифрование токена
-_FERNET = None
-try:
-    from cryptography.fernet import Fernet
-    if os.getenv("SETTINGS_CRYPT_KEY"):
-        _FERNET = Fernet(os.getenv("SETTINGS_CRYPT_KEY"))
-except Exception:
-    _FERNET = None
-
-def _enc(s: Optional[str]) -> Optional[str]:
-    if not s: return s
-    return _FERNET.encrypt(s.encode()).decode() if _FERNET else s
-
-def _dec(s: Optional[str]) -> Optional[str]:
-    if not s: return s
-    return _FERNET.decrypt(s.encode()).decode() if _FERNET else s
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 
-# ──────────────────────────────────────────────────────────────────────────────
-# helpers: jsonb {"v": ...}
-def _get_kv(tenant_id: str, key: str) -> Optional[str]:
-    row = db.fetchrow("select value from tenant_settings where tenant_id=%s and key=%s",
-                      [tenant_id, key])
-    if not row: return None
-    val = row["value"]
-    # val — это dict (row_factory=dict_row), ожидаем {"v": "..."}
-    return val.get("v") if isinstance(val, dict) else None
+# ----- Ключи в KV -----
+K_PARTNER_ID       = "kaspi.partner_id"
+K_TOKEN            = "kaspi.token"
+K_SHOP_NAME        = "shop.name"
+K_CITY_ID          = "city.id"
+K_BIZDAY_START     = "bizday.start"
+K_TZ               = "tz"
+K_MIN_MARGIN       = "min.margin"
+K_AUTO_REPRICE     = "auto.reprice"
 
-def _set_kv(tenant_id: str, key: str, value: Optional[str]) -> None:
-    if value is None:
-        return
+ALL_KEYS = [
+    K_PARTNER_ID, K_TOKEN, K_SHOP_NAME, K_CITY_ID,
+    K_BIZDAY_START, K_TZ, K_MIN_MARGIN, K_AUTO_REPRICE
+]
+
+# ----- helpers -----
+def _json_get(v: Any) -> Any:
+    """
+    value может быть jsonb/str. Поддержим варианты:
+    - {"v": ...}
+    - просто примитив (строка/число/булев)
+    """
+    if v is None:
+        return None
+    try:
+        if isinstance(v, dict) and "v" in v:
+            return v.get("v")
+        return v
+    except Exception:
+        return v
+
+def _json_wrap(v: Any) -> Any:
+    # единообразно храним как {"v": <primitive>}
+    return {"v": v} if v is not None else None
+
+def _mask_token(tok: Optional[str]) -> Optional[str]:
+    if not tok:
+        return None
+    s = str(tok)
+    if len(s) <= 8:
+        return "*" * len(s)
+    return s[:4] + "*" * (len(s) - 8) + s[-4:]
+
+def _parse_bool(x: Any) -> Optional[bool]:
+    if x is None or x == "":
+        return None
+    if isinstance(x, bool):
+        return x
+    sx = str(x).strip().lower()
+    if sx in ("1", "true", "yes", "on"):
+        return True
+    if sx in ("0", "false", "no", "off"):
+        return False
+    return None
+
+# ----- авто-провижининг -----
+def _ensure_tenant_for_user(user_id: str) -> str:
+    # ищем tenant по membership
+    row = db.fetchrow(
+        "select tenant_id from org_members where user_id=%s limit 1",
+        [user_id],
+    )
+    if row and row.get("tenant_id"):
+        return row["tenant_id"]
+
+    # создаём tenant и membership
+    t = db.fetchrow("insert into tenants default values returning id", [])
+    tenant_id = t["id"]
+
     db.execute(
-        "insert into tenant_settings(tenant_id,key,value) values (%s,%s, jsonb_build_object('v', %s)) "
-        "on conflict (tenant_id,key) do update set value = excluded.value, updated_at = now()",
-        [tenant_id, key, value]
+        "insert into org_members(tenant_id, user_id, role) values (%s, %s, %s)",
+        [tenant_id, user_id, "owner"],
     )
+    return tenant_id
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Schemas
-class SettingsIn(BaseModel):
-    partner_id: Optional[int] = None
-    shop_name: Optional[str] = None
-    kaspi_token: Optional[str] = None
-    city_id: Optional[int] = None
-    business_day_start: Optional[str] = None
-    timezone: Optional[str] = None
-    min_margin_pct: Optional[float] = None
-    auto_reprice: Optional[bool] = None
-
-    @field_validator("business_day_start")
-    @classmethod
-    def _validate_bds(cls, v: Optional[str]) -> Optional[str]:
-        if not v: return v
-        try:
-            hh, mm = v.split(":")
-            _ = dtime(hour=int(hh), minute=int(mm))
-            return v
-        except Exception:
-            raise ValueError("business_day_start must be 'HH:MM'")
-
-class SettingsOut(BaseModel):
-    partner_id: Optional[int] = None
-    shop_name: Optional[str] = None
-    kaspi_token_masked: Optional[str] = None
-    city_id: Optional[int] = None
-    business_day_start: Optional[str] = None
-    timezone: Optional[str] = None
-    min_margin_pct: Optional[float] = None
-    auto_reprice: Optional[bool] = None
-
-def _mask(token: Optional[str]) -> Optional[str]:
-    if not token: return None
-    tail = token[-4:] if len(token) >= 4 else token
-    return "••••" + tail
-
-# ──────────────────────────────────────────────────────────────────────────────
-@router.get("/me", response_model=SettingsOut)
-def get_my_settings(tenant_id: str = Depends(require_tenant)):
-    out = SettingsOut(
-        partner_id = int(_get_kv(tenant_id, "kaspi.partner_id") or 0) or None,
-        shop_name  = _get_kv(tenant_id, "shop.name"),
-        kaspi_token_masked = _mask(_dec(_get_kv(tenant_id, "kaspi.token"))),
-        city_id = int(_get_kv(tenant_id, "kaspi.city_id") or 0) or None,
-        business_day_start = _get_kv(tenant_id, "bizday.start"),
-        timezone = _get_kv(tenant_id, "tz.name") or "Asia/Almaty",
-        min_margin_pct = (lambda v: float(v) if v is not None else None)(_get_kv(tenant_id, "price.min_margin")),
-        auto_reprice = (lambda v: (v.lower()=='true') if isinstance(v, str) else None)(_get_kv(tenant_id, "price.auto_reprice")),
+def _select_settings_kv(tenant_id: str) -> Dict[str, Any]:
+    rows = db.fetchall(
+        "select key, value from tenant_settings where tenant_id=%s",
+        [tenant_id],
     )
+    out: Dict[str, Any] = {}
+    for r in rows:
+        k = r["key"]
+        v = r["value"]
+        # если value текст — попробуем не ломаться
+        if isinstance(v, str):
+            out[k] = v
+        else:
+            out[k] = _json_get(v)
     return out
 
-@router.post("/me", response_model=SettingsOut)
-def upsert_my_settings(payload: SettingsIn, tenant_id: str = Depends(require_tenant)):
-    if payload.partner_id is not None:
-        _set_kv(tenant_id, "kaspi.partner_id", str(payload.partner_id))
-    if payload.shop_name is not None:
-        _set_kv(tenant_id, "shop.name", payload.shop_name)
-    if payload.kaspi_token:
-        _set_kv(tenant_id, "kaspi.token", _enc(payload.kaspi_token))
-    if payload.city_id is not None:
-        _set_kv(tenant_id, "kaspi.city_id", str(payload.city_id))
-    if payload.business_day_start is not None:
-        _set_kv(tenant_id, "bizday.start", payload.business_day_start)
-    if payload.timezone is not None:
-        _set_kv(tenant_id, "tz.name", payload.timezone)
-    if payload.min_margin_pct is not None:
-        _set_kv(tenant_id, "price.min_margin", str(payload.min_margin_pct))
-    if payload.auto_reprice is not None:
-        _set_kv(tenant_id, "price.auto_reprice", "true" if payload.auto_reprice else "false")
+def _upsert_kv(tenant_id: str, key: str, value: Any):
+    # если значение None — ничего не меняем (используем семантику "оставить как есть")
+    if value is None:
+        return
+    # апсерт по (tenant_id, key)
+    db.execute(
+        """
+        insert into tenant_settings(tenant_id, key, value)
+        values (%s, %s, %s)
+        on conflict (tenant_id, key)
+        do update set value = excluded.value, updated_at = now()
+        """,
+        [tenant_id, key, _json_wrap(value)],
+    )
 
-    return get_my_settings(tenant_id)  # отдать актуальные значения
+# ----- API -----
+
+@router.get("/me")
+def get_my_settings(
+    user = Depends(get_current_user),
+    tenant_id: Optional[str] = Depends(require_tenant_optional),
+):
+    """
+    Возвращает плоский JSON настроек для UI.
+    Если tenant отсутствует (первый заход) — вернём 404,
+    чтобы фронт редиректнул на /ui/settings.html.
+    """
+    user_id = user["sub"] if isinstance(user, dict) else user
+    if not tenant_id:
+        # нет членства -> считаем неинициализированным
+        raise HTTPException(status_code=404, detail="settings not initialized")
+
+    kv = _select_settings_kv(tenant_id)
+
+    token_raw = kv.get(K_TOKEN)
+    resp = {
+        "tenant_id": tenant_id,
+        "partner_id": _to_int(kv.get(K_PARTNER_ID)),
+        "shop_name": kv.get(K_SHOP_NAME),
+        "kaspi_token_masked": _mask_token(token_raw),
+        "city_id": _to_int(kv.get(K_CITY_ID)),
+        "business_day_start": kv.get(K_BIZDAY_START) or "20:00",
+        "timezone": kv.get(K_TZ) or "Asia/Almaty",
+        "min_margin_pct": _to_float(kv.get(K_MIN_MARGIN)),
+        "auto_reprice": _parse_bool(kv.get(K_AUTO_REPRICE)),
+    }
+    return resp
+
+def _to_int(x: Any) -> Optional[int]:
+    try:
+        return int(x) if x is not None and str(x).strip() != "" else None
+    except Exception:
+        return None
+
+def _to_float(x: Any) -> Optional[float]:
+    try:
+        return float(x) if x is not None and str(x).strip() != "" else None
+    except Exception:
+        return None
+
+class SettingsIn(dict):
+    """
+    Pydantic не обязателен — принимаем частичный JSON.
+    Поддерживаем только поля, которые есть в UI.
+    """
+    pass
+
+@router.post("/me")
+def upsert_my_settings(
+    payload: SettingsIn = Body(...),
+    user = Depends(get_current_user),
+    tenant_id: Optional[str] = Depends(require_tenant_optional),
+):
+    """
+    Принимает частичный JSON. Пустые/отсутствующие поля не трогаем.
+    Если у пользователя ещё нет tenant — создаём автоматически.
+    """
+    user_id = user["sub"] if isinstance(user, dict) else user
+    if not tenant_id:
+        tenant_id = _ensure_tenant_for_user(user_id)
+
+    # Сопоставляем поля UI -> KV-ключи
+    mapping = {
+        "partner_id":        (K_PARTNER_ID,    _to_int),
+        "shop_name":         (K_SHOP_NAME,     lambda v: v if v not in ("", None) else None),
+        "kaspi_token":       (K_TOKEN,         lambda v: v if v not in ("", None) else None),
+        "city_id":           (K_CITY_ID,       _to_int),
+        "business_day_start":(K_BIZDAY_START,  lambda v: v if v not in ("", None) else None),
+        "timezone":          (K_TZ,            lambda v: v if v not in ("", None) else None),
+        "min_margin_pct":    (K_MIN_MARGIN,    _to_float),
+        "auto_reprice":      (K_AUTO_REPRICE,  _parse_bool),
+    }
+
+    for field, (key, caster) in mapping.items():
+        if field in payload:
+            _upsert_kv(tenant_id, key, caster(payload.get(field)))
+
+    return {"ok": True, "tenant_id": tenant_id}
