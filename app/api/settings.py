@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Body
 from app.deps.auth import get_current_user  # должен возвращать dict с полем "sub" (uuid) из Supabase-JWT
 from app.deps.tenant import require_tenant_optional  # сделаем опциональным: None -> создадим
 from app import db
+from pydantic import BaseModel
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 
@@ -159,12 +160,15 @@ def _to_float(x: Any) -> Optional[float]:
     except Exception:
         return None
 
-class SettingsIn(dict):
-    """
-    Pydantic не обязателен — принимаем частичный JSON.
-    Поддерживаем только поля, которые есть в UI.
-    """
-    pass
+class SettingsIn(BaseModel):
+    partner_id: Optional[int] = None
+    shop_name: Optional[str] = None
+    kaspi_token: Optional[str] = None
+    city_id: Optional[int] = None
+    business_day_start: Optional[str] = None
+    timezone: Optional[str] = None
+    min_margin_pct: Optional[float] = None
+    auto_reprice: Optional[bool] = None
 
 @router.post("/me")
 def upsert_my_settings(
@@ -172,15 +176,12 @@ def upsert_my_settings(
     user = Depends(get_current_user),
     tenant_id: Optional[str] = Depends(require_tenant_optional),
 ):
-    """
-    Принимает частичный JSON. Пустые/отсутствующие поля не трогаем.
-    Если у пользователя ещё нет tenant — создаём автоматически.
-    """
     user_id = user["sub"] if isinstance(user, dict) else user
     if not tenant_id:
         tenant_id = _ensure_tenant_for_user(user_id)
 
-    # Сопоставляем поля UI -> KV-ключи
+    data = payload.model_dump(exclude_unset=True)
+
     mapping = {
         "partner_id":        (K_PARTNER_ID,    _to_int),
         "shop_name":         (K_SHOP_NAME,     lambda v: v if v not in ("", None) else None),
@@ -193,7 +194,8 @@ def upsert_my_settings(
     }
 
     for field, (key, caster) in mapping.items():
-        if field in payload:
-            _upsert_kv(tenant_id, key, caster(payload.get(field)))
+        if field in data:
+            _upsert_kv(tenant_id, key, caster(data.get(field)))
 
     return {"ok": True, "tenant_id": tenant_id}
+
