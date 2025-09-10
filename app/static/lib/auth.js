@@ -14,6 +14,24 @@
     localStorage.removeItem(KEY);
   }
 
+export async function ensureSessionAndSettings() {
+  const r = await fetch('/settings/me', { credentials: 'include' });
+
+  if (r.status === 401) { // не залогинен
+    location.href = '/ui/login.html?next=' + encodeURIComponent(location.pathname);
+    return null;
+  }
+  if (r.status === 404) { // первый запуск, настроек нет
+    location.href = '/ui/settings.html?next=' + encodeURIComponent(location.pathname);
+    return null;
+  }
+  if (!r.ok) {
+    const text = await r.text();
+    throw new Error('Failed /settings/me: ' + text);
+  }
+  return await r.json();
+}
+  
   // authFetch: всегда шлём Authorization
   async function authFetch(input, init = {}) {
     const t = getToken();
