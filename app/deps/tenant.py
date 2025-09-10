@@ -1,43 +1,41 @@
 # app/deps/tenant.py
-from fastapi import Depends
-from app.deps.auth import get_current_user
-from app import db
+from __future__ import annotations
+from typing import Optional, Union, Dict, Any
+from fastapi import Depends, HTTPException
 
-def require_tenant_optional(user = Depends(get_current_user)) -> str | None:
-    uid = user["sub"] if isinstance(user, dict) else user
-    row = db.fetchrow("select tenant_id from org_members where user_id=%s limit 1", [uid])
-    return row["tenant_id"] if row else None
+from .auth import require_user, require_user_optional
 
-def require_tenant(user = Depends(get_current_user)) -> str:
-    # пробуем найти привязку
-    row = db.fetchrow(
-        "select tenant_id from org_members where user_id = %s limit 1",
-        [user["user_id"]],
-    )
-    if row:
-        return row["tenant_id"]
+Claim = Union[Dict[str, Any], str, None]
 
-    # нет — создаём тенант и членство
-    ten = db.fetchrow(
-        "insert into tenants(name) values (%s) returning id",
-        [user.get("email") or "My Shop"]
-    )
-    db.execute(
-        "insert into org_members(user_id, tenant_id, role) values (%s,%s,'owner') "
-        "on conflict (user_id, tenant_id) do nothing",
-        [user["user_id"], ten["id"]],
-    )
+def _extract_uid(user: Claim) -> Optional[str]:
+    """Пытаемся достать UID из разных форматов user/claims без падений."""
+    if not user:
+        return None
+    if isinstance(user, dict):
+        # Прямые ключи
+        for k in ("sub", "user_id", "uid", "id"):
+            v = user.get(k)
+            if v:
+                return str(v)
+        # Часто user вложен как {"user": {...}}
+        inner = user.get("user")
+        if isinstance(inner, dict):
+            for k in ("sub", "user_id", "uid", "id"):
+                v = inner.get(k)
+                if v:
+                    return str(v)
+        # Ничего не нашли — считаем, что неавторизован
+        return None
+    # Строка — уже UID
+    return str(user)
 
-    # (опционально) создаём пустые настройки для удобства
-    db.execute(
-        """
-        insert into tenant_settings(tenant_id, key, value)
-        values
-          (%s, 'kaspi.partner_id', jsonb_build_object('v','')),
-          (%s, 'kaspi.token',       jsonb_build_object('v',''))
-        on conflict (tenant_id, key) do nothing
-        """,
-        [ten["id"], ten["id"]],
-    )
-    return ten["id"]
+def require_tenant_optional(user: Claim = Depends(require_user_optional)) -> Optional[str]:
+    """Не бросает исключение, возвращает None если не удалось определить UID."""
+    return _extract_uid(user)
 
+def require_tenant(user: Claim = Depends(require_user)) -> str:
+    """Требует авторизации: бросает 401, если UID не найден."""
+    uid = _extract_uid(user)
+    if not uid:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return uid
