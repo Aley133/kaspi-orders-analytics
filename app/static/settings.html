@@ -1,52 +1,88 @@
-<!doctype html><html lang="ru"><head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>Настройки магазина — Kaspi</title>
-<style>body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Inter,sans-serif;max-width:720px;margin:32px auto;padding:0 16px}input,button{font:inherit;padding:10px 12px;border-radius:8px;border:1px solid #ddd}label{display:block;margin:10px 0}button{cursor:pointer}</style>
-</head><body>
-<h1>Первичная настройка</h1>
-<ol>
-<li><b>Partner ID</b> — числовой ID магазина в Kaspi (см. кабинет продавца → профиль/интеграция).</li>
-<li><b>Kaspi Token</b> — токен доступа к API (кабинет продавца → интеграция → API токен).</li>
-</ol>
-<form id="f">
-<label>Partner ID <input name="partner_id" type="number" required></label>
-<label>Название магазина <input name="shop_name" type="text" placeholder="ИП Ромашка"></label>
-<label>Kaspi Token <input name="kaspi_token" type="password" required></label>
-<label>Город (city_id) <input name="city_id" type="number" placeholder="по желанию"></label>
-<label>Начало бизнес-дня <input name="business_day_start" value="20:00"></label>
-<label>Часовой пояс <input name="timezone" value="Asia/Almaty"></label>
-<label>Мин. маржа, % <input name="min_margin_pct" type="number" step="0.01"></label>
-<label>Автопереценка <input name="auto_reprice" type="checkbox"></label>
-<div style="margin-top:12px"><button type="submit">Продолжить</button></div>
-</form>
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Настройки — Kaspi Analytics</title>
+  <link rel="stylesheet" href="style.css"/>
+</head>
+<body data-theme="light" style="padding:24px;max-width:920px;margin:auto">
+  <h1>Настройки</h1>
+  <p class="muted">Эти параметры используют эндпоинты аналитики и синхронизации.</p>
 
+  <form id="form" style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+    <div><label>Shop name</label><input name="shop_name" placeholder="LeoXpress"/></div>
+    <div><label>Partner ID</label><input name="partner_id" placeholder=""/></div>
 
-<script type="module">
-import { fetchAuthed } from './lib/auth.js';
-const qp = new URLSearchParams(location.search);
-const next = qp.get('next') || '/ui/';
-const form = document.getElementById('f');
-form.addEventListener('submit', async (e) => {
-e.preventDefault();
-const fd = new FormData(form);
-const payload = {
-partner_id: fd.get('partner_id') ? Number(fd.get('partner_id')) : null,
-shop_name: fd.get('shop_name') || null,
-kaspi_token: fd.get('kaspi_token') || null,
-city_id: fd.get('city_id') ? Number(fd.get('city_id')) : null,
-business_day_start:fd.get('business_day_start') || null,
-timezone: fd.get('timezone') || null,
-min_margin_pct: fd.get('min_margin_pct') ? Number(fd.get('min_margin_pct')) : null,
-auto_reprice: form.auto_reprice.checked,
-};
-const r = await fetchAuthed('/settings/me', {
-method: 'POST',
-headers: { 'Content-Type': 'application/json' },
-body: JSON.stringify(payload),
-});
-if (!r.ok) return alert('Save failed: ' + await r.text());
-location.href = next;
-});
-</script>
-</body></html>
+    <div style="grid-column:1/3"><label>KASPI_TOKEN</label><input name="kaspi_token" placeholder="kaspi_xxx" /></div>
+
+    <div><label>Amount fields (CSV)</label><input name="amount_fields" value="totalPrice"/></div>
+    <div><label>Amount divisor</label><input name="amount_divisor" type="number" step="0.0001" value="1"/></div>
+
+    <div><label>Date field default</label><input name="date_field_default" value="creationDate"/></div>
+    <div><label>Business day start (HH:MM)</label><input name="business_day_start" value="20:00"/></div>
+
+    <div><label>Use business day</label><input type="checkbox" name="use_business_day" checked/></div>
+    <div><label>Store accept until</label><input name="store_accept_until" value="17:00"/></div>
+
+    <div><label>City keys (CSV)</label><input name="city_keys" value="city,deliveryAddress.city"/></div>
+    <div><label>Allowed origins (CSV)</label><input name="allowed_origins" value=""/></div>
+  </form>
+
+  <div style="margin-top:16px;display:flex;gap:12px">
+    <button id="save">Сохранить</button>
+    <span id="msg" class="muted"></span>
+  </div>
+
+  <script src="./Lib/auth.js"></script>
+  <script>
+    const $ = s => document.querySelector(s);
+    (async function init(){
+      await Auth.ensureAuthOrGoLogin();
+      try{
+        const r = await Auth.authedFetch('/settings/me');
+        if (r.status === 404){
+          // пустая форма — норм
+          return;
+        }
+        if (!r.ok) throw new Error(await r.text());
+        const data = await r.json();
+        for (const [k,v] of Object.entries(data)){
+          const el = document.querySelector(`[name="${k}"]`);
+          if (!el) continue;
+          if (el.type === 'checkbox') el.checked = !!v;
+          else el.value = v ?? '';
+        }
+      }catch(e){
+        $('#msg').textContent = 'Ошибка загрузки настроек: ' + (e?.message || e);
+      }
+    })();
+
+    function readForm(){
+      const f = $('#form');
+      const o = {};
+      for (const el of f.querySelectorAll('input')){
+        o[el.name] = (el.type === 'checkbox') ? el.checked : el.value.trim();
+      }
+      return o;
+    }
+
+    $('#save').onclick = async () => {
+      $('#msg').textContent = 'Сохраняю...';
+      try{
+        const body = readForm();
+        const r = await Auth.authedFetch('/settings/save',{
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify(body)
+        });
+        if (!r.ok) throw new Error(await r.text());
+        const j = await r.json();
+        $('#msg').textContent = 'OK — ' + (j.updated_at || '');
+      }catch(e){
+        $('#msg').textContent = 'Ошибка: ' + (e?.message || e);
+      }
+    };
+  </script>
+</body>
+</html>
