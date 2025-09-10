@@ -18,5 +18,15 @@
     document.getElementById('out').textContent = JSON.stringify(await r.json(), null, 2);
   })();
 </script>
+  <script type="module">
+  import { ensureSessionAndSettings } from './lib/auth.js';
+  (async () => {
+    const me = await ensureSessionAndSettings();
+    if (!me) return; // уже редиректнули
+    // здесь запускаем приложение
+    window.__ME__ = me;
+    // initApp();
+  })();
+</script>
 </body>
 </html>
