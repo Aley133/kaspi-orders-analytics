@@ -134,7 +134,13 @@ client = KaspiClient(token=KASPI_TOKEN, base_url=KASPI_BASE_URL) if KASPI_TOKEN 
 orders_cache = TTLCache(maxsize=512, ttl=CACHE_TTL)
 
 # Статический UI
-app.mount("/ui", StaticFiles(directory="app/ui", html=True), name="ui")
+# Robust UI mount: пробуем несколько вариантов расположения
+_ui_candidates = ("app/static", "app/ui", "static", "ui")
+_ui_dir = next((p for p in _ui_candidates if Path(p).is_dir()), None)
+if _ui_dir:
+    app.mount("/ui", StaticFiles(directory=_ui_dir, html=True), name="ui")
+else:
+    print("⚠️  UI directory not found, skipping /ui mount")
 
 # Подключаем доменные роутеры
 app.include_router(get_products_router(client), prefix="/products")
