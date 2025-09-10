@@ -12,18 +12,19 @@ import asyncio
 import httpx
 import pytz
 from dotenv import load_dotenv
-from fastapi import FastAPI, Query, HTTPException
+from fastapi import FastAPI, Query, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, PlainTextResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
 from pydantic import BaseModel
 from cachetools import TTLCache
 from httpx import HTTPStatusError, RequestError
-# Роутеры доменных модулей
+
+# -------------------- Роутеры доменных модулей --------------------
 from app.api.bridge_v2 import router as bridge_router
 from app.api.profit_fifo import get_profit_fifo_router
 from app.api.authz import router as auth_router
-from fastapi.staticfiles import StaticFiles
-from pathlib import Path
 
 # Роутер и ХЕЛПЕРЫ из debug_sku.py (для корректного извлечения позиций)
 from app.debug_sku import (
@@ -35,16 +36,42 @@ from app.debug_sku import (
     sku_candidates as _sku_candidates_from_attrs,
 )
 
-# KaspiClient (для итерации заказов по диапазону)
+# -------------------- Попытка импортировать КОРРЕКТНЫЙ kaspi-клиент из deps --------------------
+# (Если недоступен — используем совместимый фолбэк)
+MT_AVAILABLE = False
 try:
-    from app.kaspi_client import KaspiClient  # type: ignore
+    # ожидаемый правильный клиент в deps
+    from app.deps.kaspi_client import (
+        KaspiClientProxy as _KaspiClientProxy,
+        set_token_resolver as _set_token_resolver,
+        set_current_tenant as _set_current_tenant,
+        token_for_current_tenant as _token_for_current_tenant,
+    )
+    from app.deps.tenant import resolve_kaspi_token
+    from app.deps.auth import try_extract_tenant_from_authorization
+    MT_AVAILABLE = True
 except Exception:
-    try:
-        from .kaspi_client import KaspiClient  # type: ignore
-    except Exception:
-        from kaspi_client import KaspiClient  # type: ignore
+    _KaspiClientProxy = None
+    def _set_token_resolver(_): ...
+    def _set_current_tenant(_): ...
+    def _token_for_current_tenant():
+        return os.getenv("KASPI_TOKEN", "").strip()
+    def resolve_kaspi_token(_tid: Optional[str]) -> Optional[str]:
+        return None
+    def try_extract_tenant_from_authorization(_h: Optional[str]) -> Optional[str]:
+        return None
 
-# Products router
+# Фолбэк-импорт старого клиента (нужен только если нет прокси)
+if not MT_AVAILABLE:
+    try:
+        from app.kaspi_client import KaspiClient  # type: ignore
+    except Exception:
+        try:
+            from .kaspi_client import KaspiClient  # type: ignore
+        except Exception:
+            from kaspi_client import KaspiClient  # type: ignore
+
+# Роутер products
 try:
     from app.api.products import get_products_router
 except Exception as _e1:
@@ -126,15 +153,31 @@ if origins:
         allow_headers=["*"],
         allow_credentials=False,
     )
-    
-# Клиент к Kaspi API
-client = KaspiClient(token=KASPI_TOKEN, base_url=KASPI_BASE_URL) if KASPI_TOKEN else None
+
+# ---- Tenant middleware: выставляем tenant_id для прокси-клиента из deps ----
+@app.middleware("http")
+async def _tenant_ctx_mw(request: Request, call_next):
+    try:
+        tid = try_extract_tenant_from_authorization(request.headers.get("Authorization"))
+        if tid:
+            _set_current_tenant(tid)
+    except Exception:
+        # мягко игнорируем, чтобы публичные маршруты работали
+        pass
+    return await call_next(request)
+
+# Клиент к Kaspi API: используем прокси из deps, иначе фолбэк на глобальный токен
+if MT_AVAILABLE and _KaspiClientProxy is not None:
+    _set_token_resolver(resolve_kaspi_token)
+    client = _KaspiClientProxy(base_url=KASPI_BASE_URL)
+else:
+    client = (KaspiClient(token=KASPI_TOKEN, base_url=KASPI_BASE_URL)  # type: ignore
+              if KASPI_TOKEN else None)
 
 # Кэш ответов (включая entries по заказам)
 orders_cache = TTLCache(maxsize=512, ttl=CACHE_TTL)
 
-# Статический UI
-# Robust UI mount: пробуем несколько вариантов расположения
+# Статический UI (устойчивый поиск директории)
 _ui_candidates = ("app/static", "app/ui", "static", "ui")
 _ui_dir = next((p for p in _ui_candidates if Path(p).is_dir()), None)
 if _ui_dir:
@@ -274,10 +317,12 @@ BASE_TIMEOUT = httpx.Timeout(connect=10.0, read=80.0, write=20.0, pool=60.0)
 HTTPX_LIMITS = httpx.Limits(max_connections=20, max_keepalive_connections=10)
 
 def _kaspi_headers() -> Dict[str, str]:
-    if not KASPI_TOKEN:
-        raise HTTPException(status_code=500, detail="KASPI_TOKEN is not set")
+    # Мультиарендный токен (через deps-прокси); фолбэк — глобальный KASPI_TOKEN
+    tok = _token_for_current_tenant()
+    if not tok:
+        raise HTTPException(status_code=401, detail="Kaspi token is not set for this tenant")
     return {
-        "X-Auth-Token": KASPI_TOKEN,
+        "X-Auth-Token": tok,
         "Accept": "application/vnd.api+json",
         "Content-Type": "application/vnd.api+json",
         "User-Agent": "Mozilla/5.0",
@@ -347,6 +392,8 @@ def _smart_operational_day(attrs: dict, state: str, tzinfo: pytz.BaseTzInfo,
     return datetime.now(tzinfo).date().isoformat(), "fallback_now"
 
 # -------------------- Вытягивание позиций (ВСЕ SKU) --------------------
+orders_cache = orders_cache  # just to keep static analyzers calm
+
 async def _all_items_details(order_id: str, return_candidates: bool = True, timeout_scale: float = 1.0) -> List[Dict[str, object]]:
     """
     Список позиций заказа. Кэшируем на TTLCache. Масштабируем таймауты под объём.
@@ -758,8 +805,6 @@ async def analytics(start: str = Query(...), end: str = Query(...), tz: str = Qu
 
 # -------------------- Вспомогательная «ядровая» функция list_ids --------------------
 def _select_targets(out: List[Dict[str, object]], enrich_day: str, enrich_scope: str, limit: int) -> List[Dict[str, object]]:
-    # В режиме "all" возвращаем все элементы периода без учёта limit —
-    # ограничение, если задано, применяем позже к финальному out.
     if enrich_scope == "all":
         return out
     if enrich_scope == "last_day":
@@ -774,7 +819,7 @@ def _select_targets(out: List[Dict[str, object]], enrich_day: str, enrich_scope:
         last_dt = date(y, m, d)
         scope = {(last_dt - timedelta(days=i)).isoformat() for i in range(30)}
         return [it for it in out if str(it["op_day"]) in scope]
-    return []  # none
+    return []
 
 async def _list_ids_core(
     start: str, end: str, tz: str, date_field: str,
@@ -803,17 +848,14 @@ async def _list_ids_core(
     exc = parse_states_csv(exclude_states) or set()
     inc = _expand_with_archive(inc)
 
-    # сбор без обогащения + прогресс сканирования
     days, cities_dict, tot, tot_amt, st_counts, out = await _collect_range(
         start_dt, end_dt, tz, date_field, inc, exc,
         assign_mode=assign_mode, store_accept_until=(store_accept_until or STORE_ACCEPT_UNTIL),
         progress=progress_cb
     )
 
-    # сортировка
     out.sort(key=lambda it: (str(it["op_day"]), str(it["date"])), reverse=(order == "desc"))
 
-    # группировки
     groups: List[Dict[str, object]] = []
     if grouped:
         cur_day: Optional[str] = None
@@ -837,7 +879,6 @@ async def _list_ids_core(
                 "total_amount": round(sum(float(x.get("amount", 0) or 0) for x in bucket), 2),
             })
 
-    # --- ОБОГАЩЕНИЕ (SKU/TITLE) ---
     if with_items and out and enrich_scope != "none":
         enrich_day = bucket_date(end_dt.astimezone(tzinfo))
         targets = _select_targets(out, enrich_day, enrich_scope, limit)
@@ -878,7 +919,6 @@ async def _list_ids_core(
 
         await asyncio.gather(*(enrich(it) for it in targets))
 
-    # Применяем лимит только к финальному списку
     if limit and limit > 0:
         out = out[:limit]
 
