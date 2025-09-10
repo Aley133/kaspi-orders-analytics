@@ -1,46 +1,56 @@
+<script>
+window.Auth = (function(){
+  let _client = null, _session = null;
 
-import { createClient } from 'https://esm.sh/@supabase/supabase-js';
+  async function _ensureClient() {
+    if (_client) return _client;
+    const meta = await fetch('/auth/meta').then(r => r.json());
+    const { createClient } = await import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm');
+    _client = createClient(meta.SUPABASE_URL, meta.SUPABASE_ANON_KEY);
+    const { data: { session } } = await _client.auth.getSession();
+    _session = session;
+    return _client;
+  }
 
+  async function getSession() {
+    await _ensureClient();
+    const { data: { session } } = await _client.auth.getSession();
+    _session = session;
+    return session;
+  }
 
-let supabase;
-async function ensureSupabase() {
-if (supabase) return supabase;
-const r = await fetch('/auth/meta');
-const { supabase_url, supabase_anon_key } = await r.json();
-supabase = createClient(supabase_url, supabase_anon_key);
-// делаем доступным в консоли (для отладки)
-window.supabase = supabase;
-return supabase;
-}
+  async function getToken() {
+    const s = await getSession();
+    return s?.access_token || null;
+  }
 
+  async function signInEmailOtp(email) {
+    await _ensureClient();
+    const { error } = await _client.auth.signInWithOtp({ email });
+    if (error) throw error;
+    return true;
+  }
 
-export async function fetchAuthed(url, opts = {}) {
-const sb = await ensureSupabase();
-const { data: { session } } = await sb.auth.getSession();
-const token = session?.access_token;
-const headers = new Headers(opts.headers || {});
-if (token) headers.set('Authorization', `Bearer ${token}`);
-return fetch(url, { ...opts, headers });
-}
+  async function verifyEmailOtp(email, code) {
+    await _ensureClient();
+    const { data, error } = await _client.auth.verifyOtp({ email, token: code, type: 'email' });
+    if (error) throw error;
+    _session = data?.session || null;
+    return !!_session;
+  }
 
+  async function ensureAuthOrGoLogin() {
+    const t = await getToken();
+    if (!t) window.location.href = '/ui/login.html';
+    return t;
+  }
 
-export async function ensureSessionAndSettings() {
-const r = await fetchAuthed('/settings/me');
-if (r.status === 401) {
-location.href = '/ui/login.html?next=' + encodeURIComponent(location.pathname);
-return null;
-}
-if (r.status === 404) {
-location.href = '/ui/settings.html?next=' + encodeURIComponent(location.pathname);
-return null;
-}
-if (!r.ok) throw new Error('Failed /settings/me: ' + await r.text());
-return await r.json();
-}
+  async function authedFetch(input, init={}) {
+    const t = await getToken();
+    init.headers = Object.assign({}, init.headers || {}, { 'Authorization': `Bearer ${t}` });
+    return fetch(input, init);
+  }
 
-
-export async function signOutAndGoToLogin() {
-const sb = await ensureSupabase();
-await sb.auth.signOut();
-location.href = '/ui/login.html';
-}
+  return { getSession, getToken, signInEmailOtp, verifyEmailOtp, ensureAuthOrGoLogin, authedFetch };
+})();
+</script>
