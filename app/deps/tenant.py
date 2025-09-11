@@ -1,59 +1,86 @@
-# deps/tenant.py
-import os, json
-import psycopg  # psycopg3
+# app/deps/tenant.py
+import json
 from typing import Optional
 
-_DB_URL = os.getenv("SUPABASE_DB_URL") or os.getenv("DATABASE_URL") or os.getenv("PROFIT_DB_URL")
+# важно: берем коннектор из вашего app/db.py
+from app.db import get_conn
 
-def _conn():
-    # снимаем кавычки, приводим схемы
-    dsn = (_DB_URL or "").strip().strip('"').replace("postgresql+psycopg://","postgresql://")
-    return psycopg.connect(dsn, autocommit=True)
 
-def get_settings_row(tenant_id: str) -> Optional[dict]:
-    sql = """
-    select value
-    from public.tenant_settings
-    where tenant_id = %s and key = 'settings'
-    limit 1
+def ensure_tenant_exists(tenant_id: str, email: Optional[str] = None) -> None:
     """
-    with _conn() as cx, cx.cursor() as cur:
-        cur.execute(sql, (tenant_id,))
-        row = cur.fetchone()
-        if not row: return None
-        return row[0]  # jsonb as dict
-
-def ensure_tenant_exists(tenant_id: str):
+    Гарантируем, что запись в tenants существует (для FK на tenant_settings).
+    Вызывается перед апсертом настроек.
+    """
+    ddl_tenants = """
+    create table if not exists public.tenants (
+        id uuid primary key,
+        email text,
+        phone text,
+        created_at timestamptz default now(),
+        is_active boolean default true
+    );
+    """
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("""
-            create table if not exists public.tenants (
-              id uuid primary key,
-              email text,
-              phone text,
-              created_at timestamptz default now(),
-              is_active boolean default true
-            );
-        """)
+        cur.execute(ddl_tenants)
         cur.execute(
-            "insert into public.tenants (id) values (%s) on conflict (id) do nothing",
-            (tenant_id,)
+            "insert into public.tenants (id, email, is_active) values (%s, %s, true) on conflict (id) do nothing",
+            (tenant_id, email),
         )
+        conn.commit()
 
-def upsert_settings(tenant_id: str, value: dict):
-    ensure_tenant_exists(tenant_id)  # <--- ДО апсерта настроек
+
+def _ensure_settings_table() -> None:
+    ddl_settings = """
+    create table if not exists public.tenant_settings (
+        tenant_id uuid primary key
+            references public.tenants(id) on delete cascade,
+        value jsonb not null,
+        updated_at timestamptz default now()
+    );
+    """
     with get_conn() as conn, conn.cursor() as cur:
-        sql = """
-        insert into public.tenant_settings (tenant_id, key, value)
-        values (%s, 'settings', %s::jsonb)
-        on conflict (tenant_id, key) do update
-          set value = excluded.value,
-              updated_at = now();
-        """
+        cur.execute(ddl_settings)
+        conn.commit()
+
+
+def get_settings(tenant_id: str) -> Optional[dict]:
+    _ensure_settings_table()
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("select value from public.tenant_settings where tenant_id=%s", (tenant_id,))
+        row = cur.fetchone()
+        return (row[0] if row else None)
+
+
+def upsert_settings(tenant_id: str, value: dict) -> None:
+    """
+    Сохраняем JSON настроек для тенанта.
+    - сначала гарантируем запись в tenants (иначе FK падает)
+    - никакого created_at — только updated_at
+    """
+    ensure_tenant_exists(tenant_id)
+    _ensure_settings_table()
+
+    sql = """
+    insert into public.tenant_settings (tenant_id, value)
+    values (%s, %s::jsonb)
+    on conflict (tenant_id) do update
+      set value = excluded.value,
+          updated_at = now()
+    """
+    with get_conn() as conn, conn.cursor() as cur:
         cur.execute(sql, (tenant_id, json.dumps(value)))
         conn.commit()
 
-def resolve_kaspi_token(tenant_id: str) -> Optional[str]:
-    row = get_settings_row(tenant_id)
-    if not row: return None
-    token = (row or {}).get("kaspi_token") or ""
-    return token.strip() or None
+
+def resolve_kaspi_token(tenant_id: Optional[str]) -> Optional[str]:
+    """
+    Достаём kaspi_token для текущего тенанта (используется в каспи-клиенте).
+    """
+    if not tenant_id:
+        return None
+    val = get_settings(tenant_id)
+    if isinstance(val, dict):
+        tok = val.get("kaspi_token") or val.get("KASPI_TOKEN")
+        if isinstance(tok, str) and tok.strip():
+            return tok.strip()
+    return None
