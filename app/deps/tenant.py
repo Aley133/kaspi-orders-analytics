@@ -81,6 +81,6 @@ def resolve_kaspi_token(tenant_id: Optional[str]) -> Optional[str]:
             return tok.strip()
     return None
 
-def get_settings_row(tenant_id: str):
+def get_settings(tenant_id: str):
     """Alias для старого импорта из settings.py."""
     return get_settings(tenant_id)
