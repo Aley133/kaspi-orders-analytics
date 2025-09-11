@@ -1,9 +1,9 @@
 # app/api/settings.py
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, constr
-from deps.auth import get_current_tenant_id
-from deps.tenant import get_settings_row, upsert_settings
-from deps.app.kaspi_client import KaspiClient
+from app.deps.auth import get_current_tenant_id
+from app.deps.tenant import get_settings_row, upsert_settings
+from app.deps.kaspi_client import KaspiClient
 
 router = APIRouter()
 
