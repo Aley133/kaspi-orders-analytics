@@ -18,6 +18,17 @@ def _decode_jwt_noverify(token: str) -> dict:
     except Exception:
         return {}
 
+def get_current_user(request: Request):
+    """
+    Compatibility shim for app.api.authz.
+    Возвращаем минимальный объект "пользователя" на основе tenant_id,
+    который уже выставляет мидлвара attach_kaspi_token_middleware.
+    """
+    tenant_id = get_current_tenant_id(request)
+    if not tenant_id:
+        raise HTTPException(status_code=401, detail="unauthorized")
+    return {"tenant_id": tenant_id}
+
 def get_current_tenant_id(request: Request) -> str:
     auth = request.headers.get("authorization") or ""
     if not auth.lower().startswith("bearer "):
