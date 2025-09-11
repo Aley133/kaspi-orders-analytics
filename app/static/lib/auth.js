@@ -1,4 +1,4 @@
-<script>
+
 /* global window, fetch */
 window.Auth = (function () {
   let _client = null;
@@ -114,4 +114,3 @@ window.Auth = (function () {
     redirectAfterLogin, postLoginRedirect, bounceIfAuthed
   };
 })();
-</script>
