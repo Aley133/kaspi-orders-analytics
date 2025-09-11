@@ -43,61 +43,83 @@
     <p id="msg" style="margin-top:12px;color:#6b7280"></p>
   </div>
 
+  <!-- ВАЖНО: грузим auth.js ДО вашего кода, обычным <script> -->
   <script src="./lib/auth.js"></script>
+
   <script>
     const $ = sel => document.querySelector(sel);
-    (async () => { await Auth.bounceIfAuthed(); })();
 
-    function setMode(m){
-      $('#smsForm').style.display = (m==='sms'?'block':'none');
-      $('#emailForm').style.display = (m==='email'?'block':'none');
+    (async () => {
+      // если уже авторизован и есть настройки — перепрыгиваем со страницы логина
+      await Auth.bounceIfAuthed();
+    })();
+
+    function setMode(m) {
+      $('#smsForm').style.display   = (m === 'sms'   ? 'block' : 'none');
+      $('#emailForm').style.display = (m === 'email' ? 'block' : 'none');
     }
     setMode('sms');
-    $('#modeSms').onclick = () => setMode('sms');
+    $('#modeSms').onclick  = () => setMode('sms');
     $('#modeEmail').onclick = () => setMode('email');
 
-    // SMS
-    $('#sendSms').onclick = async () => {
+    // ---------- SMS ----------
+    $('#sendSms').onclick = async (e) => {
+      e.preventDefault();
       const phone = $('#phone').value.trim();
-      if (!phone) return $('#msg').textContent = 'Укажите телефон';
+      if (!phone) { $('#msg').textContent = 'Укажите телефон'; return; }
       $('#msg').textContent = 'Отправляем SMS...';
-      try { await Auth.signInPhoneOtp(phone);
-        $('#smsOtpBlock').style.display='block';
+      try {
+        await Auth.signInPhoneOtp(phone);
+        $('#smsOtpBlock').style.display = 'block';
         $('#msg').textContent = 'Код отправлен';
-      } catch(e){ $('#msg').textContent = 'Ошибка: ' + (e?.message||e); }
+      } catch (err) {
+        $('#msg').textContent = 'Ошибка: ' + (err?.message || err);
+      }
     };
-    $('#verifySms').onclick = async () => {
+
+    $('#verifySms').onclick = async (e) => {
+      e.preventDefault();
       const phone = $('#phone').value.trim();
-      const code = $('#smsOtp').value.trim();
-      if (!code) return $('#msg').textContent = 'Введите код';
+      const code  = $('#smsOtp').value.trim();
+      if (!code) { $('#msg').textContent = 'Введите код'; return; }
       $('#msg').textContent = 'Проверяем...';
       try {
         const ok = await Auth.verifyPhoneOtp(phone, code);
         if (ok) await Auth.redirectAfterLogin();
         else $('#msg').textContent = 'Не удалось войти';
-      } catch(e){ $('#msg').textContent = 'Ошибка: ' + (e?.message||e); }
+      } catch (err) {
+        $('#msg').textContent = 'Ошибка: ' + (err?.message || err);
+      }
     };
 
-    // Email (fallback)
-    $('#sendEmail').onclick = async () => {
+    // ---------- Email ----------
+    $('#sendEmail').onclick = async (e) => {
+      e.preventDefault();
       const email = $('#email').value.trim();
-      if (!email) return $('#msg').textContent = 'Укажите e-mail';
+      if (!email) { $('#msg').textContent = 'Укажите e-mail'; return; }
       $('#msg').textContent = 'Отправляем код...';
-      try { await Auth.signInEmailOtp(email);
-        $('#emailOtpBlock').style.display='block';
+      try {
+        await Auth.signInEmailOtp(email);
+        $('#emailOtpBlock').style.display = 'block';
         $('#msg').textContent = 'Код отправлен';
-      } catch(e){ $('#msg').textContent = 'Ошибка: ' + (e?.message||e); }
+      } catch (err) {
+        $('#msg').textContent = 'Ошибка: ' + (err?.message || err);
+      }
     };
-    $('#verifyEmail').onclick = async () => {
+
+    $('#verifyEmail').onclick = async (e) => {
+      e.preventDefault();
       const email = $('#email').value.trim();
-      const code = $('#emailOtp').value.trim();
-      if (!code) return $('#msg').textContent = 'Введите код';
+      const code  = $('#emailOtp').value.trim();
+      if (!code) { $('#msg').textContent = 'Введите код'; return; }
       $('#msg').textContent = 'Проверяем...';
       try {
         const ok = await Auth.verifyEmailOtp(email, code);
         if (ok) await Auth.redirectAfterLogin();
         else $('#msg').textContent = 'Не удалось войти';
-      } catch(e){ $('#msg').textContent = 'Ошибка: ' + (e?.message||e); }
+      } catch (err) {
+        $('#msg').textContent = 'Ошибка: ' + (err?.message || err);
+      }
     };
   </script>
 </body>
