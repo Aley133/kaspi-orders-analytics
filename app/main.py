@@ -14,13 +14,12 @@ from fastapi import FastAPI, Query, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from cachetools import TTLCache
-
 from app.deps.auth import attach_kaspi_token_middleware
 from app.api.bridge_v2 import router as bridge_router
 from app.api.profit_fifo import get_profit_fifo_router
 from app.api.authz import router as auth_router
 from app.api.products import get_products_router
-
+from pydantic import BaseModel
 # ВАЖНО: импортируем модуль настроек БЕЗ try/except, чтобы не проглотить ошибку.
 from app.api import settings as settings_api
 
