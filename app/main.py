@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from cachetools import TTLCache
 from httpx import HTTPStatusError, RequestError
 from deps.auth import get_current_kaspi_token
+from deps.auth import attach_kaspi_token_middleware
 
 # -------------------- Роутеры доменных модулей --------------------
 from app.api.bridge_v2 import router as bridge_router
@@ -192,6 +193,7 @@ app.include_router(get_profit_fifo_router(), prefix="/profit")
 app.include_router(get_debug_router())
 app.include_router(bridge_router, prefix="/profit")
 app.include_router(auth_router)
+app.middleware("http")(attach_kaspi_token_middleware)
 
 # -------------------- Utils --------------------
 def tzinfo_of(name: str) -> pytz.BaseTzInfo:
