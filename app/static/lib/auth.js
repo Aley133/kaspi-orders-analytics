@@ -70,6 +70,20 @@ window.Auth = (function(){
     }
   }
 
+  // lib/auth.js
+export async function postLoginRedirect() {
+  const meta = await fetch('/auth/meta').then(r=>r.json());
+  const { createClient } = await import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js/+esm');
+  const supa = createClient(meta.SUPABASE_URL, meta.SUPABASE_ANON_KEY);
+  const { data: { session } } = await supa.auth.getSession();
+  const JWT = session?.access_token;
+  if (!JWT) { location.href = '/ui/login.html'; return; }
+  const r = await fetch('/settings/me', { headers: { Authorization: 'Bearer '+JWT }});
+  if (r.status === 404) location.href = '/ui/settings.html';
+  else location.href = '/ui/';
+}
+
+
   // Если юзер уже залогинен и есть настройки — не показывать логин
   async function bounceIfAuthed() {
     const s = await getSession();
