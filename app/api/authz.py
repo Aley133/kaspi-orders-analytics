@@ -12,3 +12,10 @@ async def whoami(user = Depends(get_current_user)):
         "email": user["email"],
         "role": user.get("role"),
     }
+
+try:
+    from app.api.settings import router as settings_router
+    router.include_router(settings_router, prefix="/settings", tags=["settings"])
+except Exception:
+    # чтобы не падать, если файл ещё не завезли
+    pass
