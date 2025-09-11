@@ -1,6 +1,6 @@
-# app/main.py
-from __future__ import annotations
+# app/main.py (фрагмент — импортов и подключения роутеров)
 
+from __future__ import annotations
 import os
 from datetime import datetime, timedelta, time, date
 from pathlib import Path
@@ -9,14 +9,11 @@ from typing import Optional, Dict, List, Iterable, Tuple, Callable
 import asyncio
 import httpx
 import pytz
-from cachetools import TTLCache
 from dotenv import load_dotenv
 from fastapi import FastAPI, Query, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse, PlainTextResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from httpx import HTTPStatusError, RequestError
-from pydantic import BaseModel
+from cachetools import TTLCache
 
 from app.deps.auth import attach_kaspi_token_middleware
 from app.api.bridge_v2 import router as bridge_router
@@ -24,49 +21,17 @@ from app.api.profit_fifo import get_profit_fifo_router
 from app.api.authz import router as auth_router
 from app.api.products import get_products_router
 
-# settings router — бережный импорт (если файла нет, просто пропускаем)
-try:
-    from app.api.settings import router as settings_router
-except Exception as e:
-    settings_router = None
-    print("⚠️  settings router not loaded:", e)
+# ВАЖНО: импортируем модуль настроек БЕЗ try/except, чтобы не проглотить ошибку.
+from app.api import settings as settings_api
 
-# debug endpoints
-from app.debug_sku import (
-    get_debug_router,
-    _index_included,
-    _extract_entry,
-    title_candidates as _title_candidates_from_attrs,
-    _rel_id,
-    sku_candidates as _sku_candidates_from_attrs,
-)
-
-# ---------- KaspiClient (tenant-aware приоритетно) ----------
-TenantKaspiClient = None
+# tenant-aware Kaspi client
 try:
     from app.deps.kaspi_client_tenant import KaspiClient as TenantKaspiClient
 except Exception:
-    try:
-        from app.deps.kaspi_client import KaspiClient as TenantKaspiClient
-    except Exception:
-        TenantKaspiClient = None
-
-StockKaspiClient = None
-if TenantKaspiClient is None:
-    try:
-        from app.kaspi_client import KaspiClient as StockKaspiClient
-    except Exception:
-        try:
-            from .kaspi_client import KaspiClient as StockKaspiClient
-        except Exception:
-            try:
-                from kaspi_client import KaspiClient as StockKaspiClient
-            except Exception:
-                StockKaspiClient = None
+    from app.deps.kaspi_client import KaspiClient as TenantKaspiClient
 
 load_dotenv()
 
-# -------------------- ENV --------------------
 KASPI_TOKEN = os.getenv("KASPI_TOKEN", "").strip()
 DEFAULT_TZ = os.getenv("TZ", "Asia/Almaty")
 KASPI_BASE_URL = os.getenv("KASPI_BASE_URL", "https://kaspi.kz/shop/api/v2").rstrip("/")
@@ -74,11 +39,9 @@ CURRENCY = os.getenv("CURRENCY", "KZT")
 
 AMOUNT_FIELDS = [s.strip() for s in os.getenv("AMOUNT_FIELDS", "totalPrice").split(",") if s.strip()]
 AMOUNT_DIVISOR = float(os.getenv("AMOUNT_DIVISOR", "1") or 1)
-
 DATE_FIELD_DEFAULT = os.getenv("DATE_FIELD_DEFAULT", "creationDate")
 DATE_FIELD_OPTIONS = [s.strip() for s in os.getenv(
-    "DATE_FIELD_OPTIONS",
-    "creationDate,plannedShipmentDate,shipmentDate,deliveryDate"
+    "DATE_FIELD_OPTIONS", "creationDate,plannedShipmentDate,shipmentDate,deliveryDate"
 ).split(",") if s.strip()]
 CITY_KEYS = [s.strip() for s in os.getenv("CITY_KEYS", "city,deliveryAddress.city").split(",") if s.strip()]
 
@@ -88,39 +51,12 @@ CACHE_TTL = int(os.getenv("CACHE_TTL", "300") or 300)
 SHOP_NAME = os.getenv("SHOP_NAME", "LeoXpress")
 PARTNER_ID = os.getenv("PARTNER_ID", "")
 
-# --- Business day defaults ---
-BUSINESS_DAY_START = os.getenv("BUSINESS_DAY_START", "20:00")  # HH:MM
+# БЫЛА ОПЕЧАТКА («UNTИЛ» русскими буквами). Должно быть именно так:
+STORE_ACCEPT_UNTIL = os.getenv("STORE_ACCEPT_UNTIL", "17:00")
+
+BUSINESS_DAY_START = os.getenv("BUSINESS_DAY_START", "20:00")
 USE_BUSINESS_DAY = os.getenv("USE_BUSINESS_DAY", "true").lower() in ("1", "true", "yes", "on")
 
-# ⚠️ фикс опечатки: только латинские буквы в названии переменной
-STORE_ACCEPT_UNTIL = os.getenv("STORE_ACCEPT_UNTIL", "17:00")  # HH:MM
-
-ENRICH_CONCURRENCY = int(os.getenv("ENRICH_CONCURRENCY", "8") or 8)
-DEFAULT_INCLUDE_STATES: set[str] = {"KASPI_DELIVERY", "ARCHIVE", "ARCHIVED"}
-
-# -------------------- утилиты --------------------
-def _bd_delta(hhmm: str) -> timedelta:
-    try:
-        hh, mm = hhmm.split(":")
-        return timedelta(hours=int(hh), minutes=int(mm))
-    except Exception:
-        raise HTTPException(status_code=400, detail=f"Неверный BUSINESS_DAY_START: {hhmm}")
-
-def _parse_hhmm_to_time(hhmm: str) -> time:
-    try:
-        hh, mm = map(int, hhmm.split(":"))
-        return time(hh, mm, 0)
-    except Exception:
-        raise HTTPException(status_code=400, detail=f"Bad HH:MM time: {hhmm}")
-
-def _days_between(a: datetime, b: datetime) -> int:
-    return max(1, (b.date() - a.date()).days + 1)
-
-# runtime flags
-_EFF_USE_BD: bool = USE_BUSINESS_DAY
-_EFF_BDS: str = BUSINESS_DAY_START
-
-# -------------------- FastAPI --------------------
 app = FastAPI(title="Kaspi Orders Analytics")
 
 origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
@@ -130,38 +66,31 @@ if origins:
         allow_origins=origins,
         allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
         allow_headers=["*"],
-        allow_credentials=False,
     )
 
-# middleware: прокидываем токен/tenant
+# кладём tenant/token в request.state
 app.middleware("http")(attach_kaspi_token_middleware)
 
-# Инициализация Kaspi-клиента (tenant-aware приоритетнее)
-if TenantKaspiClient is not None:
-    client = TenantKaspiClient(base_url=KASPI_BASE_URL)
-else:
-    client = (StockKaspiClient(token=KASPI_TOKEN, base_url=KASPI_BASE_URL)  # type: ignore
-              if (StockKaspiClient is not None and KASPI_TOKEN) else None)
+# tenant-aware клиент
+client = TenantKaspiClient(base_url=KASPI_BASE_URL)
 
-# Кэш
 orders_cache = TTLCache(maxsize=512, ttl=CACHE_TTL)
 
-# UI
+# /ui статика
 _ui_candidates = ("app/static", "app/ui", "static", "ui")
 _ui_dir = next((p for p in _ui_candidates if Path(p).is_dir()), None)
 if _ui_dir:
     app.mount("/ui", StaticFiles(directory=_ui_dir, html=True), name="ui")
-else:
-    print("⚠️  UI directory not found, skipping /ui mount")
 
-# -------------------- Роутеры --------------------
+# <-- РОУТЕРЫ -->
 app.include_router(get_products_router(client), prefix="/products")
 app.include_router(get_profit_fifo_router(), prefix="/profit")
-app.include_router(get_debug_router())
 app.include_router(bridge_router, prefix="/profit")
 app.include_router(auth_router)
-if settings_router is not None:
-    app.include_router(settings_router, prefix="/settings", tags=["settings"])
+
+# И ВАЖНО: явное подключение роутера настроек
+app.include_router(settings_api.router, prefix="/settings", tags=["settings"])
+
 
 # -------------------- helpers --------------------
 def tzinfo_of(name: str) -> pytz.BaseTzInfo:
