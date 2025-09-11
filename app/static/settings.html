@@ -81,5 +81,38 @@
       }
     };
   </script>
+  <script>
+(async function () {
+  // получить JWT как раньше (через supabase.auth.getSession)
+  const meta = await fetch('/auth/meta').then(r=>r.json());
+  const { createClient } = await import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js/+esm');
+  const supa = createClient(meta.SUPABASE_URL, meta.SUPABASE_ANON_KEY);
+  const { data: { session } } = await supa.auth.getSession();
+  const JWT = session?.access_token;
+  if (!JWT) location.href = '/ui/login.html';
+
+  async function save() {
+    const payload = {
+      shop_name: document.querySelector('#shop_name').value || 'LeoXpress',
+      partner_id: document.querySelector('#partner_id').value || '',
+      kaspi_token: document.querySelector('#kaspi_token').value.trim(),
+      amount_fields: 'totalPrice',
+      amount_divisor: 1,
+      date_field_default: 'creationDate',
+      business_day_start: '20:00',
+      use_business_day: true,
+      store_accept_until: '17:00',
+      city_keys: 'city,deliveryAddress.city',
+      allowed_origins: ''
+    };
+    const hdr = { 'Content-Type': 'application/json', Authorization: 'Bearer ' + JWT };
+    const r = await fetch('/settings/save', { method:'POST', headers: hdr, body: JSON.stringify(payload) });
+    if (r.ok) location.href = '/ui/';
+    else alert('Сохранение не удалось');
+  }
+  document.querySelector('#saveBtn').addEventListener('click', save);
+})();
+</script>
+
 </body>
 </html>
