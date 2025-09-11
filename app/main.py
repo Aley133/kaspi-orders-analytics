@@ -20,15 +20,27 @@ from pathlib import Path
 from pydantic import BaseModel
 from cachetools import TTLCache
 from httpx import HTTPStatusError, RequestError
-from deps.auth import get_current_kaspi_token
-from deps.auth import attach_kaspi_token_middleware
 
-# -------------------- Роутеры доменных модулей --------------------
+# ---------- Корректные импорты из app.deps ----------
+# (в старом деплое падало из-за 'from deps...')
+try:
+    from app.deps.auth import get_current_kaspi_token, attach_kaspi_token_middleware
+except Exception as _e:
+    # Если структура иная, можно добавить фолбэк, но рекомендуем держать именно app.deps.*
+    raise
+
+# ---------- Роутеры доменных модулей ----------
 from app.api.bridge_v2 import router as bridge_router
 from app.api.profit_fifo import get_profit_fifo_router
 from app.api.authz import router as auth_router
 
-# Роутер и ХЕЛПЕРЫ из debug_sku.py (для корректного извлечения позиций)
+# (опционально, если есть отдельный settings.py с /settings/*)
+try:
+    from app.api.settings import router as settings_router
+except Exception:
+    settings_router = None
+
+# ---------- Хелперы из debug_sku ----------
 from app.debug_sku import (
     get_debug_router,
     _index_included,
@@ -38,52 +50,31 @@ from app.debug_sku import (
     sku_candidates as _sku_candidates_from_attrs,
 )
 
-# -------------------- Попытка импортировать КОРРЕКТНЫЙ kaspi-клиент из deps --------------------
-# (Если недоступен — используем совместимый фолбэк)
-MT_AVAILABLE = False
+# ---------- KaspiClient: сначала пробуем многопользовательский из app/deps ----------
+TenantKaspiClient = None
 try:
-    # ожидаемый правильный клиент в deps
-    from app.deps.kaspi_client import (
-        KaspiClientProxy as _KaspiClientProxy,
-        set_token_resolver as _set_token_resolver,
-        set_current_tenant as _set_current_tenant,
-        token_for_current_tenant as _token_for_current_tenant,
-    )
-    from app.deps.tenant import resolve_kaspi_token
-    from app.deps.auth import try_extract_tenant_from_authorization
-    MT_AVAILABLE = True
+    # Вариант 1: ты переименовал его для ясности
+    from app.deps.kaspi_client_tenant import KaspiClient as TenantKaspiClient  # наш tenant-aware клиент
 except Exception:
-    _KaspiClientProxy = None
-    def _set_token_resolver(_): ...
-    def _set_current_tenant(_): ...
-    def _token_for_current_tenant():
-        return os.getenv("KASPI_TOKEN", "").strip()
-    def resolve_kaspi_token(_tid: Optional[str]) -> Optional[str]:
-        return None
-    def try_extract_tenant_from_authorization(_h: Optional[str]) -> Optional[str]:
-        return None
-
-# Фолбэк-импорт старого клиента (нужен только если нет прокси)
-if not MT_AVAILABLE:
     try:
-        from app.kaspi_client import KaspiClient  # type: ignore
+        # Вариант 2: остался как app/deps/kaspi_client.py
+        from app.deps.kaspi_client import KaspiClient as TenantKaspiClient      # наш tenant-aware клиент
+    except Exception:
+        TenantKaspiClient = None
+
+# Фолбэк на стоковый клиент (НЕ трогаем файл)
+StockKaspiClient = None
+if TenantKaspiClient is None:
+    try:
+        from app.kaspi_client import KaspiClient as StockKaspiClient
     except Exception:
         try:
-            from .kaspi_client import KaspiClient  # type: ignore
+            from .kaspi_client import KaspiClient as StockKaspiClient
         except Exception:
-            from kaspi_client import KaspiClient  # type: ignore
-
-# Роутер products
-try:
-    from app.api.products import get_products_router
-except Exception as _e1:
-    try:
-        from .api.products import get_products_router
-    except Exception as _e2:
-        import traceback
-        print("Failed to import app.api.products:", repr(_e1), "| secondary:", repr(_e2))
-        traceback.print_exc()
-        raise
+            try:
+                from kaspi_client import KaspiClient as StockKaspiClient
+            except Exception:
+                StockKaspiClient = None
 
 load_dotenv()
 
@@ -122,7 +113,7 @@ ENRICH_CONCURRENCY = int(os.getenv("ENRICH_CONCURRENCY", "8") or 8)
 # По умолчанию включаем доставленные + архивные
 DEFAULT_INCLUDE_STATES: set[str] = {"KASPI_DELIVERY", "ARCHIVE", "ARCHIVED"}
 
-# -------------------- микс утилит --------------------
+# -------------------- утилиты --------------------
 def _bd_delta(hhmm: str) -> timedelta:
     try:
         hh, mm = hhmm.split(":")
@@ -156,25 +147,17 @@ if origins:
         allow_credentials=False,
     )
 
-# ---- Tenant middleware: выставляем tenant_id для прокси-клиента из deps ----
-@app.middleware("http")
-async def _tenant_ctx_mw(request: Request, call_next):
-    try:
-        tid = try_extract_tenant_from_authorization(request.headers.get("Authorization"))
-        if tid:
-            _set_current_tenant(tid)
-    except Exception:
-        # мягко игнорируем, чтобы публичные маршруты работали
-        pass
-    return await call_next(request)
+# middleware, который кладёт токен/тенант в контекст (для per-tenant работы)
+app.middleware("http")(attach_kaspi_token_middleware)
 
-# Клиент к Kaspi API: используем прокси из deps, иначе фолбэк на глобальный токен
-if MT_AVAILABLE and _KaspiClientProxy is not None:
-    _set_token_resolver(resolve_kaspi_token)
-    client = _KaspiClientProxy(base_url=KASPI_BASE_URL)
+# Инициализация kaspi-клиента:
+# - если есть наш tenant-aware клиент, используем его (игнорирует глобальный токен)
+# - иначе — стоковый, но только если задан глобальный KASPI_TOKEN
+if TenantKaspiClient is not None:
+    client = TenantKaspiClient(base_url=KASPI_BASE_URL)
 else:
-    client = (KaspiClient(token=KASPI_TOKEN, base_url=KASPI_BASE_URL)  # type: ignore
-              if KASPI_TOKEN else None)
+    client = (StockKaspiClient(token=KASPI_TOKEN, base_url=KASPI_BASE_URL)  # type: ignore
+              if (StockKaspiClient is not None and KASPI_TOKEN) else None)
 
 # Кэш ответов (включая entries по заказам)
 orders_cache = TTLCache(maxsize=512, ttl=CACHE_TTL)
@@ -193,9 +176,10 @@ app.include_router(get_profit_fifo_router(), prefix="/profit")
 app.include_router(get_debug_router())
 app.include_router(bridge_router, prefix="/profit")
 app.include_router(auth_router)
-app.middleware("http")(attach_kaspi_token_middleware)
+if settings_router:
+    app.include_router(settings_router, prefix="/settings", tags=["settings"])
 
-# -------------------- Utils --------------------
+# -------------------- helpers --------------------
 def tzinfo_of(name: str) -> pytz.BaseTzInfo:
     try:
         return pytz.timezone(name)
@@ -239,7 +223,6 @@ def parse_states_csv(s: Optional[str]) -> Optional[set[str]]:
         return None
     return {norm_state(x) for x in re.split(r"[\s,;]+", s) if x.strip()}
 
-# Подсказки для извлечения города
 _CITY_KEY_HINTS = {"city", "cityname", "town", "locality", "settlement"}
 
 def _normalize_city(s: str) -> str:
@@ -322,7 +305,7 @@ HTTPX_LIMITS = httpx.Limits(max_connections=20, max_keepalive_connections=10)
 def _kaspi_headers() -> Dict[str, str]:
     tok = get_current_kaspi_token()
     if not tok:
-        # теперь это именно про отсутствие персонального токена
+        # отсутствие персонального токена для текущего аккаунта
         raise HTTPException(status_code=401, detail="Kaspi token is not set for this tenant")
     return {
         "X-Auth-Token": tok,
@@ -395,12 +378,7 @@ def _smart_operational_day(attrs: dict, state: str, tzinfo: pytz.BaseTzInfo,
     return datetime.now(tzinfo).date().isoformat(), "fallback_now"
 
 # -------------------- Вытягивание позиций (ВСЕ SKU) --------------------
-orders_cache = orders_cache  # just to keep static analyzers calm
-
 async def _all_items_details(order_id: str, return_candidates: bool = True, timeout_scale: float = 1.0) -> List[Dict[str, object]]:
-    """
-    Список позиций заказа. Кэшируем на TTLCache. Масштабируем таймауты под объём.
-    """
     cache_key = f"entries:{order_id}"
     cached = orders_cache.get(cache_key)
     if cached is not None:
@@ -608,10 +586,6 @@ def _calc_timeout_scale(days_span: int, targets: int) -> float:
     return min(5.0, scale)
 
 def _calc_enrich_params(total_targets: int) -> Tuple[int, float]:
-    """
-    Возвращает (concurrency, per_item_sleep)
-    бережно троттлим при больших объёмах, чтобы Kaspi не душил.
-    """
     if total_targets >= 2000:
         return max(2, ENRICH_CONCURRENCY // 3), 0.12
     if total_targets >= 1000:
@@ -640,7 +614,7 @@ async def _collect_range(
     total_amount = 0.0
 
     if client is None:
-        raise HTTPException(status_code=500, detail="KASPI_TOKEN is not set")
+        raise HTTPException(status_code=500, detail="Kaspi client is not configured")
 
     states_inc = _expand_with_archive(states_inc)
 
@@ -853,7 +827,7 @@ async def _list_ids_core(
 
     days, cities_dict, tot, tot_amt, st_counts, out = await _collect_range(
         start_dt, end_dt, tz, date_field, inc, exc,
-        assign_mode=assign_mode, store_accept_until=(store_accept_until or STORE_ACCEPT_UNTIL),
+        assign_mode=assign_mode, store_accept_until=(store_accept_until or STORE_ACCEPT_UNTИЛ),
         progress=progress_cb
     )
 
@@ -936,7 +910,7 @@ async def _list_ids_core(
         "currency": CURRENCY,
     }
 
-# -------------------- Синхронная версия /orders/ids --------------------
+# -------------------- /orders/ids --------------------
 @app.get("/orders/ids")
 async def list_ids(
     start: str = Query(...),
@@ -988,7 +962,7 @@ async def list_ids_csv(
     csv = "\n".join([str(it["number"]) for it in data["items"]])
     return csv
 
-# -------------------- Асинхронная версия с прогрессом --------------------
+# -------------------- Async с прогрессом --------------------
 @app.post("/orders/ids.async")
 async def list_ids_async(
     start: str = Query(...),
