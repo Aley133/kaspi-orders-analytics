@@ -34,105 +34,68 @@
     <span id="msg" class="muted"></span>
   </div>
 
-  <script src="./lib/auth.js" defer></script>
+ <script src="./lib/auth.js" defer></script>
 <script defer>
 document.addEventListener('DOMContentLoaded', async () => {
   const $ = s => document.querySelector(s);
-  const msg = $('#msg'); // <p id="msg">
-  const btnSave  = $('#saveBtn');   // <button id="saveBtn">
-  const btnCheck = $('#checkBtn');  // <button id="checkBtn">
-  if (!btnSave || !btnCheck) { console.error('Buttons not found'); return; }
+  const form   = $('#form');
+  const msg    = $('#msg');
+  const btnSave = $('#save');
 
-  const jwt = await Auth.getToken();
-  if (!jwt) { location.href = '/ui/login.html'; return; }
+  // Требуем авторизацию
+  const session = await Auth.getSession();
+  if (!session) { location.href = '/ui/login.html'; return; }
 
-  // Пробуем загрузить текущие настройки (404 — это нормально до первой записи)
+  // Подтягиваем текущие настройки (404 — ок до первой записи)
   try {
-    const r = await fetch('/settings/me', { headers: { Authorization: 'Bearer ' + jwt } });
+    const r = await Auth.authedFetch('/settings/me');
     if (r.ok) {
       const data = await r.json();
-      // TODO: проставь значения в поля формы из data.value
-    } else if (r.status !== 404) {
-      msg.textContent = 'Ошибка загрузки: ' + r.status;
+      for (const [k, v] of Object.entries(data)) {
+        const el = form.querySelector(`[name="${k}"]`);
+        if (!el) continue;
+        if (el.type === 'checkbox') el.checked = !!v;
+        else el.value = v ?? '';
+      }
     }
-  } catch (e) { msg.textContent = 'Сеть: ' + e; }
+  } catch (e) { console.warn(e); }
+
+  function readForm() {
+    const out = {};
+    form.querySelectorAll('input').forEach(el => {
+      out[el.name] = el.type === 'checkbox'
+        ? el.checked
+        : (el.type === 'number' ? Number(el.value) : el.value.trim());
+    });
+    return out;
+  }
 
   btnSave.addEventListener('click', async () => {
-    const payload = {
-      shop_name: $('#shopName').value || 'LeoXpress',
-      partner_id: $('#partnerId').value || '',
-      kaspi_token: $('#kaspiToken').value, // ОБЯЗАТЕЛЬНО реальный токен
-      amount_fields: 'totalPrice',
-      amount_divisor: 1,
-      date_field_default: 'creationDate',
-      business_day_start: '20:00',
-      use_business_day: true,
-      store_accept_until: '17:00',
-      city_keys: 'city,deliveryAddress.city',
-      allowed_origins: ''
-    };
     msg.textContent = 'Сохраняю...';
-    const r = await fetch('/settings/save', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + jwt },
-      body: JSON.stringify(payload)
-    });
-    msg.textContent = r.ok ? 'Сохранено' : 'Ошибка сохранения: ' + r.status;
-  });
+    try {
+      const payload = readForm();
+      if (!payload.kaspi_token) { msg.textContent = 'Укажите KASPI_TOKEN'; return; }
 
-  btnCheck.addEventListener('click', async () => {
-    msg.textContent = 'Проверка...';
-    const r = await fetch('/settings/check', { headers: { Authorization: 'Bearer ' + jwt } });
-    msg.textContent = r.ok ? 'Kaspi: OK' : 'Kaspi: ' + r.status;
+      const r = await Auth.authedFetch('/settings/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!r.ok) { msg.textContent = 'Ошибка сохранения: ' + (await r.text()); return; }
+
+      const check = await Auth.authedFetch('/settings/check');
+      if (check.ok) {
+        msg.textContent = 'Сохранено. Перенаправляю...';
+        setTimeout(() => location.href = '/ui/', 600);
+      } else {
+        msg.textContent = 'Сохранено, но проверка токена не прошла: ' + check.status;
+      }
+    } catch (e) {
+      msg.textContent = 'Ошибка: ' + (e?.message || e);
+    }
   });
 });
 </script>
-  <script>
-    const $ = s => document.querySelector(s);
-    (async function init(){
-      await Auth.getSession() || (window.location.href='/ui/login.html');
-      try{
-        const r = await Auth.authedFetch('/settings/me');
-        if (r.ok){
-          const data = await r.json();
-          for (const [k,v] of Object.entries(data)){
-            const el = document.querySelector(`[name="${k}"]`);
-            if (!el) continue;
-            if (el.type === 'checkbox') el.checked = !!v;
-            else el.value = v ?? '';
-          }
-        }
-      }catch(e){ console.warn(e); }
-    })();
-
-    function readForm(){
-      const o={};
-      for (const el of document.querySelectorAll('#form input')){
-        o[el.name] = (el.type==='checkbox')?el.checked:el.value.trim();
-      }
-      return o;
-    }
-
-    $('#save').onclick = async () => {
-      $('#msg').textContent = 'Сохраняю...';
-      try{
-        const r = await Auth.authedFetch('/settings/save', {
-          method:'POST',
-          headers:{'Content-Type':'application/json'},
-          body:JSON.stringify(readForm())
-        });
-        if (!r.ok) throw new Error(await r.text());
-
-        // быстрый self-check и переход на главную
-        const check = await Auth.authedFetch('/settings/check');
-        const ok = check.ok ? (await check.json()).ok : false;
-        $('#msg').textContent = ok ? 'OK — перенаправляю...' : 'Сохранено, но токен не прошёл проверку';
-        if (ok) setTimeout(()=> window.location.href = '/ui/', 600);
-      }catch(e){
-        $('#msg').textContent = 'Ошибка: ' + (e?.message || e);
-      }
-    };
-  </script>
 
 </body>
 </html>
