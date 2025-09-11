@@ -5,43 +5,48 @@ import json
 from typing import Optional
 from app.db import get_conn
 
-TENANTS_DDL = """
-create table if not exists public.tenants (
-    id uuid primary key,
-    email text,
-    phone text,
-    created_at timestamptz default now(),
-    is_active boolean default true
-);
-"""
 
-SETTINGS_DDL = """
-create table if not exists public.tenant_settings (
-    tenant_id uuid primary key
-        references public.tenants(id) on delete cascade,
-    value jsonb not null,
-    updated_at timestamptz default now()
-);
-"""
-
-def _ensure_tables() -> None:
+def ensure_tenant_tables() -> None:
+    """
+    Создаём минимально необходимые таблицы, если их ещё нет.
+    Никаких доп. колонок (email/phone) не требуем — только id.
+    """
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute(TENANTS_DDL)
-        cur.execute(SETTINGS_DDL)
+        cur.execute("""
+            create table if not exists public.tenants (
+                id uuid primary key
+            );
+        """)
+        cur.execute("""
+            create table if not exists public.tenant_settings (
+                tenant_id uuid primary key
+                    references public.tenants(id) on delete cascade,
+                value jsonb not null,
+                updated_at timestamptz default now()
+            );
+        """)
         conn.commit()
 
-def ensure_tenant_exists(tenant_id: str, email: Optional[str] = None) -> None:
-    _ensure_tables()
+
+def ensure_tenant_exists(tenant_id: str) -> None:
+    """
+    Гарантируем, что запись в tenants существует.
+    Вставляем ТОЛЬКО id — без email/phone, чтобы не падало на чужой схеме.
+    """
+    ensure_tenant_tables()
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
-            "insert into public.tenants (id, email, is_active) "
-            "values (%s, %s, true) on conflict (id) do nothing",
-            (tenant_id, email),
+            "insert into public.tenants (id) values (%s) on conflict (id) do nothing",
+            (tenant_id,),
         )
         conn.commit()
 
+
 def get_settings_row(tenant_id: str) -> Optional[dict]:
-    _ensure_tables()
+    """
+    Возвращает JSON-настройки или None.
+    """
+    ensure_tenant_tables()
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
             "select value from public.tenant_settings where tenant_id=%s",
@@ -50,28 +55,40 @@ def get_settings_row(tenant_id: str) -> Optional[dict]:
         row = cur.fetchone()
         return row[0] if row else None
 
+
+def get_settings(tenant_id: str) -> Optional[dict]:
+    # alias для совместимости с существующими импортами
+    return get_settings_row(tenant_id)
+
+
 def upsert_settings(tenant_id: str, value: dict) -> None:
-    _ensure_tables()
+    """
+    Создаёт/обновляет JSON-настройки тенанта.
+    """
     ensure_tenant_exists(tenant_id)
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
             """
-            insert into public.tenant_settings(tenant_id, value)
+            insert into public.tenant_settings (tenant_id, value)
             values (%s, %s::jsonb)
-            on conflict (tenant_id) do update set
-              value = excluded.value,
-              updated_at = now()
+            on conflict (tenant_id)
+            do update set value = excluded.value,
+                          updated_at = now()
             """,
             (tenant_id, json.dumps(value)),
         )
         conn.commit()
 
+
 def resolve_kaspi_token(tenant_id: Optional[str]) -> Optional[str]:
+    """
+    Достаём kaspi_token из сохранённых настроек.
+    """
     if not tenant_id:
         return None
-    row = get_settings_row(tenant_id)
-    if isinstance(row, dict):
-        tok = row.get("kaspi_token") or row.get("KASPI_TOKEN")
+    data = get_settings_row(tenant_id)
+    if isinstance(data, dict):
+        tok = data.get("kaspi_token") or data.get("KASPI_TOKEN")
         if isinstance(tok, str) and tok.strip():
             return tok.strip()
     return None
