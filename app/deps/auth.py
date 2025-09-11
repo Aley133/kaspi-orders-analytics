@@ -4,7 +4,7 @@ from typing import Optional, Callable
 from fastapi import Request, HTTPException
 import contextvars
 
-from deps.tenant import resolve_kaspi_token
+from .tenant import resolve_kaspi_token
 
 kaspi_token_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("kaspi_token", default="")
 
