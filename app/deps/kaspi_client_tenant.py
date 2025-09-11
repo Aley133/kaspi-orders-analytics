@@ -1,7 +1,7 @@
 # deps/app/kaspi_client.py
 import os, asyncio, httpx
 from typing import Dict, Iterable
-from deps.auth import get_current_kaspi_token
+from .auth import get_current_kaspi_token
 
 KASPI_BASE_URL = (os.getenv("KASPI_BASE_URL") or "https://kaspi.kz/shop/api/v2").rstrip("/")
 
