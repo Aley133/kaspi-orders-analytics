@@ -20,6 +20,7 @@ from pathlib import Path
 from pydantic import BaseModel
 from cachetools import TTLCache
 from httpx import HTTPStatusError, RequestError
+from deps.auth import get_current_kaspi_token
 
 # -------------------- Роутеры доменных модулей --------------------
 from app.api.bridge_v2 import router as bridge_router
@@ -317,9 +318,9 @@ BASE_TIMEOUT = httpx.Timeout(connect=10.0, read=80.0, write=20.0, pool=60.0)
 HTTPX_LIMITS = httpx.Limits(max_connections=20, max_keepalive_connections=10)
 
 def _kaspi_headers() -> Dict[str, str]:
-    # Мультиарендный токен (через deps-прокси); фолбэк — глобальный KASPI_TOKEN
-    tok = _token_for_current_tenant()
+    tok = get_current_kaspi_token()
     if not tok:
+        # теперь это именно про отсутствие персонального токена
         raise HTTPException(status_code=401, detail="Kaspi token is not set for this tenant")
     return {
         "X-Auth-Token": tok,
