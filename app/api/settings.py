@@ -49,9 +49,13 @@ def me(req: Request):
 
 @router.post("/save")
 def save(payload: SettingsIn, req: Request):
-    tenant_id = get_current_tenant_id(req)
-    upsert_settings(tenant_id, _normalize_payload(payload))
-    return {"ok": True}
+    try:
+        tenant_id = get_current_tenant_id(req)
+        upsert_settings(tenant_id, payload.model_dump())
+        return {"ok": True}
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"save failed: {e}")
 
 @router.get("/check")
 def check(req: Request):
