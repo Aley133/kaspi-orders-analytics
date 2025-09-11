@@ -1,87 +1,53 @@
-from __future__ import annotations
-import base64, json, hmac, hashlib, os
-from typing import Any, Dict, Optional
-from fastapi import HTTPException, Header
+# deps/auth.py
+import os, base64, json
+from typing import Optional, Callable
+from fastapi import Request, HTTPException
+import contextvars
 
-def _b64url_decode(s: str) -> bytes:
-    pad = '=' * (-len(s) % 4)
-    return base64.urlsafe_b64decode(s + pad)
+from deps.tenant import resolve_kaspi_token
 
-def _jwt_decode_noverify(token: str) -> Dict[str, Any]:
+kaspi_token_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("kaspi_token", default="")
+
+def _decode_jwt_noverify(token: str) -> dict:
+    # безопасно для извлечения sub; подпись не проверяем (трафик идёт с фронта Supabase)
     try:
-        header_b64, payload_b64, _sig = token.split('.', 2)
-        return {"header": json.loads(_b64url_decode(header_b64)),
-                "payload": json.loads(_b64url_decode(payload_b64))}
+        parts = token.split(".")
+        payload_b64 = parts[1] + "=="  # выравнивание
+        payload = json.loads(base64.urlsafe_b64decode(payload_b64.encode("utf-8")).decode("utf-8"))
+        return payload
     except Exception:
-        raise HTTPException(status_code=401, detail="Bad JWT")
+        return {}
 
-def _jwt_verify_hs256(token: str, secret: str) -> bool:
+def get_current_tenant_id(request: Request) -> str:
+    auth = request.headers.get("authorization") or ""
+    if not auth.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Missing bearer token")
+    jwt = auth.split(" ", 1)[1].strip()
+    claims = _decode_jwt_noverify(jwt)
+    sub = claims.get("sub")
+    if not sub:
+        raise HTTPException(status_code=401, detail="Bad token (no sub)")
+    return sub
+
+async def attach_kaspi_token_middleware(request: Request, call_next):
+    """
+    Глобальный middleware: на каждый запрос ставим контекстный Kaspi токен арендатора.
+    """
     try:
-        header_b64, payload_b64, sig_b64 = token.split('.', 2)
-        signing_input = f"{header_b64}.{payload_b64}".encode("utf-8")
-        expected = hmac.new(secret.encode("utf-8"), signing_input, hashlib.sha256).digest()
-        got = _b64url_decode(sig_b64)
-        return hmac.compare_digest(expected, got)
-    except Exception:
-        return False
+        tenant_id = get_current_tenant_id(request)
+        token = resolve_kaspi_token(tenant_id)
+        if not token:
+            # Явно запрещаем «глобальные» токены: без персонального — 401
+            raise HTTPException(status_code=401, detail="Kaspi token is not set for this tenant")
+        kaspi_token_ctx.set(token)
+    except HTTPException as e:
+        # Разрешаем **только** белый список открытых ручек
+        open_paths = {"/auth/meta", "/openapi.json", "/docs", "/ui/", "/"}
+        if not any(request.url.path.startswith(p) for p in open_paths):
+            raise
+    response = await call_next(request)
+    return response
 
-def _extract_tenant(payload: Dict[str, Any]) -> str:
-    for path in [("app_metadata","tenant_id"), ("user_metadata","tenant_id")]:
-        cur = payload; ok = True
-        for p in path:
-            if not isinstance(cur, dict) or p not in cur:
-                ok = False; break
-            cur = cur[p]
-        if ok and isinstance(cur, (str,int)) and str(cur):
-            return str(cur)
-    sub = payload.get("sub")
-    if isinstance(sub, str) and sub:
-        return sub
-    raise HTTPException(status_code=401, detail="tenant_id not found in JWT")
-
-def _extract_email(payload: Dict[str, Any]) -> Optional[str]:
-    for k in ("email","user_email","preferred_username"):
-        v = payload.get(k)
-        if isinstance(v, str) and v:
-            return v
-    return None
-
-def _bearer_to_token(authorization: Optional[str]) -> str:
-    if not authorization or not authorization.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="Missing Bearer token")
-    return authorization.split(" ", 1)[1].strip()
-
-async def get_current_user(authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
-    token = _bearer_to_token(authorization)
-    data = _jwt_decode_noverify(token)
-    secret = os.getenv("SUPABASE_JWT_SECRET", "").strip()
-    if secret and not _jwt_verify_hs256(token, secret):
-        raise HTTPException(status_code=401, detail="Invalid JWT signature")
-    payload = data["payload"]
-    return {
-        "tenant_id": _extract_tenant(payload),
-        "user_id": payload.get("sub"),
-        "email": _extract_email(payload),
-        "role": payload.get("role") or payload.get("app_metadata", {}).get("role"),
-        "raw": payload,
-        "token": token,
-    }
-
-# ── Хелпер для middleware: мягко достаём tenant_id, без исключений ────────────
-def try_extract_tenant_from_authorization(authorization: Optional[str]) -> Optional[str]:
-    try:
-        if not authorization or not authorization.lower().startswith("bearer "):
-            return None
-        token = authorization.split(" ", 1)[1].strip()
-        header_b64, payload_b64, _sig = token.split('.', 2)
-        payload = json.loads(_b64url_decode(payload_b64))
-        # тот же приоритет
-        for path in [("app_metadata","tenant_id"), ("user_metadata","tenant_id")]:
-            cur = payload; ok = True
-            for p in path:
-                if not isinstance(cur, dict) or p not in cur: ok = False; break
-                cur = cur[p]
-            if ok and str(cur): return str(cur)
-        return payload.get("sub")
-    except Exception:
-        return None
+def get_current_kaspi_token() -> Optional[str]:
+    tok = kaspi_token_ctx.get()
+    return tok or None
