@@ -2,7 +2,7 @@
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import constr
 from app.deps.auth import get_current_tenant_id
-from app.deps.tenant import get_settings_row, upsert_settings
+from app.deps.tenant import get_settings, upsert_settings
 from app.deps.kaspi_client import KaspiClient
 from typing import Optional
 from typing_extensions import Annotated
