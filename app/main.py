@@ -21,14 +21,9 @@ from pydantic import BaseModel
 from cachetools import TTLCache
 from httpx import HTTPStatusError, RequestError
 from app.api.settings import router as settings_router
-
+from app.deps.auth import get_current_kaspi_token, attach_kaspi_token_middleware, try_extract_tenant_from_authorization
+from app.deps.tenant import resolve_kaspi_token
 # ---------- Корректные импорты из app.deps ----------
-# (в старом деплое падало из-за 'from deps...')
-try:
-    from app.deps.auth import get_current_kaspi_token, attach_kaspi_token_middleware
-except Exception as _e:
-    # Если структура иная, можно добавить фолбэк, но рекомендуем держать именно app.deps.*
-    raise
 
 # ---------- Роутеры доменных модулей ----------
 from app.api.bridge_v2 import router as bridge_router
