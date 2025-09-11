@@ -30,23 +30,24 @@
   </form>
 
   <div style="margin-top:16px;display:flex;gap:12px">
-    <button id="save">Сохранить</button>
+   <button id="save" type="button">Сохранить</button>
     <span id="msg" class="muted"></span>
   </div>
 
  <script src="./lib/auth.js" defer></script>
+<script src="./lib/auth.js" defer></script>
 <script defer>
 document.addEventListener('DOMContentLoaded', async () => {
   const $ = s => document.querySelector(s);
-  const form   = $('#form');
-  const msg    = $('#msg');
+  const form    = $('#form');
+  const msg     = $('#msg');
   const btnSave = $('#save');
 
-  // Требуем авторизацию
+  // 1) Требуем авторизацию
   const session = await Auth.getSession();
   if (!session) { location.href = '/ui/login.html'; return; }
 
-  // Подтягиваем текущие настройки (404 — ок до первой записи)
+  // 2) Тянем сохранённые настройки (404 — ок, значит ещё не создавали)
   try {
     const r = await Auth.authedFetch('/settings/me');
     if (r.ok) {
@@ -57,21 +58,38 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (el.type === 'checkbox') el.checked = !!v;
         else el.value = v ?? '';
       }
+      msg.textContent = 'Настройки загружены';
+    } else if (r.status === 404) {
+      msg.textContent = 'Нет сохранённых настроек — заполните форму и нажмите «Сохранить».';
+    } else {
+      msg.textContent = 'Ошибка загрузки: ' + r.status;
     }
-  } catch (e) { console.warn(e); }
+  } catch (e) {
+    msg.textContent = 'Сеть: ' + (e?.message || e);
+  }
 
+  // Сериализация формы с корректным приведением типов
   function readForm() {
     const out = {};
     form.querySelectorAll('input').forEach(el => {
-      out[el.name] = el.type === 'checkbox'
-        ? el.checked
-        : (el.type === 'number' ? Number(el.value) : el.value.trim());
+      if (!el.name) return;
+      if (el.type === 'checkbox') {
+        out[el.name] = !!el.checked;
+      } else if (el.type === 'number') {
+        const n = Number(el.value);
+        out[el.name] = Number.isFinite(n) ? n : null;
+      } else {
+        out[el.name] = el.value.trim();
+      }
     });
     return out;
   }
 
-  btnSave.addEventListener('click', async () => {
+  // 3) Сохранение
+  btnSave.addEventListener('click', async (e) => {
+    e.preventDefault();
     msg.textContent = 'Сохраняю...';
+
     try {
       const payload = readForm();
       if (!payload.kaspi_token) { msg.textContent = 'Укажите KASPI_TOKEN'; return; }
@@ -81,14 +99,20 @@ document.addEventListener('DOMContentLoaded', async () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
-      if (!r.ok) { msg.textContent = 'Ошибка сохранения: ' + (await r.text()); return; }
 
-      const check = await Auth.authedFetch('/settings/check');
-      if (check.ok) {
+      if (!r.ok) {
+        const t = await r.text().catch(()=>String(r.status));
+        msg.textContent = 'Ошибка сохранения: ' + t;
+        return;
+      }
+
+      // 4) Быстрая проверка токена
+      const chk = await Auth.authedFetch('/settings/check');
+      if (chk.ok) {
         msg.textContent = 'Сохранено. Перенаправляю...';
         setTimeout(() => location.href = '/ui/', 600);
       } else {
-        msg.textContent = 'Сохранено, но проверка токена не прошла: ' + check.status;
+        msg.textContent = 'Сохранено, но проверка токена не прошла: ' + chk.status;
       }
     } catch (e) {
       msg.textContent = 'Ошибка: ' + (e?.message || e);
