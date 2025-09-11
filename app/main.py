@@ -20,6 +20,7 @@ from pathlib import Path
 from pydantic import BaseModel
 from cachetools import TTLCache
 from httpx import HTTPStatusError, RequestError
+from app.api.settings import router as settings_router
 
 # ---------- Корректные импорты из app.deps ----------
 # (в старом деплое падало из-за 'from deps...')
