@@ -20,15 +20,15 @@ from pathlib import Path
 from pydantic import BaseModel
 from cachetools import TTLCache
 from httpx import HTTPStatusError, RequestError
-from app.api.settings import router as settings_router
-from app.deps.auth import get_current_kaspi_token, attach_kaspi_token_middleware, try_extract_tenant_from_authorization
-from app.deps.tenant import resolve_kaspi_token
+
+from app.deps.auth import get_current_kaspi_token, attach_kaspi_token_middleware
 # ---------- Корректные импорты из app.deps ----------
 
 # ---------- Роутеры доменных модулей ----------
 from app.api.bridge_v2 import router as bridge_router
 from app.api.profit_fifo import get_profit_fifo_router
 from app.api.authz import router as auth_router
+from app.api.products import get_products_router  # <— добавили
 
 # (опционально, если есть отдельный settings.py с /settings/*)
 try:
@@ -101,7 +101,7 @@ BUSINESS_DAY_START = os.getenv("BUSINESS_DAY_START", "20:00")  # HH:MM
 USE_BUSINESS_DAY = os.getenv("USE_BUSINESS_DAY", "true").lower() in ("1", "true", "yes", "on")
 
 # Cutoff приёма заказов магазином (после него незакомплектованные уедут на завтра)
-STORE_ACCEPT_UNTIL = os.getenv("STORE_ACCEPT_UNTIL", "17:00")  # HH:MM
+STORE_ACCEPT_UNTIL = os.getenv("STORE_ACCEPT_UNTИЛ", "17:00")  # HH:MM
 
 # Параллельность обогащения SKU (базовая)
 ENRICH_CONCURRENCY = int(os.getenv("ENRICH_CONCURRENCY", "8") or 8)
@@ -174,7 +174,6 @@ app.include_router(bridge_router, prefix="/profit")
 app.include_router(auth_router)
 if settings_router:
     app.include_router(settings_router, prefix="/settings", tags=["settings"])
-
 # -------------------- helpers --------------------
 def tzinfo_of(name: str) -> pytz.BaseTzInfo:
     try:
