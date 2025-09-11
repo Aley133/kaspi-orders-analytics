@@ -28,7 +28,8 @@ def upsert_settings(tenant_id: str, value: dict):
     insert into public.tenant_settings (tenant_id, key, value)
     values (%s, 'settings', %s::jsonb)
     on conflict (tenant_id, key) do update
-    set value = excluded.value, created_at = now()
+      set value = excluded.value,
+          updated_at = now();
     """
     with _conn() as cx, cx.cursor() as cur:
         cur.execute(sql, (tenant_id, json.dumps(value)))
