@@ -34,7 +34,59 @@
     <span id="msg" class="muted"></span>
   </div>
 
-  <script src="./lib/auth.js"></script>
+  <script src="./lib/auth.js" defer></script>
+<script defer>
+document.addEventListener('DOMContentLoaded', async () => {
+  const $ = s => document.querySelector(s);
+  const msg = $('#msg'); // <p id="msg">
+  const btnSave  = $('#saveBtn');   // <button id="saveBtn">
+  const btnCheck = $('#checkBtn');  // <button id="checkBtn">
+  if (!btnSave || !btnCheck) { console.error('Buttons not found'); return; }
+
+  const jwt = await Auth.getToken();
+  if (!jwt) { location.href = '/ui/login.html'; return; }
+
+  // Пробуем загрузить текущие настройки (404 — это нормально до первой записи)
+  try {
+    const r = await fetch('/settings/me', { headers: { Authorization: 'Bearer ' + jwt } });
+    if (r.ok) {
+      const data = await r.json();
+      // TODO: проставь значения в поля формы из data.value
+    } else if (r.status !== 404) {
+      msg.textContent = 'Ошибка загрузки: ' + r.status;
+    }
+  } catch (e) { msg.textContent = 'Сеть: ' + e; }
+
+  btnSave.addEventListener('click', async () => {
+    const payload = {
+      shop_name: $('#shopName').value || 'LeoXpress',
+      partner_id: $('#partnerId').value || '',
+      kaspi_token: $('#kaspiToken').value, // ОБЯЗАТЕЛЬНО реальный токен
+      amount_fields: 'totalPrice',
+      amount_divisor: 1,
+      date_field_default: 'creationDate',
+      business_day_start: '20:00',
+      use_business_day: true,
+      store_accept_until: '17:00',
+      city_keys: 'city,deliveryAddress.city',
+      allowed_origins: ''
+    };
+    msg.textContent = 'Сохраняю...';
+    const r = await fetch('/settings/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + jwt },
+      body: JSON.stringify(payload)
+    });
+    msg.textContent = r.ok ? 'Сохранено' : 'Ошибка сохранения: ' + r.status;
+  });
+
+  btnCheck.addEventListener('click', async () => {
+    msg.textContent = 'Проверка...';
+    const r = await fetch('/settings/check', { headers: { Authorization: 'Bearer ' + jwt } });
+    msg.textContent = r.ok ? 'Kaspi: OK' : 'Kaspi: ' + r.status;
+  });
+});
+</script>
   <script>
     const $ = s => document.querySelector(s);
     (async function init(){
@@ -81,38 +133,6 @@
       }
     };
   </script>
-  <script>
-(async function () {
-  // получить JWT как раньше (через supabase.auth.getSession)
-  const meta = await fetch('/auth/meta').then(r=>r.json());
-  const { createClient } = await import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js/+esm');
-  const supa = createClient(meta.SUPABASE_URL, meta.SUPABASE_ANON_KEY);
-  const { data: { session } } = await supa.auth.getSession();
-  const JWT = session?.access_token;
-  if (!JWT) location.href = '/ui/login.html';
-
-  async function save() {
-    const payload = {
-      shop_name: document.querySelector('#shop_name').value || 'LeoXpress',
-      partner_id: document.querySelector('#partner_id').value || '',
-      kaspi_token: document.querySelector('#kaspi_token').value.trim(),
-      amount_fields: 'totalPrice',
-      amount_divisor: 1,
-      date_field_default: 'creationDate',
-      business_day_start: '20:00',
-      use_business_day: true,
-      store_accept_until: '17:00',
-      city_keys: 'city,deliveryAddress.city',
-      allowed_origins: ''
-    };
-    const hdr = { 'Content-Type': 'application/json', Authorization: 'Bearer ' + JWT };
-    const r = await fetch('/settings/save', { method:'POST', headers: hdr, body: JSON.stringify(payload) });
-    if (r.ok) location.href = '/ui/';
-    else alert('Сохранение не удалось');
-  }
-  document.querySelector('#saveBtn').addEventListener('click', save);
-})();
-</script>
 
 </body>
 </html>
