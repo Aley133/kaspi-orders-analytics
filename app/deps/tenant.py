@@ -1,81 +1,88 @@
 # app/deps/tenant.py
+from __future__ import annotations
+
 import json
 from typing import Optional
+from app.db import get_conn  # коннектор к БД
 
-# важно: берем коннектор из вашего app/db.py
-from app.db import get_conn
+TENANTS_TABLE = "public.tenants"
+SETTINGS_TABLE = "public.tenant_settings"
+
+
+def _ensure_schema() -> None:
+    """Гарантируем, что нужные таблицы существуют."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(f"""
+            create table if not exists {TENANTS_TABLE} (
+                id uuid primary key,
+                email text,
+                phone text,
+                created_at timestamptz default now(),
+                is_active boolean default true
+            );
+        """)
+        cur.execute(f"""
+            create table if not exists {SETTINGS_TABLE} (
+                tenant_id uuid primary key
+                    references {TENANTS_TABLE}(id) on delete cascade,
+                value jsonb not null,
+                updated_at timestamptz default now()
+            );
+        """)
+        conn.commit()
 
 
 def ensure_tenant_exists(tenant_id: str, email: Optional[str] = None) -> None:
-    """
-    Гарантируем, что запись в tenants существует (для FK на tenant_settings).
-    Вызывается перед апсертом настроек.
-    """
-    ddl_tenants = """
-    create table if not exists public.tenants (
-        id uuid primary key,
-        email text,
-        phone text,
-        created_at timestamptz default now(),
-        is_active boolean default true
-    );
-    """
+    """Создаём запись о тенанте (если её нет)."""
+    _ensure_schema()
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute(ddl_tenants)
         cur.execute(
-            "insert into public.tenants (id, email, is_active) values (%s, %s, true) on conflict (id) do nothing",
+            f"""
+            insert into {TENANTS_TABLE} (id, email, is_active)
+            values (%s, %s, true)
+            on conflict (id) do nothing
+            """,
             (tenant_id, email),
         )
         conn.commit()
 
 
-def _ensure_settings_table() -> None:
-    ddl_settings = """
-    create table if not exists public.tenant_settings (
-        tenant_id uuid primary key
-            references public.tenants(id) on delete cascade,
-        value jsonb not null,
-        updated_at timestamptz default now()
-    );
-    """
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.execute(ddl_settings)
-        conn.commit()
+def load_settings(tenant_id: str) -> Optional[dict]:
+    """Оставил для совместимости — читает из настроек."""
+    return get_settings(tenant_id)
 
 
 def get_settings(tenant_id: str) -> Optional[dict]:
-    _ensure_settings_table()
+    """Возвращает JSON с настройками тенанта, либо None."""
+    _ensure_schema()
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("select value from public.tenant_settings where tenant_id=%s", (tenant_id,))
+        cur.execute(
+            f"select value from {SETTINGS_TABLE} where tenant_id=%s",
+            (tenant_id,),
+        )
         row = cur.fetchone()
-        return (row[0] if row else None)
+        return row[0] if row else None
 
 
 def upsert_settings(tenant_id: str, value: dict) -> None:
-    """
-    Сохраняем JSON настроек для тенанта.
-    - сначала гарантируем запись в tenants (иначе FK падает)
-    - никакого created_at — только updated_at
-    """
+    """Сохраняет настройки (insert … on conflict do update)."""
     ensure_tenant_exists(tenant_id)
-    _ensure_settings_table()
-
-    sql = """
-    insert into public.tenant_settings (tenant_id, value)
-    values (%s, %s::jsonb)
-    on conflict (tenant_id) do update
-      set value = excluded.value,
-          updated_at = now()
-    """
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute(sql, (tenant_id, json.dumps(value)))
+        cur.execute(
+            f"""
+            insert into {SETTINGS_TABLE} (tenant_id, value)
+            values (%s, %s::jsonb)
+            on conflict (tenant_id) do update
+                set value = excluded.value,
+                    updated_at = now()
+            """,
+            (tenant_id, json.dumps(value)),
+        )
         conn.commit()
 
 
 def resolve_kaspi_token(tenant_id: Optional[str]) -> Optional[str]:
-    """
-    Достаём kaspi_token для текущего тенанта (используется в каспи-клиенте).
-    """
+    """Достаём kaspi_token из настроек данного тенанта."""
     if not tenant_id:
         return None
     val = get_settings(tenant_id)
