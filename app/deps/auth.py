@@ -40,25 +40,31 @@ def get_current_tenant_id(request: Request) -> str:
         raise HTTPException(status_code=401, detail="Bad token (no sub)")
     return sub
 
-async def attach_kaspi_token_middleware(request: Request, call_next):
+def _normalize_tenant_id(raw: str) -> str:
     """
-    Глобальный middleware: на каждый запрос ставим контекстный Kaspi токен арендатора.
+    Превращает любой sub в UUID. Если уже UUID — вернём как есть.
+    Иначе делаем детерминированный UUID5 на основе строки sub.
     """
     try:
-        tenant_id = get_current_tenant_id(request)
-        token = resolve_kaspi_token(tenant_id)
-        if not token:
-            # Явно запрещаем «глобальные» токены: без персонального — 401
-            raise HTTPException(status_code=401, detail="Kaspi token is not set for this tenant")
-        kaspi_token_ctx.set(token)
-    except HTTPException as e:
-        # Разрешаем **только** белый список открытых ручек
-        open_paths = {"/auth/meta", "/openapi.json", "/docs", "/ui/", "/"}
-        if not any(request.url.path.startswith(p) for p in open_paths):
-            raise
-    response = await call_next(request)
-    return response
+        uuid.UUID(str(raw))
+        return str(raw)
+    except Exception:
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, f"supabase:{raw}"))
 
-def get_current_kaspi_token() -> Optional[str]:
-    tok = kaspi_token_ctx.get()
-    return tok or None
+async def attach_kaspi_token_middleware(request: Request, call_next):
+    auth = request.headers.get("authorization") or request.headers.get("Authorization")
+    tenant_id = None
+    if auth and auth.lower().startswith("bearer "):
+        token = auth.split(" ", 1)[1].strip()
+        try:
+            claims = jwt.decode(token, options={"verify_signature": False})
+            sub = claims.get("sub")
+            if sub:
+                tenant_id = _normalize_tenant_id(str(sub))
+        except Exception:
+            pass
+    request.state.tenant_id = tenant_id
+    return await call_next(request)
+
+def get_current_tenant_id(request: Request) -> str | None:
+    return getattr(request.state, "tenant_id", None)
