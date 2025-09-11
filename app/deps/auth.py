@@ -1,49 +1,40 @@
-# deps/auth.py
-import os, base64, json
-from typing import Optional, Callable
-from fastapi import Request, HTTPException
+# app/deps/auth.py
+from __future__ import annotations
+
+import base64
+import json
+import uuid
 import contextvars
+from typing import Optional, Dict
+
+from fastapi import Request, HTTPException
 
 from .tenant import resolve_kaspi_token
 
+# Храним текущий kaspi-token в ContextVar, чтобы его могли читать клиенты ниже по стеку
 kaspi_token_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("kaspi_token", default="")
 
-def _decode_jwt_noverify(token: str) -> dict:
-    # безопасно для извлечения sub; подпись не проверяем (трафик идёт с фронта Supabase)
+def _decode_jwt_noverify(token: str) -> Dict:
+    """
+    Безопасно достаём payload из JWT без проверки подписи
+    (подпись проверяет Supabase на фронте; нам оттуда прилетает bearer).
+    """
     try:
         parts = token.split(".")
-        payload_b64 = parts[1] + "=="  # выравнивание
-        payload = json.loads(base64.urlsafe_b64decode(payload_b64.encode("utf-8")).decode("utf-8"))
-        return payload
+        if len(parts) < 2:
+            return {}
+        payload_b64 = parts[1]
+        # выравнивание base64url
+        padding = "=" * (-len(payload_b64) % 4)
+        payload = base64.urlsafe_b64decode((payload_b64 + padding).encode("utf-8")).decode("utf-8")
+        return json.loads(payload)
     except Exception:
         return {}
 
-def get_current_user(request: Request):
-    """
-    Compatibility shim for app.api.authz.
-    Возвращаем минимальный объект "пользователя" на основе tenant_id,
-    который уже выставляет мидлвара attach_kaspi_token_middleware.
-    """
-    tenant_id = get_current_tenant_id(request)
-    if not tenant_id:
-        raise HTTPException(status_code=401, detail="unauthorized")
-    return {"tenant_id": tenant_id}
-
-def get_current_tenant_id(request: Request) -> str:
-    auth = request.headers.get("authorization") or ""
-    if not auth.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="Missing bearer token")
-    jwt = auth.split(" ", 1)[1].strip()
-    claims = _decode_jwt_noverify(jwt)
-    sub = claims.get("sub")
-    if not sub:
-        raise HTTPException(status_code=401, detail="Bad token (no sub)")
-    return sub
-
 def _normalize_tenant_id(raw: str) -> str:
     """
-    Превращает любой sub в UUID. Если уже UUID — вернём как есть.
-    Иначе делаем детерминированный UUID5 на основе строки sub.
+    sub может быть UUID, а может — строка (например, логин GitHub/SMS).
+    Превращаем в детерминированный UUID5.
     """
     try:
         uuid.UUID(str(raw))
@@ -51,20 +42,53 @@ def _normalize_tenant_id(raw: str) -> str:
     except Exception:
         return str(uuid.uuid5(uuid.NAMESPACE_URL, f"supabase:{raw}"))
 
-async def attach_kaspi_token_middleware(request: Request, call_next):
-    auth = request.headers.get("authorization") or request.headers.get("Authorization")
-    tenant_id = None
-    if auth and auth.lower().startswith("bearer "):
-        token = auth.split(" ", 1)[1].strip()
-        try:
-            claims = jwt.decode(token, options={"verify_signature": False})
-            sub = claims.get("sub")
-            if sub:
-                tenant_id = _normalize_tenant_id(str(sub))
-        except Exception:
-            pass
-    request.state.tenant_id = tenant_id
-    return await call_next(request)
-
-def get_current_tenant_id(request: Request) -> str | None:
+def get_current_tenant_id(request: Request) -> Optional[str]:
+    """
+    Извлекаем tenant_id, который проставила мидлвара.
+    """
     return getattr(request.state, "tenant_id", None)
+
+def get_current_user(request: Request) -> Dict:
+    """
+    Шим для совместимости с app.api.authz.
+    """
+    tenant_id = get_current_tenant_id(request)
+    if not tenant_id:
+        raise HTTPException(status_code=401, detail="unauthorized")
+    return {"tenant_id": tenant_id}
+
+def get_current_kaspi_token() -> Optional[str]:
+    """
+    Читаем текущий kaspi-token из контекста.
+    """
+    tok = kaspi_token_ctx.get()
+    return tok or None
+
+async def attach_kaspi_token_middleware(request: Request, call_next):
+    """
+    1) Парсим Bearer JWT → sub → нормализуем в UUID → кладём в request.state.tenant_id
+    2) Резолвим kaspi_token из БД → кладём в request.state.kaspi_token и ContextVar
+    """
+    tenant_id: Optional[str] = None
+    token_hdr = request.headers.get("authorization") or request.headers.get("Authorization") or ""
+    if token_hdr.lower().startswith("bearer "):
+        jwt_token = token_hdr.split(" ", 1)[1].strip()
+        claims = _decode_jwt_noverify(jwt_token)
+        sub = claims.get("sub")
+        if sub:
+            tenant_id = _normalize_tenant_id(str(sub))
+
+    request.state.tenant_id = tenant_id
+
+    kaspi_tok = resolve_kaspi_token(tenant_id) if tenant_id else None
+    request.state.kaspi_token = kaspi_tok or ""
+    # заполняем ContextVar, чтобы клиенты могли читать без доступа к request
+    token_token = kaspi_token_ctx.set(kaspi_tok or "")
+
+    try:
+        response = await call_next(request)
+    finally:
+        # возвращаем контекст к прежнему значению
+        kaspi_token_ctx.reset(token_token)
+
+    return response
