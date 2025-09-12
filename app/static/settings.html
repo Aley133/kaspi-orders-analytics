@@ -1,21 +1,21 @@
 <!doctype html>
 <html lang="ru">
 <head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Настройки — Kaspi Analytics</title>
-  <link rel="stylesheet" href="style.css"/>
+  <link rel="stylesheet" href="style.css" />
   <style>
-    body{padding:24px;max-width:920px;margin:auto}
-    form{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-    form > div{display:flex;flex-direction:column;gap:6px}
-    label{font-size:12px;opacity:.8}
-    .row{display:flex;gap:12px;align-items:center;margin-top:16px}
-    .note{margin-top:8px;font-size:13px;opacity:.9}
-    .muted{opacity:.7}
-    button{height:34px;padding:0 14px;border:1px solid var(--line);background:var(--card);color:var(--fg);border-radius:8px;cursor:pointer}
-    button[disabled]{opacity:.6;cursor:not-allowed}
-    .pwd{display:flex;gap:8px;align-items:center}
+    body { padding: 24px; max-width: 920px; margin: auto; }
+    form { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    form > div { display: flex; flex-direction: column; gap: 6px; }
+    label { font-size: 12px; opacity: .8; }
+    .row { display: flex; gap: 12px; align-items: center; margin-top: 16px; }
+    .note { margin-top: 8px; font-size: 13px; opacity: .9; }
+    .muted { opacity: .7; }
+    button { height: 34px; padding: 0 14px; border: 1px solid var(--line); background: var(--card); color: var(--fg); border-radius: 8px; cursor: pointer; }
+    button[disabled] { opacity: .6; cursor: not-allowed; }
+    .pwd { display: flex; gap: 8px; align-items: center; }
   </style>
 </head>
 <body data-theme="light">
@@ -23,31 +23,63 @@
   <p class="muted">Параметры используются аналитикой, бизнес-днём и FIFO-мостом.</p>
 
   <form id="form">
-    <div><label>Shop name</label><input name="shop_name" placeholder="LeoXpress"/></div>
-    <div><label>Partner ID</label><input name="partner_id" placeholder=""/></div>
+    <div>
+      <label>Shop name</label>
+      <input name="shop_name" placeholder="LeoXpress" />
+    </div>
 
-    <div style="grid-column:1/3">
+    <div>
+      <label>Partner ID</label>
+      <input name="partner_id" placeholder="" />
+    </div>
+
+    <div style="grid-column: 1/3">
       <label>KASPI_TOKEN</label>
       <div class="pwd">
-        <input name="kaspi_token" placeholder="kaspi_xxx" type="password" style="width:100%"/>
+        <input name="kaspi_token" placeholder="kaspi_xxx" type="password" style="width: 100%" />
         <button id="togglePwd" type="button" title="Показать/скрыть токен">🙈</button>
       </div>
     </div>
 
-    <div><label>Amount fields (CSV)</label><input name="amount_fields" value="totalPrice"/></div>
-    <div><label>Amount divisor</label><input name="amount_divisor" type="number" step="0.0001" value="1"/></div>
+    <div>
+      <label>Amount fields (CSV)</label>
+      <input name="amount_fields" value="totalPrice" />
+    </div>
 
-    <div><label>Date field default</label><input name="date_field_default" value="creationDate"/></div>
-    <div><label>Business day start (HH:MM)</label><input name="business_day_start" value="20:00"/></div>
+    <div>
+      <label>Amount divisor</label>
+      <input name="amount_divisor" type="number" step="0.0001" value="1" />
+    </div>
+
+    <div>
+      <label>Date field default</label>
+      <input name="date_field_default" value="creationDate" />
+    </div>
+
+    <div>
+      <label>Business day start (HH:MM)</label>
+      <input name="business_day_start" value="20:00" />
+    </div>
 
     <div>
       <label>Use business day</label>
-      <input type="checkbox" name="use_business_day" checked/>
+      <input type="checkbox" name="use_business_day" checked />
     </div>
-    <div><label>Store accept until</label><input name="store_accept_until" value="17:00"/></div>
 
-    <div><label>City keys (CSV)</label><input name="city_keys" value="city,deliveryAddress.city"/></div>
-    <div><label>Allowed origins (CSV)</label><input name="allowed_origins" value=""/></div>
+    <div>
+      <label>Store accept until</label>
+      <input name="store_accept_until" value="17:00" />
+    </div>
+
+    <div>
+      <label>City keys (CSV)</label>
+      <input name="city_keys" value="city,deliveryAddress.city" />
+    </div>
+
+    <div>
+      <label>Allowed origins (CSV)</label>
+      <input name="allowed_origins" value="" />
+    </div>
   </form>
 
   <div class="row">
@@ -55,27 +87,41 @@
     <span id="msg" class="note muted"></span>
   </div>
 
-  <!-- ВАЖНО: модульный скрипт -->
+  <!-- Модульный скрипт -->
   <script type="module">
     import { Auth } from './lib/auth.js';
-    
-    // доступен сразу
-  window.authedFetch = async (input, init = {}) => {
-    const headers = { ...(init.headers || {}), ...(await Auth.authHeader()) };
-    const res = await fetch(input, { ...init, headers });
-    if (res.status === 401) { await Auth.signOutAndGoLogin(); throw new Error("Unauthorized"); }
-    return res;
-  };
-  window.af = window.authedFetch;
 
-    // Инициализация и требование авторизации
+    // --- Надёжный authedFetch: доступен сразу, ждёт Auth внутри ---
+    window.authedFetch = async (input, init = {}) => {
+      await Auth.ready;
+      try {
+        const headers = { ...(init.headers || {}), ...(await Auth.authHeader()) };
+        const res = await fetch(input, { ...init, headers });
+        if (res.status === 401) {
+          await Auth.signOutAndGoLogin();
+          throw new Error('Unauthorized');
+        }
+        return res;
+      } catch (e) {
+        if (String(e?.message || e).includes('Unauthorized')) {
+          await Auth.signOutAndGoLogin();
+        }
+        throw e;
+      }
+    };
+    // Глобальные алиасы
+    window.AF = (...args) => window.authedFetch(...args);
+    window.af = window.authedFetch;
+    globalThis.authedFetch = window.authedFetch;
+    globalThis.AF = window.AF;
+
+    // Требуем авторизацию
     await Auth.ready;
     await Auth.requireAuth();
     document.getElementById('btnSignOut')?.addEventListener('click', Auth.signOutAndGoLogin);
 
-   
-
-    const $  = s => document.querySelector(s);
+    // --- DOM helpers ---
+    const $ = (s) => document.querySelector(s);
     const form    = $('#form');
     const msg     = $('#msg');
     const btnSave = $('#save');
@@ -89,9 +135,9 @@
       btnEye.textContent = t === 'password' ? '🙈' : '👁️';
     });
 
-    // Загрузка сохранённых настроек (404 — значит ещё не создавали)
+    // Загрузка сохранённых настроек
     try {
-      const r = await authedFetch('/settings/me');
+      const r = await AF('/settings/me');
       if (r.ok) {
         const data = await r.json();
         for (const [k, v] of Object.entries(data)) {
@@ -110,10 +156,10 @@
       msg.textContent = 'Сеть: ' + (e?.message || e);
     }
 
-    // Сериализация формы c приведением типов
+    // Сериализация формы с приведением типов
     function readForm() {
       const out = {};
-      form.querySelectorAll('input').forEach(el => {
+      form.querySelectorAll('input').forEach((el) => {
         if (!el.name) return;
         if (el.type === 'checkbox') {
           out[el.name] = !!el.checked;
@@ -121,7 +167,7 @@
           const n = Number(el.value);
           out[el.name] = Number.isFinite(n) ? n : null;
         } else {
-          out[el.name] = el.value.trim();
+          out[el.name] = (el.value ?? '').trim();
         }
       });
       return out;
@@ -130,28 +176,33 @@
     async function saveSettings() {
       btnSave.disabled = true;
       msg.textContent = 'Сохраняю...';
+
       try {
         const payload = readForm();
-        if (!payload.kaspi_token) { msg.textContent = 'Укажите KASPI_TOKEN'; btnSave.disabled = false; return; }
+        if (!payload.kaspi_token) {
+          msg.textContent = 'Укажите KASPI_TOKEN';
+          btnSave.disabled = false;
+          return;
+        }
 
-        const r = await authedFetch('/settings/save', {
+        const r = await AF('/settings/save', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
+          body: JSON.stringify(payload),
         });
 
         if (!r.ok) {
-          const t = await r.text().catch(()=>String(r.status));
+          const t = await r.text().catch(() => String(r.status));
           msg.textContent = 'Ошибка сохранения: ' + t;
           btnSave.disabled = false;
           return;
         }
 
         // Быстрая проверка токена
-        const chk = await authedFetch('/settings/check');
+        const chk = await AF('/settings/check');
         if (chk.ok) {
           msg.textContent = 'Сохранено. Перенаправляю...';
-          setTimeout(() => location.href = '/ui/', 600);
+          setTimeout(() => (location.href = '/ui/'), 600);
         } else {
           msg.textContent = 'Сохранено, но проверка токена не прошла: ' + chk.status;
           btnSave.disabled = false;
@@ -162,7 +213,9 @@
       }
     }
 
+    // Сохранение по кнопке и по Enter в форме
     btnSave.addEventListener('click', (e) => { e.preventDefault(); saveSettings(); });
+    form.addEventListener('submit', (e) => { e.preventDefault(); saveSettings(); });
   </script>
 </body>
 </html>
