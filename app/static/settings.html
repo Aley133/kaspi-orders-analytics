@@ -5,16 +5,34 @@
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>Настройки — Kaspi Analytics</title>
   <link rel="stylesheet" href="style.css"/>
+  <style>
+    body{padding:24px;max-width:920px;margin:auto}
+    form{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+    form > div{display:flex;flex-direction:column;gap:6px}
+    label{font-size:12px;opacity:.8}
+    .row{display:flex;gap:12px;align-items:center;margin-top:16px}
+    .note{margin-top:8px;font-size:13px;opacity:.9}
+    .muted{opacity:.7}
+    button{height:34px;padding:0 14px;border:1px solid var(--line);background:var(--card);color:var(--fg);border-radius:8px;cursor:pointer}
+    button[disabled]{opacity:.6;cursor:not-allowed}
+    .pwd{display:flex;gap:8px;align-items:center}
+  </style>
 </head>
-<body data-theme="light" style="padding:24px;max-width:920px;margin:auto">
+<body data-theme="light">
   <h1>Настройки</h1>
-  <p class="muted">Параметры используются аналитикой и синхронизацией.</p>
+  <p class="muted">Параметры используются аналитикой, бизнес-днём и FIFO-мостом.</p>
 
-  <form id="form" style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+  <form id="form">
     <div><label>Shop name</label><input name="shop_name" placeholder="LeoXpress"/></div>
     <div><label>Partner ID</label><input name="partner_id" placeholder=""/></div>
 
-    <div style="grid-column:1/3"><label>KASPI_TOKEN</label><input name="kaspi_token" placeholder="kaspi_xxx" /></div>
+    <div style="grid-column:1/3">
+      <label>KASPI_TOKEN</label>
+      <div class="pwd">
+        <input name="kaspi_token" placeholder="kaspi_xxx" type="password" style="width:100%"/>
+        <button id="togglePwd" type="button" title="Показать/скрыть токен">🙈</button>
+      </div>
+    </div>
 
     <div><label>Amount fields (CSV)</label><input name="amount_fields" value="totalPrice"/></div>
     <div><label>Amount divisor</label><input name="amount_divisor" type="number" step="0.0001" value="1"/></div>
@@ -22,104 +40,128 @@
     <div><label>Date field default</label><input name="date_field_default" value="creationDate"/></div>
     <div><label>Business day start (HH:MM)</label><input name="business_day_start" value="20:00"/></div>
 
-    <div><label>Use business day</label><input type="checkbox" name="use_business_day" checked/></div>
+    <div>
+      <label>Use business day</label>
+      <input type="checkbox" name="use_business_day" checked/>
+    </div>
     <div><label>Store accept until</label><input name="store_accept_until" value="17:00"/></div>
 
     <div><label>City keys (CSV)</label><input name="city_keys" value="city,deliveryAddress.city"/></div>
     <div><label>Allowed origins (CSV)</label><input name="allowed_origins" value=""/></div>
   </form>
 
-  <div style="margin-top:16px;display:flex;gap:12px">
-   <button id="save" type="button">Сохранить</button>
-    <span id="msg" class="muted"></span>
+  <div class="row">
+    <button id="save" type="button">Сохранить</button>
+    <span id="msg" class="note muted"></span>
   </div>
 
- <script src="./lib/auth.js" defer></script>
-<script src="./lib/auth.js" defer></script>
-<script defer>
-document.addEventListener('DOMContentLoaded', async () => {
-  const $ = s => document.querySelector(s);
-  const form    = $('#form');
-  const msg     = $('#msg');
-  const btnSave = $('#save');
+  <!-- ВАЖНО: модульный скрипт -->
+  <script type="module">
+    import { Auth } from './lib/auth.js';
 
-  // 1) Требуем авторизацию
-  const session = await Auth.getSession();
-  if (!session) { location.href = '/ui/login.html'; return; }
+    // Инициализация и требование авторизации
+    await Auth.ready;
+    await Auth.requireAuth();
 
-  // 2) Тянем сохранённые настройки (404 — ок, значит ещё не создавали)
-  try {
-    const r = await Auth.authedFetch('/settings/me');
-    if (r.ok) {
-      const data = await r.json();
-      for (const [k, v] of Object.entries(data)) {
-        const el = form.querySelector(`[name="${k}"]`);
-        if (!el) continue;
-        if (el.type === 'checkbox') el.checked = !!v;
-        else el.value = v ?? '';
+    // Авторизованный fetch (как на index.html)
+    window.authedFetch = async (input, init = {}) => {
+      const headers = { ...(init.headers || {}), ...(await Auth.authHeader()) };
+      const res = await fetch(input, { ...init, headers });
+      if (res.status === 401) {
+        await Auth.signOutAndGoLogin();
+        throw new Error('Unauthorized');
       }
-      msg.textContent = 'Настройки загружены';
-    } else if (r.status === 404) {
-      msg.textContent = 'Нет сохранённых настроек — заполните форму и нажмите «Сохранить».';
-    } else {
-      msg.textContent = 'Ошибка загрузки: ' + r.status;
-    }
-  } catch (e) {
-    msg.textContent = 'Сеть: ' + (e?.message || e);
-  }
+      return res;
+    };
 
-  // Сериализация формы с корректным приведением типов
-  function readForm() {
-    const out = {};
-    form.querySelectorAll('input').forEach(el => {
-      if (!el.name) return;
-      if (el.type === 'checkbox') {
-        out[el.name] = !!el.checked;
-      } else if (el.type === 'number') {
-        const n = Number(el.value);
-        out[el.name] = Number.isFinite(n) ? n : null;
-      } else {
-        out[el.name] = el.value.trim();
-      }
+    const $  = s => document.querySelector(s);
+    const form    = $('#form');
+    const msg     = $('#msg');
+    const btnSave = $('#save');
+    const btnEye  = $('#togglePwd');
+    const kaspiIn = form.querySelector('input[name="kaspi_token"]');
+
+    // Показать/скрыть токен
+    btnEye?.addEventListener('click', () => {
+      const t = kaspiIn.type === 'password' ? 'text' : 'password';
+      kaspiIn.type = t;
+      btnEye.textContent = t === 'password' ? '🙈' : '👁️';
     });
-    return out;
-  }
 
-  // 3) Сохранение
-  btnSave.addEventListener('click', async (e) => {
-    e.preventDefault();
-    msg.textContent = 'Сохраняю...';
-
+    // Загрузка сохранённых настроек (404 — значит ещё не создавали)
     try {
-      const payload = readForm();
-      if (!payload.kaspi_token) { msg.textContent = 'Укажите KASPI_TOKEN'; return; }
-
-      const r = await Auth.authedFetch('/settings/save', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-
-      if (!r.ok) {
-        const t = await r.text().catch(()=>String(r.status));
-        msg.textContent = 'Ошибка сохранения: ' + t;
-        return;
-      }
-
-      // 4) Быстрая проверка токена
-      const chk = await Auth.authedFetch('/settings/check');
-      if (chk.ok) {
-        msg.textContent = 'Сохранено. Перенаправляю...';
-        setTimeout(() => location.href = '/ui/', 600);
+      const r = await authedFetch('/settings/me');
+      if (r.ok) {
+        const data = await r.json();
+        for (const [k, v] of Object.entries(data)) {
+          const el = form.querySelector(`[name="${k}"]`);
+          if (!el) continue;
+          if (el.type === 'checkbox') el.checked = !!v;
+          else el.value = v ?? '';
+        }
+        msg.textContent = 'Настройки загружены';
+      } else if (r.status === 404) {
+        msg.textContent = 'Нет сохранённых настроек — заполните форму и нажмите «Сохранить».';
       } else {
-        msg.textContent = 'Сохранено, но проверка токена не прошла: ' + chk.status;
+        msg.textContent = 'Ошибка загрузки: ' + r.status;
       }
     } catch (e) {
-      msg.textContent = 'Ошибка: ' + (e?.message || e);
+      msg.textContent = 'Сеть: ' + (e?.message || e);
     }
-  });
-});
-</script>
 
+    // Сериализация формы c приведением типов
+    function readForm() {
+      const out = {};
+      form.querySelectorAll('input').forEach(el => {
+        if (!el.name) return;
+        if (el.type === 'checkbox') {
+          out[el.name] = !!el.checked;
+        } else if (el.type === 'number') {
+          const n = Number(el.value);
+          out[el.name] = Number.isFinite(n) ? n : null;
+        } else {
+          out[el.name] = el.value.trim();
+        }
+      });
+      return out;
+    }
+
+    async function saveSettings() {
+      btnSave.disabled = true;
+      msg.textContent = 'Сохраняю...';
+      try {
+        const payload = readForm();
+        if (!payload.kaspi_token) { msg.textContent = 'Укажите KASPI_TOKEN'; btnSave.disabled = false; return; }
+
+        const r = await authedFetch('/settings/save', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+
+        if (!r.ok) {
+          const t = await r.text().catch(()=>String(r.status));
+          msg.textContent = 'Ошибка сохранения: ' + t;
+          btnSave.disabled = false;
+          return;
+        }
+
+        // Быстрая проверка токена
+        const chk = await authedFetch('/settings/check');
+        if (chk.ok) {
+          msg.textContent = 'Сохранено. Перенаправляю...';
+          setTimeout(() => location.href = '/ui/', 600);
+        } else {
+          msg.textContent = 'Сохранено, но проверка токена не прошла: ' + chk.status;
+          btnSave.disabled = false;
+        }
+      } catch (e) {
+        msg.textContent = 'Ошибка: ' + (e?.message || e);
+        btnSave.disabled = false;
+      }
+    }
+
+    btnSave.addEventListener('click', (e) => { e.preventDefault(); saveSettings(); });
+  </script>
 </body>
 </html>
