@@ -36,11 +36,7 @@ from app.api.products import get_products_router
 from app.api import settings as settings_api
 
 # tenant-aware Kaspi client
-try:
-    from app.deps.kaspi_client_tenant import KaspiClient as TenantKaspiClient
-except Exception:
-    from app.deps.kaspi_client import KaspiClient as TenantKaspiClient
-
+from app.deps.kaspi_client_tenant import KaspiClient as TenantKaspiClient
 # ---------- ENV ----------
 load_dotenv()
 
