@@ -113,6 +113,16 @@ export const Auth = {
   },
 };
 
+// в самый низ файла, рядом с export const Auth = { ... }
+Auth.requireAuth = async () => {
+  await Auth.ready; // ждём инициализации клиента
+  const { data: { session } } = await Auth.sb.auth.getSession();
+  if (!session) {
+    location.replace("/ui/login.html");
+    throw new Error("No session");
+  }
+  return session;
+};
 // опционально экспортируем в глобал для отладки
 // (можно удалить)
 window.Auth = Auth;
