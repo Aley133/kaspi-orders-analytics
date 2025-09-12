@@ -61,18 +61,15 @@
     <p id="msg" class="muted row"></p>
   </div>
 
-  <!-- ВАЖНО: модуль auth.js публикует window.Auth -->
-  <script type="module" src="./lib/auth.js"></script>
+  <!-- ИСПОЛЬЗУЕМ МОДУЛИ -->
+  <script type="module">
+    import { Auth } from './lib/auth.js';
 
-  <!-- Логика страницы -->
-  <script>
     const $ = (s) => document.querySelector(s);
     const msg = (t) => { $('#msg').textContent = t || ''; };
 
-    // Не даём Enter случайно перезагружать страницу
-    window.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') e.preventDefault();
-    });
+    // не даём Enter перезагружать страницу
+    window.addEventListener('keydown', (e) => { if (e.key === 'Enter') e.preventDefault(); });
 
     function setTab(mode) {
       const sms = mode === 'sms';
@@ -83,80 +80,73 @@
       localStorage.setItem('login-mode', mode);
       (sms ? $('#phone') : $('#email')).focus();
     }
-
-    $('#tabSms').onclick = () => setTab('sms');
+    $('#tabSms').onclick  = () => setTab('sms');
     $('#tabEmail').onclick = () => setTab('email');
     setTab(localStorage.getItem('login-mode') || 'sms');
 
-    // Ждём инициализации Auth из модуля
-    (async () => {
-      await window.Auth.ready;
+    // ждём инициализации Supabase
+    await Auth.ready;
 
-      // если уже авторизованы — уходим в приложение/настройки
-      await window.Auth.bounceIfAuthed();
+    // если уже авторизованы — уйдём в UI / настройки
+    await Auth.bounceIfAuthed();
 
-      // SMS
-      $('#sendSms').onclick = async () => {
-        const phone = ($('#phone').value || '').trim();
-        if (!phone) return msg('Укажите телефон в формате +7…');
-        msg('Отправляем SMS…');
-        try {
-          await window.Auth.signInPhoneOtp(phone);
-          $('#smsOtpBlock').classList.remove('hidden');
-          msg('Код отправлен. Введите его ниже.');
-          $('#smsOtp').focus();
-        } catch (e) {
-          console.error(e);
-          msg('Ошибка: ' + (e?.message || e));
-        }
-      };
+    // ---------- SMS ----------
+    $('#sendSms').onclick = async () => {
+      const phone = ($('#phone').value || '').trim();
+      if (!phone) return msg('Укажите телефон в формате +7…');
+      msg('Отправляем SMS…');
+      try {
+        await Auth.signInPhoneOtp(phone);
+        $('#smsOtpBlock').classList.remove('hidden');
+        msg('Код отправлен. Введите его ниже.');
+        $('#smsOtp').focus();
+      } catch (e) {
+        console.error(e); msg('Ошибка: ' + (e?.message || e));
+      }
+    };
 
-      $('#verifySms').onclick = async () => {
-        const phone = ($('#phone').value || '').trim();
-        const code  = ($('#smsOtp').value || '').trim();
-        if (!code) return msg('Введите код из SMS');
-        msg('Проверяем код…');
-        try {
-          const ok = await window.Auth.verifyPhoneOtp(phone, code);
-          if (ok) await window.Auth.redirectAfterLogin();
-          else msg('Код не подошёл');
-        } catch (e) {
-          console.error(e);
-          msg('Ошибка: ' + (e?.message || e));
-        }
-      };
+    $('#verifySms').onclick = async () => {
+      const phone = ($('#phone').value || '').trim();
+      const code  = ($('#smsOtp').value || '').trim();
+      if (!code) return msg('Введите код из SMS');
+      msg('Проверяем код…');
+      try {
+        const ok = await Auth.verifyPhoneOtp(phone, code);
+        if (ok) await Auth.redirectAfterLogin();
+        else msg('Код не подошёл');
+      } catch (e) {
+        console.error(e); msg('Ошибка: ' + (e?.message || e));
+      }
+    };
 
-      // Email
-      $('#sendEmail').onclick = async () => {
-        const email = ($('#email').value || '').trim();
-        if (!email) return msg('Укажите e-mail');
-        msg('Отправляем код/ссылку…');
-        try {
-          await window.Auth.signInEmailOtp(email);
-          $('#emailOtpBlock').classList.remove('hidden');
-          msg('Проверьте почту: пришёл код или ссылка.');
-          $('#emailOtp').focus();
-        } catch (e) {
-          console.error(e);
-          msg('Ошибка: ' + (e?.message || e));
-        }
-      };
+    // ---------- Email ----------
+    $('#sendEmail').onclick = async () => {
+      const email = ($('#email').value || '').trim();
+      if (!email) return msg('Укажите e-mail');
+      msg('Отправляем код/ссылку…');
+      try {
+        await Auth.signInEmailOtp(email);
+        $('#emailOtpBlock').classList.remove('hidden');
+        msg('Проверьте почту: пришёл код или ссылка.');
+        $('#emailOtp').focus();
+      } catch (e) {
+        console.error(e); msg('Ошибка: ' + (e?.message || e));
+      }
+    };
 
-      $('#verifyEmail').onclick = async () => {
-        const email = ($('#email').value || '').trim();
-        const code  = ($('#emailOtp').value || '').trim();
-        if (!code) return msg('Введите код из письма');
-        msg('Проверяем код…');
-        try {
-          const ok = await window.Auth.verifyEmailOtp(email, code);
-          if (ok) await window.Auth.redirectAfterLogin();
-          else msg('Код не подошёл');
-        } catch (e) {
-          console.error(e);
-          msg('Ошибка: ' + (e?.message || e));
-        }
-      };
-    })();
+    $('#verifyEmail').onclick = async () => {
+      const email = ($('#email').value || '').trim();
+      const code  = ($('#emailOtp').value || '').trim();
+      if (!code) return msg('Введите код из письма');
+      msg('Проверяем код…');
+      try {
+        const ok = await Auth.verifyEmailOtp(email, code);
+        if (ok) await Auth.redirectAfterLogin();
+        else msg('Код не подошёл');
+      } catch (e) {
+        console.error(e); msg('Ошибка: ' + (e?.message || e));
+      }
+    };
   </script>
 </body>
 </html>
