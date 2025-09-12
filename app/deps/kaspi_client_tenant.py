@@ -6,25 +6,19 @@ from datetime import datetime, timedelta, date
 from typing import Dict, Iterable, Union
 
 import httpx
-
 from .auth import get_current_kaspi_token
 
-# Базовый URL Kaspi API (можно переопределить через переменные окружения)
 KASPI_BASE_URL = (os.getenv("KASPI_BASE_URL") or "https://kaspi.kz/shop/api/v2").rstrip("/")
 
 
 # -------- utils --------
 def _coerce_date(d: Union[str, datetime, date]) -> datetime:
-    """
-    Приводит строку 'YYYY-MM-DD' или date к datetime (локальное «00:00:00»),
-    datetime возвращает как есть.
-    """
+    """Строку 'YYYY-MM-DD' или date → к полуночному datetime; datetime оставляем как есть."""
     if isinstance(d, datetime):
         return d
     if isinstance(d, date):
         return datetime(d.year, d.month, d.day)
     if isinstance(d, str):
-        # допускаем 'YYYY-MM-DD'
         dt = date.fromisoformat(d)
         return datetime(dt.year, dt.month, dt.day)
     raise TypeError(f"Unsupported date type: {type(d)!r}")
@@ -37,26 +31,23 @@ def _to_ms(d: Union[str, datetime, date]) -> int:
 # -------- client --------
 class KaspiClient:
     """
-    Минимальный tenant-aware клиент Kaspi.
-    Токен подтягивается из текущего tenant-контекста (см. get_current_kaspi_token()).
+    Tenant-aware клиент Kaspi. Токен берём из middleware (get_current_kaspi_token()).
     """
 
     _ALLOWED_FIELDS = (
-        "creationDate",          # создание заказа
-        "plannedShipmentDate",   # план передачи
-        "shipmentDate",          # фактическая передача
-        "deliveryDate",          # фактическая доставка
+        "creationDate",
+        "plannedShipmentDate",
+        "shipmentDate",
+        "deliveryDate",
     )
 
     def __init__(self, token: str | None = None, base_url: str | None = None):
-        # token параметр оставлен для совместимости, но фактически не используется:
-        # мы берём токен из middleware через get_current_kaspi_token()
+        # token параметр оставлен для совместимости — фактически не используется
         self.base_url = (base_url or KASPI_BASE_URL).rstrip("/")
 
     def _headers(self) -> Dict[str, str]:
         token = get_current_kaspi_token()
         if not token:
-            # жёстко: без персонального токена — 401
             raise RuntimeError("Kaspi token is not set for this tenant")
         return {
             "X-Auth-Token": token,
@@ -73,18 +64,16 @@ class KaspiClient:
         filter_field: str = "creationDate",
     ) -> Iterable[dict]:
         """
-        Синхронный генератор (поверх httpx). Возвращает элементы из `data` ответа /orders.
-        Диапазон дат задаётся через filter[orders][date] + операторы $ge/$le,
-        а какое именно поле используется для сравнения — в filter[orders][by].
+        Синхронный генератор по /orders.
 
-        Важно: Kaspi ожидает page[number], поэтому стартуем с 1 и далее
-        ходим по ссылкам из "links.next".
+        ВАЖНО: Kaspi ждёт диапазон именно в ключах конкретного поля:
+          filter[orders][<field>][$ge], filter[orders][<field>][$le]
+        где <field> ∈ {creationDate, plannedShipmentDate, shipmentDate, deliveryDate}.
         """
-        # включаем конец дня: [start; end 23:59:59.999]
+        # [start; end 23:59:59.999]
         start_ms = _to_ms(start)
         end_ms = _to_ms(end + timedelta(days=1)) - 1
 
-        # гарантируем валидное поле
         field = (filter_field or "creationDate").strip()
         if field not in self._ALLOWED_FIELDS:
             field = "creationDate"
@@ -92,11 +81,11 @@ class KaspiClient:
         params: Dict[str, object] = {
             "include": "entries",
             "page[size]": 200,
-            "page[number]": 1,
-            "filter[orders][by]": field,            # ← какое поле учитывать
-            # ВАЖНО: диапазон всегда в [orders][date] с операторами $ge/$le
-            "filter[orders][date][$ge]": start_ms,
-            "filter[orders][date][$le]": end_ms,
+            "page[number]": 1,             # без этого Kaspi отвечает "Required pagination value [number] is empty."
+            "filter[orders][by]": field,    # какое поле учитывать
+            # диапазон по САМОМУ полю (не [date]):
+            f"filter[orders][{field}][$ge]": start_ms,
+            f"filter[orders][{field}][$le]": end_ms,
         }
 
         with httpx.Client(base_url=self.base_url, timeout=60.0) as cli:
@@ -116,6 +105,6 @@ class KaspiClient:
                 nxt = (j.get("links") or {}).get("next")
                 if not nxt:
                     break
-                # next уже включает page[number], поэтому дальше ходим «как есть»
+                # next уже содержит корректный page[number] — дальше ходим строго по нему
                 url = nxt
                 params = {}
