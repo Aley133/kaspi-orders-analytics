@@ -214,7 +214,7 @@
   });
 </script>
 
-  <script>
+  <script type="module">
   /* ─────────── ХЕЛПЕРЫ ─────────── */
   const nf = new Intl.NumberFormat('ru-RU');
   function num(x, d=0){ const n = Number(String(x).replace(/\s| |,/g,'').replace(/[^\d.-]/g,'')); return Number.isFinite(n) ? (d?n.toFixed(d):n) : 0; }
@@ -259,7 +259,7 @@
   }
   </script>
 
-  <script>
+  <script type="module">
   /* ─────────── API-Key инъекция для /profit/* ─────────── */
   (()=>{
     const KEY="KASPI_API_KEY";
@@ -317,7 +317,7 @@
   }
   </script>
 
-  <script>
+  <script type="module">
   /* ─────────── UI/STATE ─────────── */
   let citiesChart=null;
   window.APP_CURRENCY='KZT';
@@ -443,7 +443,7 @@
   }
   </script>
 
-  <script>
+  <script type="module">
   /* ─────────── НОМЕРА ЗАКАЗОВ: async-джоба + мост + рендер ─────────── */
   function buildOrderItemsTable(group, currency){
     const table = document.createElement('table'); table.className = 'order-table';
@@ -618,7 +618,7 @@
   }
   </script>
 
-  <script>
+  <script type="module">
   /* ─────────── сбор параметров и ids.async ─────────── */
   function buildParams(){
     const start = document.getElementById('start').value;
@@ -777,7 +777,7 @@
   }
   </script>
 
-  <script>
+  <script type="module">
   /* ─────────── BOOT ─────────── */
   document.addEventListener('DOMContentLoaded', async () => {
     try{
