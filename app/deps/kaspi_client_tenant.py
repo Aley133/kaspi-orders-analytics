@@ -1,61 +1,58 @@
-# deps/app/kaspi_client.py
-from __future__ import annotations
-
+# app/deps/kaspi_client_tenant.py
 import os
-from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, Optional
-
 import httpx
+from datetime import datetime, date
+from typing import Dict, Iterable, Any
 
 from .auth import get_current_kaspi_token
 
 KASPI_BASE_URL = (os.getenv("KASPI_BASE_URL") or "https://kaspi.kz/shop/api/v2").rstrip("/")
 
-_ALLOWED_BY = {"creationDate", "shipmentDate", "deliveryDate"}
-
 
 def _to_ms(v: Any) -> int:
-    """
-    Преобразует значение в миллисекунды Unix (UTC).
-    Поддерживает int/float, строки-числа, ISO-дату/время и 'YYYY-MM-DD'.
-    """
-    if isinstance(v, (int, float)):
+    """Приводим к миллисекундам epoch."""
+    if v is None:
+        return 0
+    # уже миллисекунды
+    if isinstance(v, (int, float)) and int(v) > 10_000_000_000:
         return int(v)
-
+    # секунды -> мс
+    if isinstance(v, (int, float)):
+        return int(v) * 1000
+    if isinstance(v, datetime):
+        # предполагаем UTC или tz-aware — приводим к UTC
+        if v.tzinfo:
+            ts = int(v.timestamp() * 1000)
+        else:
+            ts = int(v.replace(tzinfo=None).timestamp() * 1000)
+        return ts
+    if isinstance(v, date):
+        dt = datetime(v.year, v.month, v.day)
+        return int(dt.timestamp() * 1000)
     s = str(v).strip()
-    if s.isdigit():  # уже миллисекунды/секунды как строка
-        # Не пытаемся угадать, сек это или мс — бэкенд выше передаёт корректно.
-        return int(s)
-
-    # Попытка ISO с временем (включая 'Z')
+    if not s:
+        return 0
+    # число строкой
+    if s.isdigit():
+        n = int(s)
+        return n if n > 10_000_000_000 else n * 1000
+    # ISO дату/датавремя разбираем как локальную и считаем от UTC
     try:
         dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        return int(dt.timestamp() * 1000)
     except Exception:
-        # Формат 'YYYY-MM-DD'
-        dt = datetime.strptime(s, "%Y-%m-%d")
-        dt = dt.replace(tzinfo=timezone.utc)
-
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-
-    return int(dt.timestamp() * 1000)
+        # крайний случай — 0, чтобы не упасть
+        return 0
 
 
-class KaspiClient:
-    """
-    Мини-клиент для Kaspi API v2: заказы с фильтром по диапазону дат.
-    Используется синхронно (как ожидает main.py).
-    """
-
-    def __init__(self, token: Optional[str] = None, base_url: Optional[str] = None) -> None:
+class KaspiClientTenant:
+    def __init__(self, base_url: str | None = None):
         self.base_url = (base_url or KASPI_BASE_URL).rstrip("/")
-        self._token_override = (token or "").strip() or None
 
     def _headers(self) -> Dict[str, str]:
-        token = self._token_override or get_current_kaspi_token()
+        token = get_current_kaspi_token()
         if not token:
             raise RuntimeError("Kaspi token is not set for this tenant")
-
         return {
             "X-Auth-Token": token,
             "Accept": "application/vnd.api+json",
@@ -63,56 +60,52 @@ class KaspiClient:
             "User-Agent": "KaspiAnalytics/1.0",
         }
 
-    @staticmethod
-    def _normalize_by(by: Optional[str]) -> str:
-        by = (by or "creationDate").strip()
-        return by if by in _ALLOWED_BY else "creationDate"
-
-    def iter_orders(self, *, start: Any, end: Any, filter_field: str = "creationDate") -> Iterable[dict]:
+    def iter_orders(self, *, start, end, filter_field: str = "creationDate") -> Iterable[dict]:
         """
-        Генератор заказов за указанный период.
-        :param start: начало интервала (поддерживает ms/int, ISO, 'YYYY-MM-DD')
-        :param end: конец интервала
-        :param filter_field: creationDate | shipmentDate | deliveryDate
-        :yield: элементы из data[]
+        Синхронный генератор заказов Kaspi с ручной пагинацией page[number].
+        filter_field: creationDate | plannedShipmentDate | shipmentDate | deliveryDate
         """
         start_ms = _to_ms(start)
         end_ms = _to_ms(end)
-        by = self._normalize_by(filter_field)
 
-        params: Dict[str, Any] = {
-            "page[size]": 200,
-            "filter[orders][by]": by,
+        # fail-fast
+        if not start_ms or not end_ms:
+            raise RuntimeError(f"Invalid start/end for Kaspi filter: start={start} end={end}")
+
+        page_size = 200
+        page_num = 1
+
+        base_params = {
+            "filter[orders][by]": filter_field,
             "filter[orders][date][ge]": start_ms,
             "filter[orders][date][le]": end_ms,
+            "page[size]": page_size,
             "include": "entries",
         }
 
         with httpx.Client(base_url=self.base_url, timeout=60.0) as cli:
-            url: str = "/orders"
             while True:
-                r = cli.get(url, params=params, headers=self._headers())
-                if r.status_code == 400:
-                    # Покажем исходный текст ошибки Kaspi, чтобы не терять контекст
-                    raise RuntimeError(f"Kaspi API 400: {r.text}")
-                r.raise_for_status()
+                params = dict(base_params)
+                params["page[number]"] = page_num
+
+                r = cli.get("/orders", params=params, headers=self._headers())
+                try:
+                    r.raise_for_status()
+                except httpx.HTTPStatusError as e:
+                    body = ""
+                    try:
+                        body = r.text
+                    except Exception:
+                        pass
+                    raise RuntimeError(f"Kaspi API {r.status_code}: {body or e}") from e
 
                 j = r.json()
                 data = j.get("data") or []
                 for it in data:
                     yield it
 
-                next_link = (j.get("links") or {}).get("next")
-                if not next_link:
+                # заканчиваем, если странице меньше чем limit
+                if len(data) < page_size:
                     break
 
-                # `links.next` может быть абсолютным — httpx корректно обработает.
-                url = next_link
-                params = {}  # при переходе по next не передаём старые params
-
-    # Опционально: утилита на случай, если где-то нужен прямой GET
-    def get(self, path_or_url: str, *, params: Optional[Dict[str, Any]] = None) -> httpx.Response:
-        with httpx.Client(base_url=self.base_url, timeout=60.0) as cli:
-            r = cli.get(path_or_url, params=params or {}, headers=self._headers())
-            r.raise_for_status()
-            return r
+                page_num += 1
