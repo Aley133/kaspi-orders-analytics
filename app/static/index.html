@@ -216,6 +216,8 @@
     return res;
   };
   window.af = window.authedFetch;
+  globalThis.authedFetch = window.authedFetch;
+  globalThis.af = window.authedFetch;
 
   // кнопка «Выход» (если есть в DOM)
   document.getElementById('btnSignOut')?.addEventListener('click', Auth.signOutAndGoLogin);
@@ -564,7 +566,11 @@
       finally{ window.setBusy(false); }
     }
 
-    Object.assign(window, { loadMeta, uiModeHint, run });
+    Object.assign(window, {
+      loadMeta, uiModeHint, run,
+      openStatusMenu, renderStatusGrid, renderStatusChips,
+      normalizeStatesValue, syncStatesInput, ruLabel
+    });
   </script>
 
   <!-- 6) IDs async + мост + рендер -->
