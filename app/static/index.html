@@ -200,14 +200,14 @@
       const headers = { ...(init.headers || {}), ...(await Auth.authHeader()) };
       const res = await fetch(input, { ...init, headers });
       const urlStr = typeof input === 'string' ? input : (input && input.url) || '';
-  // 401 на внутренних эндпоинтах — выходим; на /profit/* — отдадим дальше (пусть спросит X-API-Key)
+      // 401 на внутренних эндпоинтах — выходим; на /profit/* — отдадим дальше (пусть спросит X-API-Key)
       if (res.status === 401 && !urlStr.startsWith('/profit/')) {
         await Auth.signOutAndGoLogin();
         throw new Error('Unauthorized');
       }
       return res;
     };
-    window.af = window.authedFetch; 
+    window.af = window.authedFetch;
 
     // кнопка «Выход»
     document.getElementById('btnSignOut')?.addEventListener('click', async () => {
@@ -235,7 +235,7 @@
 
   function setTopLoader(p){
     const bar = document.querySelector('#topLoader .bar');
-    if(bar) bar.style.width = (p>0 ? `${Math.min(100, Math.max(2, Math.round(p*100)))}%` : '0%');
+    if(bar) bar.style.width = (p>0 ? `${Math.min(100, Math.round(p*100))}%` : '0%');
   }
 
   function setNote(msg, mode='ok'){
@@ -350,7 +350,7 @@
       document.getElementById('tz').value = meta.timezone || 'Asia/Almaty';
       document.getElementById('bd_start').value = meta.business_day_start || '20:00';
       document.getElementById('store_until').value = meta.store_accept_until || '17:00';
-    } catch(_){}
+    } catch(_){/* ignore */}
     const d=new Date(); const z=n=>String(n).padStart(2,'0'); const ymd=`${d.getFullYear()}-${z(d.getMonth()+1)}-${z(d.getDate())}`;
     document.getElementById('start').value = ymd;
     document.getElementById('end').value   = ymd;
@@ -389,33 +389,52 @@
       if(states) p.set('states', states); if(exc) p.set('exclude_states', exc);
       if(bd_start) p.set('business_day_start', bd_start);
 
-      const data = await (await window.authedFetch(`/orders/analytics?${p}`)).json();
-
-      window.APP_CURRENCY = data.currency || 'KZT';
-      document.getElementById('kpiOrders').textContent = fmt(data.total_orders||0);
-      document.getElementById('kpiAmount').textContent = `${fmt(data.total_amount||0)} ${window.APP_CURRENCY}`;
-      document.getElementById('periodLabel').textContent = `${data.range?.start||start} → ${data.range?.end||end}`;
-      document.getElementById('periodCutoff').textContent = (use_bd==='1' ? (bd_start || '20:00') : '24:00');
-      uiModeHint();
-
-      // состояния
-      const sb = document.getElementById('statesBox');
-      sb.innerHTML = '';
-      const entries = Object.entries(data.state_breakdown||{}).sort((a,b)=>b[1]-a[1]);
-      entries.forEach(([k,v])=>{ const span=document.createElement('span'); span.className='pill'; span.textContent=`${k}: ${v}`; sb.appendChild(span); });
-      if(!entries.length) sb.innerHTML = '<div class="muted">Нет данных</div>';
-
-      // города
-      const labels = (data.cities||[]).map(c=>c.city);
-      const counts = (data.cities||[]).map(c=>c.count);
-      const holder = document.getElementById('chart-cities');
-      holder.innerHTML = labels.length ? '<canvas id="cities"></canvas>' : '<div class="muted" style="padding:12px">Нет данных по городам</div>';
-      if(labels.length && typeof Chart!=='undefined'){
-        try{ if(citiesChart) citiesChart.destroy(); }catch(_){}
-        const ctx = document.getElementById('cities').getContext('2d');
-        citiesChart = new Chart(ctx,{type:'bar',data:{labels,datasets:[{label:'Заказы',data:counts}]},options:{responsive:true,plugins:{legend:{display:false}}}});
+      // Пытаемся получить аналитику, но НЕ блокируем остальную загрузку
+      let data = null;
+      try {
+        const r = await window.authedFetch(`/orders/analytics?${p}`);
+        if (!r.ok) throw new Error(await r.text() || r.statusText);
+        data = await r.json();
+      } catch (err) {
+        console.warn('analytics failed:', err);
+        // минимальные KPI из формы, чтобы UI не "пустел"
+        window.APP_CURRENCY = 'KZT';
+        document.getElementById('periodLabel').textContent = `${start} → ${end}`;
+        document.getElementById('periodCutoff').textContent = (use_bd==='1' ? (bd_start || '20:00') : '24:00');
+        document.getElementById('statesBox').innerHTML = '<div class="muted">Нет данных</div>';
+        document.getElementById('chart-cities').innerHTML = '<div class="muted" style="padding:12px">Нет данных по городам</div>';
+        setNote('Аналитика недоступна, показываю данные по заказам…', 'ok');
       }
 
+      // Если аналитика есть — обновим соответствующие виджеты
+      if (data) {
+        window.APP_CURRENCY = data.currency || 'KZT';
+        document.getElementById('kpiOrders').textContent = fmt(data.total_orders||0);
+        document.getElementById('kpiAmount').textContent = `${fmt(data.total_amount||0)} ${window.APP_CURRENCY}`;
+        document.getElementById('periodLabel').textContent = `${data.range?.start||start} → ${data.range?.end||end}`;
+        document.getElementById('periodCutoff').textContent = (use_bd==='1' ? (bd_start || '20:00') : '24:00');
+        uiModeHint();
+
+        // состояния
+        const sb = document.getElementById('statesBox');
+        sb.innerHTML = '';
+        const entries = Object.entries(data.state_breakdown||{}).sort((a,b)=>b[1]-a[1]);
+        entries.forEach(([k,v])=>{ const span=document.createElement('span'); span.className='pill'; span.textContent=`${k}: ${v}`; sb.appendChild(span); });
+        if(!entries.length) sb.innerHTML = '<div class="muted">Нет данных</div>';
+
+        // города
+        const labels = (data.cities||[]).map(c=>c.city);
+        const counts = (data.cities||[]).map(c=>c.count);
+        const holder = document.getElementById('chart-cities');
+        holder.innerHTML = labels.length ? '<canvas id="cities"></canvas>' : '<div class="muted" style="padding:12px">Нет данных по городам</div>';
+        if(labels.length && typeof Chart!=='undefined'){
+          try{ if(citiesChart) citiesChart.destroy(); }catch(_){}
+          const ctx = document.getElementById('cities').getContext('2d');
+          citiesChart = new Chart(ctx,{type:'bar',data:{labels,datasets:[{label:'Заказы',data:counts}]},options:{responsive:true,plugins:{legend:{display:false}}}});
+        }
+      }
+
+      // НЕЗАВИСИМО: ids.async + FIFO
       await runIdsJob();
       await renderBridgeTable();
 
@@ -703,7 +722,6 @@
       ? data.period_total_amount
       : (data.items||[]).reduce((a,it)=>a+num(it.amount),0);
 
-
     const summary = document.createElement('div'); summary.className='ids-summary';
     summary.innerHTML = `<span>Итого за период:</span> <b>${fmt(totalCount)}</b><span> шт.</span> · <b>${fmt(totalAmount)}</b> <span>${currency}</span>`;
     container.appendChild(summary);
@@ -743,26 +761,20 @@
     btnExpand.onclick=()=>detailsList.forEach(d=>d.open=true);
     btnCollapse.onclick=()=>detailsList.forEach(d=>d.open=false);
 
-    setNote('Данные обновлены', 'ok');
-  }
-  </script>
-
-  <script>
-  /* ─────────── MS: синхронизация себестоимости (опционально) ─────────── */
-  document.addEventListener('DOMContentLoaded', ()=>{
-    document.getElementById('btnSyncMsCosts')?.addEventListener('click', syncMsCosts);
-  });
-  async function syncMsCosts(){
+    // если аналитики не было — подставим KPI из результата ids
     try{
-      setBusy(true);
-      const df=document.getElementById('start').value;
-      const dt=document.getElementById('end').value;
-      const url='/profit/bridge/ms/sync-costs?'+new URLSearchParams({date_from:df,date_to:dt}).toString();
-      const j=await fetchBridgeJSON(url,{method:'POST'});
-      setNote(`Себестоимость из МС обновлена: ${j.synced||0} SKU`, 'ok');
-      await renderBridgeTable();
-    }catch(e){ setNote('MS sync: ' + (e.message||e), 'err'); }
-    finally{ setBusy(false); }
+      const ordersCnt = (data.items||[]).length;
+      const amountSum = (data.items||[]).reduce((a,it)=>a+(deriveLine(it).total||0),0);
+      if(Number(document.getElementById('kpiOrders').textContent||0)===0){
+        document.getElementById('kpiOrders').textContent = fmt(ordersCnt);
+      }
+      const cur = window.APP_CURRENCY || 'KZT';
+      if(Number((document.getElementById('kpiAmount').textContent||'0').replace(/[^\d]/g,''))===0){
+        document.getElementById('kpiAmount').textContent = `${fmt(amountSum)} ${cur}`;
+      }
+    }catch(_){}
+
+    setNote('Данные обновлены', 'ok');
   }
   </script>
 
