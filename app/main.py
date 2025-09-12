@@ -1,26 +1,30 @@
-# app/main.py (импорты и подключение роутеров)
+# app/main.py
 
 from __future__ import annotations
 
+# ---------- imports ----------
 import os
+import re
+import uuid
+import random
+import asyncio
 from datetime import datetime, timedelta, time, date
 from pathlib import Path
 from typing import Optional, Dict, List, Iterable, Tuple, Callable
 
-import asyncio
 import httpx
+from httpx import HTTPStatusError, RequestError
 import pytz
 from dotenv import load_dotenv
-from fastapi import FastAPI, Query, HTTPException, Request
+from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse, PlainTextResponse, JSONResponse
 from cachetools import TTLCache
-
 from pydantic import BaseModel
 
 # middleware, который кладёт tenant/token в request.state
-from app.deps.auth import attach_kaspi_token_middleware
+from app.deps.auth import attach_kaspi_token_middleware, get_current_kaspi_token
 
 # доменные роутеры
 from app.api.bridge_v2 import router as bridge_router
@@ -37,7 +41,7 @@ try:
 except Exception:
     from app.deps.kaspi_client import KaspiClient as TenantKaspiClient
 
-# -------------------- ENV --------------------
+# ---------- ENV ----------
 load_dotenv()
 
 KASPI_TOKEN = os.getenv("KASPI_TOKEN", "").strip()
@@ -66,7 +70,14 @@ STORE_ACCEPT_UNTIL = os.getenv("STORE_ACCEPT_UNTIL", "17:00")
 BUSINESS_DAY_START = os.getenv("BUSINESS_DAY_START", "20:00")
 USE_BUSINESS_DAY = os.getenv("USE_BUSINESS_DAY", "true").lower() in ("1", "true", "yes", "on")
 
-# -------------------- FastAPI --------------------
+# Конкурентность обогащения (используется ниже)
+ENRICH_CONCURRENCY = int(os.getenv("ENRICH_CONCURRENCY", "6") or 6)
+
+# Глобальные «эффективные» параметры для bucket_date (безопасные дефолты)
+_EFF_USE_BD: bool = False
+_EFF_BDS: str = BUSINESS_DAY_START
+
+# ---------- FastAPI ----------
 app = FastAPI(title="Kaspi Orders Analytics")
 
 origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
@@ -94,20 +105,35 @@ _ui_dir = next((p for p in _ui_candidates if Path(p).is_dir()), None)
 if _ui_dir:
     app.mount("/ui", StaticFiles(directory=_ui_dir, html=True), name="ui")
 
-# -------------------- РОУТЕРЫ --------------------
+# ---------- РОУТЕРЫ ----------
 app.include_router(get_products_router(client), prefix="/products")
 app.include_router(get_profit_fifo_router(), prefix="/profit")
 app.include_router(bridge_router, prefix="/profit")
 app.include_router(auth_router)
 app.include_router(settings_api.router, prefix="/settings", tags=["settings"])
 
-# -------------------- helpers --------------------
+# ---------- helpers ----------
 def _bd_delta(hhmm: str) -> timedelta:
+    """Преобразует 'HH:MM' в timedelta с начала суток (для бизнес-дня)."""
     try:
-        hh, mm = map(int, hhmm.split(":"))
-        return timedelta(hours=hh, minutes=mm)
+        h, m = hhmm.split(":")
+        return timedelta(hours=int(h), minutes=int(m))
     except Exception:
-        raise HTTPException(status_code=400, detail=f"Bad BUSINESS_DAY_START: {hhmm}")
+        return timedelta(0)
+
+def _days_between(a: datetime, b: datetime) -> int:
+    """Количество календарных дней в диапазоне [a..b]."""
+    return (b.date() - a.date()).days + 1
+
+def norm_state(s: str) -> str:
+    """Нормализация названия статуса."""
+    return (s or "").strip().upper()
+
+def parse_states_csv(s: Optional[str]) -> Optional[set[str]]:
+    """Парсинг CSV/списка статусов с разделителями пробел/запятая/точка с запятой."""
+    if not s:
+        return None
+    return {norm_state(x) for x in re.split(r"[\s,;]+", s) if x.strip()}
 
 def _parse_hhmm_to_time(hhmm: str) -> time:
     try:
@@ -115,7 +141,7 @@ def _parse_hhmm_to_time(hhmm: str) -> time:
         return time(hh, mm, 0)
     except Exception:
         raise HTTPException(status_code=400, detail=f"Bad HH:MM time: {hhmm}")
-        
+
 def tzinfo_of(name: str) -> pytz.BaseTzInfo:
     try:
         return pytz.timezone(name)
@@ -135,6 +161,7 @@ def apply_hhmm(dt_local: datetime, hhmm: str) -> datetime:
     return dt_local.replace(hour=hh, minute=mm, second=0, microsecond=0)
 
 def iter_chunks(start_dt: datetime, end_dt: datetime, step_days: int) -> Iterable[Tuple[datetime, datetime]]:
+    """Итерация по диапазону дат кусками step_days (включая конечные миллисекунды)."""
     cur = start_dt
     while cur <= end_dt:
         nxt = min(cur + timedelta(days=step_days) - timedelta(milliseconds=1), end_dt)
@@ -150,14 +177,6 @@ def dict_get_path(d: dict, path: str):
             return None
         cur = cur[key]
     return cur
-
-def norm_state(s: str) -> str:
-    return (s or "").strip().upper()
-
-def parse_states_csv(s: Optional[str]) -> Optional[set[str]]:
-    if not s:
-        return None
-    return {norm_state(x) for x in re.split(r"[\s,;]+", s) if x.strip()}
 
 _CITY_KEY_HINTS = {"city", "cityname", "town", "locality", "settlement"}
 
@@ -234,7 +253,7 @@ def _guess_number(attrs: dict, fallback_id: str) -> str:
             return v.strip()
     return str(fallback_id)
 
-# -------------------- HTTPX и ретраи --------------------
+# ---------- HTTPX и ретраи ----------
 BASE_TIMEOUT = httpx.Timeout(connect=10.0, read=80.0, write=20.0, pool=60.0)
 HTTPX_LIMITS = httpx.Limits(max_connections=20, max_keepalive_connections=10)
 
@@ -282,7 +301,7 @@ async def _get_json_with_retries(cli: httpx.AsyncClient, url: str, *, params: Di
             backoff = min(0.9 * (2 ** i), 16.0) + random.uniform(0.0, 0.4)
             await asyncio.sleep(backoff)
 
-# -------------------- «Умное» назначение операционного дня --------------------
+# ---------- «Умное» назначение операционного дня ----------
 _DELIVERED_STATES = {"KASPI_DELIVERY", "ARCHIVE", "ARCHIVED"}
 
 def _smart_operational_day(attrs: dict, state: str, tzinfo: pytz.BaseTzInfo,
@@ -313,7 +332,57 @@ def _smart_operational_day(attrs: dict, state: str, tzinfo: pytz.BaseTzInfo,
 
     return datetime.now(tzinfo).date().isoformat(), "fallback_now"
 
-# -------------------- Вытягивание позиций (ВСЕ SKU) --------------------
+# ---------- Хелперы для позиций ----------
+def _index_included(included: List[dict]) -> Dict[Tuple[str, str], dict]:
+    idx: Dict[Tuple[str, str], dict] = {}
+    for it in included or []:
+        t = str(it.get("type") or "")
+        i = str(it.get("id") or "")
+        if t and i:
+            idx[(t, i)] = it
+    return idx
+
+def _rel_id(entry: dict, rel_key: str) -> Tuple[Optional[str], Optional[str]]:
+    rel = (entry.get("relationships") or {}).get(rel_key) or {}
+    data = rel.get("data") or {}
+    if isinstance(data, dict):
+        return data.get("type"), data.get("id")
+    return None, None
+
+def _extract_entry(entry: dict, idx: Dict[Tuple[str, str], dict]) -> dict:
+    attrs = entry.get("attributes", {}) or {}
+    qty = int(attrs.get("quantity") or attrs.get("qty") or 1)
+    unit_price = attrs.get("basePrice") or attrs.get("unitPrice") or attrs.get("price") or 0
+    try:
+        unit_price = float(unit_price)
+    except Exception:
+        unit_price = 0.0
+    offer = attrs.get("offer") or {}
+    sku = ""
+    if isinstance(offer, dict):
+        sku = str(offer.get("code") or "")
+    return {"qty": qty, "unit_price": unit_price, "sku": sku}
+
+def _title_candidates_from_attrs(attrs: dict) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    for k in ("offerName", "title", "name", "productName", "shortName"):
+        v = attrs.get(k)
+        if isinstance(v, str) and v.strip():
+            out[k] = v.strip()
+    return out
+
+def _sku_candidates_from_attrs(attrs: dict) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    for k in ("sku", "code", "productCode"):
+        v = attrs.get(k)
+        if isinstance(v, str) and v.strip():
+            out[k] = v.strip()
+    offer = attrs.get("offer") or {}
+    if isinstance(offer, dict) and offer.get("code"):
+        out["offer.code"] = str(offer["code"])
+    return out
+
+# ---------- Вытягивание позиций (ВСЕ SKU) ----------
 async def _all_items_details(order_id: str, return_candidates: bool = True, timeout_scale: float = 1.0) -> List[Dict[str, object]]:
     cache_key = f"entries:{order_id}"
     cached = orders_cache.get(cache_key)
@@ -393,7 +462,7 @@ async def _all_items_details(order_id: str, return_candidates: bool = True, time
     orders_cache[cache_key] = [dict(x) for x in items]
     return items
 
-# -------------------- (совместимость) первая позиция --------------------
+# ---------- (совместимость) первая позиция ----------
 async def _first_item_details(order_id: str, return_candidates: bool = False, timeout_scale: float = 1.0) -> Optional[Dict[str, object]]:
     items = await _all_items_details(order_id, return_candidates=return_candidates, timeout_scale=timeout_scale)
     if not items:
@@ -405,7 +474,7 @@ async def _first_item_details(order_id: str, return_candidates: bool = False, ti
         out["title_candidates"] = first.get("title_candidates", {})
     return out
 
-# -------------------- Models --------------------
+# ---------- Models ----------
 class DayPoint(BaseModel):
     x: str
     count: int
@@ -427,17 +496,21 @@ class AnalyticsResponse(BaseModel):
     cities: List[CityCount] = []
     state_breakdown: Dict[str, int] = {}
 
-# -------------------- Вспомогательное расширение состояний --------------------
+# ---------- Вспомогательное расширение состояний ----------
 _ARCHIVE_ALIASES = {"ARCHIVE", "ARCHIVED"}
 
 def _expand_with_archive(states_inc: Optional[set[str]]) -> set[str]:
+    """
+    Если фильтр не задан — не фильтруем (пустое множество).
+    Если в фильтре есть KASPI_DELIVERY — добавляем синонимы ARCHIVE/ARCHIVED.
+    """
     if not states_inc:
-        return set(DEFAULT_INCLUDE_STATES)
+        return set()
     if "KASPI_DELIVERY" in states_inc:
         return set(states_inc) | _ARCHIVE_ALIASES
     return set(states_inc)
 
-# -------------------- Прогресс-джобы --------------------
+# ---------- Прогресс-джобы ----------
 Jobs: Dict[str, Dict[str, object]] = {}  # job_id -> state
 
 def _new_job() -> str:
@@ -458,7 +531,8 @@ def _new_job() -> str:
 
 def _job_update(job_id: str, **patch):
     st = Jobs.get(job_id)
-    if not st: return
+    if not st:
+        return
     st.update(patch)
     st["updated"] = datetime.utcnow().isoformat() + "Z"
 
@@ -487,7 +561,7 @@ def auth_meta():
         raise HTTPException(status_code=500, detail="Missing SUPABASE_URL or SUPABASE_ANON_KEY")
     return {"SUPABASE_URL": url, "SUPABASE_ANON_KEY": key}
 
-# -------------------- Endpoints: META --------------------
+# ---------- Endpoints: META ----------
 @app.get("/meta")
 async def meta():
     return {
@@ -506,7 +580,7 @@ async def meta():
         "store_accept_until": STORE_ACCEPT_UNTIL,
     }
 
-# -------------------- Внутреннее ядро сбора --------------------
+# ---------- Внутреннее ядро сбора ----------
 def _calc_timeout_scale(days_span: int, targets: int) -> float:
     scale = 1.0
     if days_span >= 10:
@@ -642,7 +716,7 @@ async def _collect_range(
 
     return out_days, city_counts, total_orders, round(total_amount, 2), state_counts, flat_out
 
-# -------------------- Публичные эндпоинты аналитики --------------------
+# ---------- Публичные эндпоинты аналитики ----------
 @app.get("/orders/analytics", response_model=AnalyticsResponse)
 async def analytics(start: str = Query(...), end: str = Query(...), tz: str = Query(DEFAULT_TZ),
                     date_field: str = Query(DATE_FIELD_DEFAULT),
@@ -697,7 +771,7 @@ async def analytics(start: str = Query(...), end: str = Query(...), tz: str = Qu
         prev_start = prev_end - timedelta(days=span_days) + timedelta(milliseconds=1)
         prev_days, _, _, _, _, _ = await _collect_range(
             prev_start, prev_end, tz, date_field, inc, exc,
-            assign_mode=assign_mode, store_accept_until=(store_accept_until or STORE_ACCEPT_UNTIL)
+            assign_mode=assign_mode, store_accept_until=(store_accept_until or STORE_ACCEPT_UNTIL),
         )
 
     return {
@@ -716,22 +790,25 @@ async def analytics(start: str = Query(...), end: str = Query(...), tz: str = Qu
         "state_breakdown": st_counts,
     }
 
-# -------------------- Вспомогательная «ядровая» функция list_ids --------------------
+# ---------- Вспомогательная «ядровая» функция list_ids ----------
 def _select_targets(out: List[Dict[str, object]], enrich_day: str, enrich_scope: str, limit: int) -> List[Dict[str, object]]:
     if enrich_scope == "all":
-        return out
+        return out if not limit or limit <= 0 else out[:limit]
     if enrich_scope == "last_day":
-        return [it for it in out if str(it["op_day"]) == enrich_day]
+        sel = [it for it in out if str(it["op_day"]) == enrich_day]
+        return sel if not limit or limit <= 0 else sel[:limit]
     if enrich_scope == "last_week":
         y, m, d = map(int, enrich_day.split("-"))
         last_dt = date(y, m, d)
         scope = {(last_dt - timedelta(days=i)).isoformat() for i in range(7)}
-        return [it for it in out if str(it["op_day"]) in scope]
+        sel = [it for it in out if str(it["op_day"]) in scope]
+        return sel if not limit or limit <= 0 else sel[:limit]
     if enrich_scope == "last_month":
         y, m, d = map(int, enrich_day.split("-"))
         last_dt = date(y, m, d)
         scope = {(last_dt - timedelta(days=i)).isoformat() for i in range(30)}
-        return [it for it in out if str(it["op_day"]) in scope]
+        sel = [it for it in out if str(it["op_day"]) in scope]
+        return sel if not limit or limit <= 0 else sel[:limit]
     return []
 
 async def _list_ids_core(
@@ -763,7 +840,7 @@ async def _list_ids_core(
 
     days, cities_dict, tot, tot_amt, st_counts, out = await _collect_range(
         start_dt, end_dt, tz, date_field, inc, exc,
-        assign_mode=assign_mode, store_accept_until=(store_accept_until or STORE_ACCEPT_UNTИЛ),
+        assign_mode=assign_mode, store_accept_until=(store_accept_until or STORE_ACCEPT_UNTIL),
         progress=progress_cb
     )
 
@@ -846,7 +923,7 @@ async def _list_ids_core(
         "currency": CURRENCY,
     }
 
-# -------------------- /orders/ids --------------------
+# ---------- /orders/ids ----------
 @app.get("/orders/ids")
 async def list_ids(
     start: str = Query(...),
@@ -873,7 +950,7 @@ async def list_ids(
         enrich_scope, items_mode, return_candidates, assign_mode, store_accept_until, None
     )
 
-# -------------------- CSV --------------------
+# ---------- CSV ----------
 @app.get("/orders/ids.csv", response_class=PlainTextResponse)
 async def list_ids_csv(
     start: str = Query(...),
@@ -898,7 +975,7 @@ async def list_ids_csv(
     csv = "\n".join([str(it["number"]) for it in data["items"]])
     return csv
 
-# -------------------- Async с прогрессом --------------------
+# ---------- Async с прогрессом ----------
 @app.post("/orders/ids.async")
 async def list_ids_async(
     start: str = Query(...),
@@ -968,7 +1045,7 @@ async def job_cancel(job_id: str):
     st["cancel"] = True
     return {"ok": True}
 
-# -------------------- ROOT --------------------
+# ---------- ROOT ----------
 @app.get("/", include_in_schema=False)
 async def root():
     return RedirectResponse(url="/ui/")
