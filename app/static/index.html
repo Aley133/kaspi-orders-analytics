@@ -196,13 +196,18 @@
     await Auth.ready;
     await Auth.requireAuth();           // если не авторизован — редирект на /ui/login.html
 
-    // глобальный авторизованный fetch
     window.authedFetch = async (input, init = {}) => {
       const headers = { ...(init.headers || {}), ...(await Auth.authHeader()) };
       const res = await fetch(input, { ...init, headers });
-      if (res.status === 401) { await Auth.signOutAndGoLogin(); throw new Error("Unauthorized"); }
+      const urlStr = typeof input === 'string' ? input : (input && input.url) || '';
+  // 401 на внутренних эндпоинтах — выходим; на /profit/* — отдадим дальше (пусть спросит X-API-Key)
+      if (res.status === 401 && !urlStr.startsWith('/profit/')) {
+        await Auth.signOutAndGoLogin();
+        throw new Error('Unauthorized');
+      }
       return res;
     };
+    window.af = window.authedFetch; 
 
     // кнопка «Выход»
     document.getElementById('btnSignOut')?.addEventListener('click', async () => {
@@ -337,7 +342,7 @@
 
   async function loadMeta(){
     try {
-      const meta = await (await authedFetch('/meta')).json();
+      const meta = await (await window.authedFetch('/meta')).json();
       const sel = document.getElementById('date_field');
       sel.innerHTML = '';
       (meta.date_field_options || ['creationDate']).forEach(v=>{ const o=document.createElement('option'); o.value=v; o.textContent=DATE_FIELD_LABELS[v] || v; sel.appendChild(o); });
@@ -384,7 +389,7 @@
       if(states) p.set('states', states); if(exc) p.set('exclude_states', exc);
       if(bd_start) p.set('business_day_start', bd_start);
 
-      const data = await (await authedFetch(`/orders/analytics?${p.toString()}`)).json();
+      const data = await (await window.authedFetch(`/orders/analytics?${p}`)).json();
 
       window.APP_CURRENCY = data.currency || 'KZT';
       document.getElementById('kpiOrders').textContent = fmt(data.total_orders||0);
@@ -629,7 +634,7 @@
     setBusy(true);
 
     const params = buildParams();
-    const res = await authedFetch(`/orders/ids.async?${params.toString()}`, {method:'POST'});
+    const res = await window.authedFetch(`/orders/ids.async?${params}`, { method:'POST' });
     if(!res.ok){ const txt = await res.text(); setNote(txt || res.statusText, 'err'); setBusy(false); return; }
     const { job_id } = await res.json();
     CURRENT_JOB_ID = job_id;
@@ -694,7 +699,10 @@
     const container = document.getElementById('ids'); container.innerHTML='';
     const currency = data.currency || window.APP_CURRENCY || 'KZT';
     const totalCount = (typeof data.period_total_count === 'number') ? data.period_total_count : (data.items||[]).length;
-    const totalAmount = (typeof data.period_total_amount === 'number') ? data.period_total_amount : (data.items||[]).reduce((a,it)=>a+(Number(it.amount)||0),0);
+    const totalAmount = (typeof data.period_total_amount === 'number')
+      ? data.period_total_amount
+      : (data.items||[]).reduce((a,it)=>a+num(it.amount),0);
+
 
     const summary = document.createElement('div'); summary.className='ids-summary';
     summary.innerHTML = `<span>Итого за период:</span> <b>${fmt(totalCount)}</b><span> шт.</span> · <b>${fmt(totalAmount)}</b> <span>${currency}</span>`;
