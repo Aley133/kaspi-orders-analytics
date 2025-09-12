@@ -499,75 +499,122 @@
       if(!use_bd) el.textContent += ' · День магазина: выключен';
     }
 
-    async function run(e){
-      if(e) e.preventDefault();
-      try{
-        window.setBusy(true);
-        const start = document.getElementById('start').value;
-        const end   = document.getElementById('end').value;
-        const tz    = document.getElementById('tz').value || 'Asia/Almaty';
-        const date_field = document.getElementById('date_field').value;
-        let date_field = document.getElementById('date_field')?.value || '';
-        if(!date_field){ date_field = (window.__meta?.date_field_default) || 'creationDate'; }
-        const states = normalizeStatesValue(document.getElementById('states').value);
-        document.getElementById('states').value = states;
-        const exc    = document.getElementById('exclude_states').checked ? 'CANCELED' : '';
-        const use_bd = document.getElementById('use_bd')?.checked ? '1' : '0';
-        const bd_start = document.getElementById('bd_start')?.value || '';
-        const assign_mode = document.getElementById('assign_mode').value || 'smart';
-        const store_until = document.getElementById('store_until').value || '17:00';
+      async function run(e) {
+  if (e && typeof e.preventDefault === 'function') e.preventDefault();
 
-        const p = new URLSearchParams({ start, end, tz, date_field, use_bd, assign_mode, store_accept_until: store_until });
-        if(states) p.set('states', states); if(exc) p.set('exclude_states', exc);
-        if(bd_start) p.set('business_day_start', bd_start);
+  try {
+    setBusy(true);
 
-        let data = null;
-        try {
-          const r = await authedFetch(`/orders/analytics?${p}`);
-          if (!r.ok) throw new Error(await r.text() || r.statusText);
-          data = await r.json();
-        } catch (err) {
-          console.warn('analytics failed:', err);
-          window.APP_CURRENCY = 'KZT';
-          document.getElementById('periodLabel').textContent = `${start} → ${end}`;
-          document.getElementById('periodCutoff').textContent = (use_bd==='1' ? (bd_start || '20:00') : '24:00');
-          document.getElementById('statesBox').innerHTML = '<div class="muted">Нет данных</div>';
-          document.getElementById('chart-cities').innerHTML = '<div class="muted" style="padding:12px">Нет данных по городам</div>';
-          setNote('Аналитика недоступна, показываю данные по заказам…', 'ok');
-        }
+    const start = document.getElementById('start')?.value || '';
+    const end   = document.getElementById('end')?.value   || '';
+    const tz    = document.getElementById('tz')?.value    || 'Asia/Almaty';
 
-        if (data) {
-          window.APP_CURRENCY = data.currency || 'KZT';
-          document.getElementById('kpiOrders').textContent = fmt(data.total_orders||0);
-          document.getElementById('kpiAmount').textContent = `${fmt(data.total_amount||0)} ${window.APP_CURRENCY}`;
-          document.getElementById('periodLabel').textContent = `${data.range?.start||start} → ${data.range?.end||end}`;
-          document.getElementById('periodCutoff').textContent = (use_bd==='1' ? (bd_start || '20:00') : '24:00');
-          uiModeHint();
+    // ВАЖНО: одна переменная, с фолбэком на мету/дефолт
+    let date_field = document.getElementById('date_field')?.value || '';
+    if (!date_field) date_field = (window.__meta?.date_field_default) || 'creationDate';
 
-          const sb = document.getElementById('statesBox');
-          sb.innerHTML = '';
-          const entries = Object.entries(data.state_breakdown||{}).sort((a,b)=>b[1]-a[1]);
-          entries.forEach(([k,v])=>{ const span=document.createElement('span'); span.className='pill'; span.textContent=`${k}: ${v}`; sb.appendChild(span); });
-          if(!entries.length) sb.innerHTML = '<div class="muted">Нет данных</div>';
+    // Статусы
+    const statesNorm = normalizeStatesValue(document.getElementById('states')?.value || '');
+    const statesEl = document.getElementById('states'); if (statesEl) statesEl.value = statesNorm;
+    const exc = document.getElementById('exclude_states')?.checked ? 'CANCELED' : '';
 
-          const labels = (data.cities||[]).map(c=>c.city);
-          const counts = (data.cities||[]).map(c=>c.count);
-          const holder = document.getElementById('chart-cities');
-          holder.innerHTML = labels.length ? '<canvas id="cities"></canvas>' : '<div class="muted" style="padding:12px">Нет данных по городам</div>';
-          if(labels.length && typeof Chart!=='undefined'){
-            try{ if(citiesChart) citiesChart.destroy(); }catch(_){}
-            const ctx = document.getElementById('cities').getContext('2d');
-            citiesChart = new Chart(ctx,{type:'bar',data:{labels,datasets:[{label:'Заказы',data:counts}]},options:{responsive:true,plugins:{legend:{display:false}}}});
-          }
-        }
+    // Режим дня/срез
+    const use_bd      = document.getElementById('use_bd')?.checked ? '1' : '0';
+    const bd_start    = document.getElementById('bd_start')?.value || '';
+    const assign_mode = document.getElementById('assign_mode')?.value || 'smart';
+    const store_until = document.getElementById('store_until')?.value || '17:00';
 
-        await window.runIdsJob();
-        await window.renderBridgeTable();
+    // Параметры запроса
+    const p = new URLSearchParams({
+      start, end, tz, date_field, use_bd, assign_mode,
+      store_accept_until: store_until
+    });
+    if (bd_start) p.set('business_day_start', bd_start);
+    if (statesNorm) p.set('states', statesNorm);
+    if (exc) p.set('exclude_states', exc);
 
-        setNote('Данные обновлены', 'ok');
-      }catch(err){ setNote('Ошибка загрузки: ' + (err?.message || err), 'err'); }
-      finally{ window.setBusy(false); }
+    // --- analytics ---
+    let data = null;
+    try {
+      const r = await authedFetch('/orders/analytics?' + p.toString());
+      if (!r.ok) throw new Error((await r.text()) || r.statusText);
+      data = await r.json();
+    } catch (err) {
+      console.warn('analytics failed:', err);
+      window.APP_CURRENCY = 'KZT';
+      document.getElementById('periodLabel').textContent = `${start} → ${end}`;
+      document.getElementById('periodCutoff').textContent =
+        (use_bd === '1' ? (bd_start || '20:00') : '24:00');
+      document.getElementById('statesBox').innerHTML =
+        '<div class="muted">Нет данных</div>';
+      document.getElementById('chart-cities').innerHTML =
+        '<div class="muted" style="padding:12px">Нет данных по городам</div>';
+      setNote('Аналитика недоступна, показываю данные по заказам…', 'ok');
     }
+
+    // --- отрисовка аналитики ---
+    if (data) {
+      window.APP_CURRENCY = data.currency || 'KZT';
+
+      const orders = Number(data.total_orders || 0);
+      const amount = Number(data.total_amount || 0);
+      const startLbl = data.range?.start || start;
+      const endLbl   = data.range?.end   || end;
+
+      const kpiOrdersEl = document.getElementById('kpiOrders');
+      const kpiAmountEl = document.getElementById('kpiAmount');
+      if (kpiOrdersEl) kpiOrdersEl.textContent = fmt(orders);
+      if (kpiAmountEl) kpiAmountEl.textContent = `${fmt(amount)} ${window.APP_CURRENCY}`;
+
+      document.getElementById('periodLabel').textContent = `${startLbl} → ${endLbl}`;
+      document.getElementById('periodCutoff').textContent =
+        (use_bd === '1' ? (bd_start || '20:00') : '24:00');
+      uiModeHint();
+
+      // разложение по статусам
+      const sb = document.getElementById('statesBox');
+      sb.innerHTML = '';
+      const entries = Object.entries(data.state_breakdown || {}).sort((a,b)=>b[1]-a[1]);
+      if (entries.length) {
+        for (const [k, v] of entries) {
+          const pill = document.createElement('span');
+          pill.className = 'pill';
+          pill.textContent = `${k}: ${v}`;
+          sb.appendChild(pill);
+        }
+      } else {
+        sb.innerHTML = '<div class="muted">Нет данных</div>';
+      }
+
+      // города (гистограмма)
+      const labels = (data.cities || []).map(c => c.city);
+      const counts = (data.cities || []).map(c => c.count);
+      const holder = document.getElementById('chart-cities');
+      holder.innerHTML = labels.length ? '<canvas id="cities"></canvas>'
+        : '<div class="muted" style="padding:12px">Нет данных по городам</div>';
+      if (labels.length && typeof Chart !== 'undefined') {
+        try { if (window.citiesChart) window.citiesChart.destroy(); } catch {}
+        const ctx = document.getElementById('cities').getContext('2d');
+        window.citiesChart = new Chart(ctx, {
+          type: 'bar',
+          data: { labels, datasets: [{ label: 'Заказы', data: counts }] },
+          options: { responsive: true, plugins: { legend: { display: false } } }
+        });
+      }
+    }
+
+    // --- ids + мост ---
+    await window.runIdsJob();
+    await window.renderBridgeTable();
+
+    setNote('Данные обновлены', 'ok');
+  } catch (err) {
+    setNote('Ошибка загрузки: ' + (err?.message || err), 'err');
+  } finally {
+    setBusy(false);
+  }
+}
+
 
     Object.assign(window, {
       loadMeta, uiModeHint, run,
