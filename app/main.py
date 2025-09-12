@@ -102,6 +102,20 @@ app.include_router(auth_router)
 app.include_router(settings_api.router, prefix="/settings", tags=["settings"])
 
 # -------------------- helpers --------------------
+def _bd_delta(hhmm: str) -> timedelta:
+    try:
+        hh, mm = map(int, hhmm.split(":"))
+        return timedelta(hours=hh, minutes=mm)
+    except Exception:
+        raise HTTPException(status_code=400, detail=f"Bad BUSINESS_DAY_START: {hhmm}")
+
+def _parse_hhmm_to_time(hhmm: str) -> time:
+    try:
+        hh, mm = map(int, hhmm.split(":"))
+        return time(hh, mm, 0)
+    except Exception:
+        raise HTTPException(status_code=400, detail=f"Bad HH:MM time: {hhmm}")
+        
 def tzinfo_of(name: str) -> pytz.BaseTzInfo:
     try:
         return pytz.timezone(name)
