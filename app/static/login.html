@@ -63,104 +63,90 @@
 
   <!-- ИСПОЛЬЗУЕМ МОДУЛИ -->
   <script type="module">
-  import { Auth } from "./lib/auth.js";
+    import { Auth } from './lib/auth.js';
 
-  const $ = (s) => document.querySelector(s);
-  const setText = (sel, txt) => { const n=$(sel); if(n) n.textContent = txt; };
+    const $ = (s) => document.querySelector(s);
+    const msg = (t) => { $('#msg').textContent = t || ''; };
 
-  // Универсальный fetch c авторизацией и авто-обработкой 401
-  const authedFetch = async (input, init = {}) => {
-    const headers = { ...(init.headers || {}), ...(await Auth.authHeader()) };
-    const res = await fetch(input, { ...init, headers });
+    // не даём Enter перезагружать страницу
+    window.addEventListener('keydown', (e) => { if (e.key === 'Enter') e.preventDefault(); });
 
-    if (res.status === 401) {            // токен просрочен/нет прав
-      await Auth.signOutAndGoLogin();    // чистим сессию и уходим на /ui/login.html
-      throw new Error("Unauthorized");
+    function setTab(mode) {
+      const sms = mode === 'sms';
+      $('#tabSms').classList.toggle('active', sms);
+      $('#tabEmail').classList.toggle('active', !sms);
+      $('#paneSms').classList.toggle('hidden', !sms);
+      $('#paneEmail').classList.toggle('hidden', sms);
+      localStorage.setItem('login-mode', mode);
+      (sms ? $('#phone') : $('#email')).focus();
     }
-    return res;
-  };
+    $('#tabSms').onclick  = () => setTab('sms');
+    $('#tabEmail').onclick = () => setTab('email');
+    setTab(localStorage.getItem('login-mode') || 'sms');
 
-  async function main() {
-    // 1) ждём инициализации supabase
+    // ждём инициализации Supabase
     await Auth.ready;
 
-    // 2) жёсткий гард авторизации
-    let session;
-    try {
-      session = await Auth.requireAuth();   // редиректит на логин сам, если нет сессии
-    } catch { return; }                     // дальше код уже не выполняется
+    // если уже авторизованы — уйдём в UI / настройки
+    await Auth.bounceIfAuthed();
 
-    // (опционально) показать e-mail/телефон в UI
-    setText("#userEmail", session.user?.email || session.user?.phone || "");
-
-    // 3) тянем настройки пользователя/проекта
-    let me;
-    try {
-      const r = await authedFetch("/settings/me");
-      if (r.status === 404) {
-        // настроек ещё нет — ведём на мастер-настройку
-        location.replace("/ui/settings.html");
-        return;
+    // ---------- SMS ----------
+    $('#sendSms').onclick = async () => {
+      const phone = ($('#phone').value || '').trim();
+      if (!phone) return msg('Укажите телефон в формате +7…');
+      msg('Отправляем SMS…');
+      try {
+        await Auth.signInPhoneOtp(phone);
+        $('#smsOtpBlock').classList.remove('hidden');
+        msg('Код отправлен. Введите его ниже.');
+        $('#smsOtp').focus();
+      } catch (e) {
+        console.error(e); msg('Ошибка: ' + (e?.message || e));
       }
-      if (!r.ok) throw new Error("settings/me " + r.status);
-      me = await r.json();
-    } catch (e) {
-      console.error(e);
-      setText("#fatal", "Ошибка загрузки настроек: " + (e.message || e));
-      return;
-    }
+    };
 
-    // 4) пример: грузим аналитику за сегодня (без сравнения)
-    try {
-      const tz = me?.timezone || "Asia/Almaty";
-      const today = new Date();                     // локально; сервер всё равно получит tz
-      const d = today.toISOString().slice(0, 10);   // YYYY-MM-DD
+    $('#verifySms').onclick = async () => {
+      const phone = ($('#phone').value || '').trim();
+      const code  = ($('#smsOtp').value || '').trim();
+      if (!code) return msg('Введите код из SMS');
+      msg('Проверяем код…');
+      try {
+        const ok = await Auth.verifyPhoneOtp(phone, code);
+        if (ok) await Auth.redirectAfterLogin();
+        else msg('Код не подошёл');
+      } catch (e) {
+        console.error(e); msg('Ошибка: ' + (e?.message || e));
+      }
+    };
 
-      const url = new URL("/orders/analytics", location.origin);
-      url.searchParams.set("start", d);
-      url.searchParams.set("end",   d);
-      url.searchParams.set("tz",    tz);
-      url.searchParams.set("with_prev", "false");
+    // ---------- Email ----------
+    $('#sendEmail').onclick = async () => {
+      const email = ($('#email').value || '').trim();
+      if (!email) return msg('Укажите e-mail');
+      msg('Отправляем код/ссылку…');
+      try {
+        await Auth.signInEmailOtp(email);
+        $('#emailOtpBlock').classList.remove('hidden');
+        msg('Проверьте почту: пришёл код или ссылка.');
+        $('#emailOtp').focus();
+      } catch (e) {
+        console.error(e); msg('Ошибка: ' + (e?.message || e));
+      }
+    };
 
-      const r = await authedFetch(url);
-      if (!r.ok) throw new Error("analytics " + r.status);
-      const data = await r.json();
-
-      renderAnalytics(data);
-    } catch (e) {
-      console.error(e);
-      setText("#fatal", "Ошибка загрузки аналитики: " + (e.message || e));
-    }
-
-    // 5) выход
-    const logoutBtn = $("#logoutBtn");
-    if (logoutBtn) {
-      logoutBtn.addEventListener("click", async () => {
-        await Auth.logout();             // чистим сессию в supabase
-        location.replace("/ui/login.html");
-      });
-    }
-  }
-
-  // Простейший рендер — замени на свой
-  function renderAnalytics(a) {
-    const box = $("#analytics");
-    if (!box) return;
-    box.innerHTML = `
-      <div class="muted">Период: ${a.range.start} — ${a.range.end}, TZ: ${a.timezone}</div>
-      <div style="margin-top:8px">
-        <b>Заказы:</b> ${a.total_orders} &nbsp;&nbsp;
-        <b>Сумма:</b> ${a.total_amount} ${a.currency}
-      </div>
-    `;
-  }
-
-  // старт
-  main().catch(err => {
-    console.error(err);
-    setText("#fatal", "Критическая ошибка: " + (err.message || err));
-  });
-</script>
-
+    $('#verifyEmail').onclick = async () => {
+      const email = ($('#email').value || '').trim();
+      const code  = ($('#emailOtp').value || '').trim();
+      if (!code) return msg('Введите код из письма');
+      msg('Проверяем код…');
+      try {
+        const ok = await Auth.verifyEmailOtp(email, code);
+        if (ok) await Auth.redirectAfterLogin();
+        else msg('Код не подошёл');
+      } catch (e) {
+        console.error(e); msg('Ошибка: ' + (e?.message || e));
+      }
+    };
+  </script>
 </body>
 </html>
