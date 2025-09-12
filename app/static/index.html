@@ -192,10 +192,10 @@
     </main>
   </div>
 
-<script>
-  if (!localStorage.getItem('SUPA_JWT')) {
-    location.href = '/ui/login.html';
-  }
+<script type="module">
+  import { Auth } from "./lib/auth.js";
+  await Auth.requireAuth();    // <— если не авторизован — мгновенный редирект на логин
+  // дальше — только после успешной авторизации
 </script>
   
 <script>
