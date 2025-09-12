@@ -471,7 +471,8 @@
 
     async function loadMeta(){
       try {
-        const meta = await (await authedFetch('/meta')).json();
+        const meta = await (await window.authedFetch('/meta')).json();
+        window.__meta = meta;
         const sel = document.getElementById('date_field');
         sel.innerHTML = '';
         (meta.date_field_options || ['creationDate']).forEach(v=>{ const o=document.createElement('option'); o.value=v; o.textContent=DATE_FIELD_LABELS[v] || v; sel.appendChild(o); });
@@ -506,6 +507,8 @@
         const end   = document.getElementById('end').value;
         const tz    = document.getElementById('tz').value || 'Asia/Almaty';
         const date_field = document.getElementById('date_field').value;
+        let date_field = document.getElementById('date_field')?.value || '';
+        if(!date_field){ date_field = (window.__meta?.date_field_default) || 'creationDate'; }
         const states = normalizeStatesValue(document.getElementById('states').value);
         document.getElementById('states').value = states;
         const exc    = document.getElementById('exclude_states').checked ? 'CANCELED' : '';
