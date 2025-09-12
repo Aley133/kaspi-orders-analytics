@@ -14,6 +14,12 @@ from .tenant import resolve_kaspi_token
 # Храним текущий kaspi-token в ContextVar, чтобы его могли читать клиенты ниже по стеку
 kaspi_token_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("kaspi_token", default="")
 
+try:
+    kaspi_tok = resolve_kaspi_token(tenant_id) if tenant_id else None
+except Exception as e:
+    print("tenant settings lookup failed:", e)
+    kaspi_tok = None
+    
 def _decode_jwt_noverify(token: str) -> Dict:
     """
     Безопасно достаём payload из JWT без проверки подписи
