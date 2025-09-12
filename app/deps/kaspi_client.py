@@ -1,10 +1,10 @@
 # app/deps/kaspi_client.py
 """
-Compatibility shim: keep old import path working.
-
-Usage in code can stay as:
-    from app.deps.kaspi_client import KaspiClient
+Тонкий ре-экспорт клиентa Kaspi.
+Нужен, чтобы main.py мог импортировать KaspiClient из app.deps.kaspi_client,
+а фактическая реализация оставалась в app.deps.kaspi_client_tenant.
 """
 
-from .kaspi_client_tenant import KaspiClient  # re-export
+from .kaspi_client_tenant import KaspiClient
+
 __all__ = ["KaspiClient"]
