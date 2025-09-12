@@ -26,11 +26,11 @@ class KaspiClient:
         Синхронный генератор поверх httpx (как ожидал ваш main.py).
         """
         params = {
-            "page[size]": "200",
-            "filter[date][ge]": int(start.timestamp() * 1000),
-            "filter[date][le]": int(end.timestamp() * 1000),
-            "filter[orders][by]": filter_field,
-            "include": "entries"
+            "page[size]": 200,
+            "filter[orders][by]": filter_field,           # creationDate / shipmentDate / deliveryDate
+            "filter[orders][date][ge]": start_ms,         # <— обратите внимание на orders
+            "filter[orders][date][le]": end_ms,
+            "include": "entries",
         }
         with httpx.Client(base_url=self.base_url, timeout=60.0) as cli:
             url = "/orders"
