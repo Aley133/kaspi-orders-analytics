@@ -58,21 +58,22 @@
   <!-- ВАЖНО: модульный скрипт -->
   <script type="module">
     import { Auth } from './lib/auth.js';
+    
+    // доступен сразу
+  window.authedFetch = async (input, init = {}) => {
+    const headers = { ...(init.headers || {}), ...(await Auth.authHeader()) };
+    const res = await fetch(input, { ...init, headers });
+    if (res.status === 401) { await Auth.signOutAndGoLogin(); throw new Error("Unauthorized"); }
+    return res;
+  };
+  window.af = window.authedFetch;
 
     // Инициализация и требование авторизации
     await Auth.ready;
     await Auth.requireAuth();
+    document.getElementById('btnSignOut')?.addEventListener('click', Auth.signOutAndGoLogin);
 
-    // Авторизованный fetch (как на index.html)
-    window.authedFetch = async (input, init = {}) => {
-      const headers = { ...(init.headers || {}), ...(await Auth.authHeader()) };
-      const res = await fetch(input, { ...init, headers });
-      if (res.status === 401) {
-        await Auth.signOutAndGoLogin();
-        throw new Error('Unauthorized');
-      }
-      return res;
-    };
+   
 
     const $  = s => document.querySelector(s);
     const form    = $('#form');
