@@ -6,13 +6,10 @@ from datetime import datetime, timedelta, date
 from typing import Dict, Iterable, Optional
 
 import httpx
-
-# Берём токен из middleware (пер-тенант)
 from .auth import get_current_kaspi_token
 
 KASPI_BASE_URL = (os.getenv("KASPI_BASE_URL") or "https://kaspi.kz/shop/api/v2").rstrip("/")
 
-# Разрешённые поля дат (поддерживает сам Kaspi)
 ALLOWED_DATE_FIELDS = (
     "creationDate",
     "plannedShipmentDate",
@@ -23,21 +20,12 @@ ALLOWED_DATE_FIELDS = (
 
 
 def _to_ms(d: datetime | date) -> int:
-    """UTC milliseconds from date/datetime (локальное время берём как есть)."""
     if isinstance(d, date) and not isinstance(d, datetime):
         d = datetime(d.year, d.month, d.day)
     return int(d.timestamp() * 1000)
 
 
 class KaspiClient:
-    """
-    Пер-tenant клиент.
-
-    ВАЖНО про фильтры Kaspi:
-      - когда by=creationDate, диапазон ДОЛЖЕН быть в filter[orders][date][$ge/$le]
-      - для остальных полей by=<field> диапазон ожидают в filter[orders][<field>][$ge/$le]
-    """
-
     def __init__(self, *, base_url: Optional[str] = None):
         self.base_url = (base_url or KASPI_BASE_URL).rstrip("/")
 
@@ -59,10 +47,7 @@ class KaspiClient:
         end: date | datetime,
         filter_field: str = "creationDate",
     ) -> Iterable[dict]:
-        """
-        Итератор по заказам за [start; end 23:59:59.999] по указанному полю дат.
-        """
-        # Границы включительно
+        # Диапазон включительно: [start; end 23:59:59.999]
         start_ms = _to_ms(start)
         end_ms = _to_ms(end + timedelta(days=1)) - 1
 
@@ -78,13 +63,17 @@ class KaspiClient:
             "filter[orders][by]": field,
         }
 
-        # --- КЛЮЧЕВОЙ МОМЕНТ ---
-        # creationDate → диапазон в [date]
-        # остальные поля → диапазон в [<field>]
+        # ← Критично: всегда задаём creationDate
+        params["filter[orders][creationDate][$ge]"] = start_ms
+        params["filter[orders][creationDate][$le]"] = end_ms
+
+        # Для совместимости с разными версиями API Kaspi:
+        # если ищем по creationDate — дублируем в [date]
         if field == "creationDate":
             params["filter[orders][date][$ge]"] = start_ms
             params["filter[orders][date][$le]"] = end_ms
         else:
+            # если другое поле — добавляем его собственный диапазон
             params[f"filter[orders][{field}][$ge]"] = start_ms
             params[f"filter[orders][{field}][$le]"] = end_ms
 
@@ -95,7 +84,6 @@ class KaspiClient:
                 try:
                     r.raise_for_status()
                 except httpx.HTTPStatusError as e:
-                    # пробрасываем тело ошибки, чтобы в логах было видно причину от Kaspi
                     raise RuntimeError(f"Kaspi API {r.status_code}: {r.text or e}") from e
 
                 j = r.json()
@@ -105,7 +93,5 @@ class KaspiClient:
                 nxt = (j.get("links") or {}).get("next")
                 if not nxt:
                     break
-
-                # next может быть абсолютным URL — в таком случае параметры уже включены в ссылку
                 url = nxt
                 params = {}
