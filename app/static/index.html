@@ -191,29 +191,28 @@
 
   <!-- Авторизация и обёртка fetch -->
   <script type="module">
-    import { Auth } from "./lib/auth.js";
+  import { Auth } from "./lib/auth.js";
 
-    await Auth.ready;
-    await Auth.requireAuth();           // если не авторизован — редирект на /ui/login.html
-
-    window.authedFetch = async (input, init = {}) => {
-      const headers = { ...(init.headers || {}), ...(await Auth.authHeader()) };
-      const res = await fetch(input, { ...init, headers });
-      const urlStr = typeof input === 'string' ? input : (input && input.url) || '';
-      // 401 на внутренних эндпоинтах — выходим; на /profit/* — отдадим дальше (пусть спросит X-API-Key)
-      if (res.status === 401 && !urlStr.startsWith('/profit/')) {
-        await Auth.signOutAndGoLogin();
-        throw new Error('Unauthorized');
-      }
-      return res;
-    };
-    window.af = window.authedFetch;
-
-    // кнопка «Выход»
-    document.getElementById('btnSignOut')?.addEventListener('click', async () => {
+  // Сразу объявляем функцию (Auth.authHeader подтянется по await внутри при первом вызове)
+  window.authedFetch = async (input, init = {}) => {
+    const headers = { ...(init.headers || {}), ...(await Auth.authHeader()) };
+    const res = await fetch(input, { ...init, headers });
+    if (res.status === 401) {
       await Auth.signOutAndGoLogin();
-    });
-  </script>
+      throw new Error("Unauthorized");
+    }
+    return res;
+  };
+  window.af = window.authedFetch;
+
+  await Auth.ready;
+  await Auth.requireAuth();
+
+  // кнопка «Выход»
+  document.getElementById('btnSignOut')?.addEventListener('click', async () => {
+    await Auth.signOutAndGoLogin();
+  });
+</script>
 
   <script>
   /* ─────────── ХЕЛПЕРЫ ─────────── */
