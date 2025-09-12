@@ -1,85 +1,126 @@
-// /ui/lib/auth.js
+// ui/lib/auth.js (ESM)
+// Публикует window.Auth с методами: ready, bounceIfAuthed, signInPhoneOtp, verifyPhoneOtp,
+// signInEmailOtp, verifyEmailOtp, redirectAfterLogin
+
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
+const DEBUG = true;
+const log = (...a) => DEBUG && console.log("[auth]", ...a);
+
 async function getMeta() {
-  const r = await fetch("/auth/meta");
-  if (!r.ok) throw new Error("auth/meta failed");
+  const r = await fetch("/auth/meta", { credentials: "same-origin" });
+  if (!r.ok) throw new Error(`/auth/meta failed: ${r.status}`);
   return r.json();
 }
 
-function qs(id) { return document.getElementById(id); }
+function okStatus(code) { return code >= 200 && code < 300; }
 
-let supabase;
-
-async function ensureSb() {
-  if (supabase) return supabase;
-  const meta = await getMeta();
-  supabase = createClient(meta.SUPABASE_URL, meta.SUPABASE_ANON_KEY, {
-    auth: { persistSession: true, autoRefreshToken: true }
-  });
-  return supabase;
-}
-
-function setMode(mode) {
-  qs("tab-email").classList.toggle("active", mode === "email");
-  qs("tab-sms").classList.toggle("active", mode === "sms");
-  qs("pane-email").style.display = mode === "email" ? "" : "none";
-  qs("pane-sms").style.display   = mode === "sms"   ? "" : "none";
-  localStorage.setItem("login-mode", mode);
-}
-
-async function onClickGetCode() {
-  try {
-    const sb = await ensureSb();
-    const mode = qs("tab-email").classList.contains("active") ? "email" : "sms";
-    qs("getCodeBtn").disabled = true;
-
-    if (mode === "email") {
-      const email = (qs("email").value || "").trim();
-      if (!email) throw new Error("Введите email");
-      const { error } = await sb.auth.signInWithOtp({
-        email,
-        options: { emailRedirectTo: location.origin + "/ui/" }
-      });
-      if (error) throw error;
-      qs("hint").textContent = "Если почта верна — проверьте письмо со ссылкой для входа.";
-    } else {
-      const phone = (qs("phone").value || "").trim();
-      if (!phone) throw new Error("Введите телефон в формате +7...");
-      const { error } = await sb.auth.signInWithOtp({
-        phone, options: { channel: "sms" }
-      });
-      if (error) throw error;
-      qs("hint").textContent = "Мы отправили SMS-код. Введите его в открывшемся окне Supabase (если настроено).";
+function fetchJson(url, opts = {}) {
+  return fetch(url, opts).then(async (r) => {
+    if (!okStatus(r.status)) {
+      const txt = await r.text().catch(() => "");
+      const err = new Error(`${url} -> ${r.status} ${txt}`);
+      err.status = r.status;
+      throw err;
     }
-  } catch (e) {
-    console.error(e);
-    alert(e.message || e);
-  } finally {
-    qs("getCodeBtn").disabled = false;
-  }
+    return r.json().catch(() => ({}));
+  });
 }
 
-async function boot() {
-  // не делаем никаких fetch'ей к /settings на странице логина
-  const sb = await ensureSb();
-
-  // если уже залогинен — отправляем в приложение
-  const { data: { session } } = await sb.auth.getSession();
-  if (session) {
-    location.replace("/ui/");
-    return;
-  }
-
-  // табы
-  qs("tab-email").addEventListener("click", () => setMode("email"));
-  qs("tab-sms").addEventListener("click", () => setMode("sms"));
-  setMode(localStorage.getItem("login-mode") || "email");
-
-  // главное — кнопка type="button", и отдельный обработчик клика
-  qs("getCodeBtn").addEventListener("click", onClickGetCode);
-
-  console.log("[login] ready");
+async function createSb() {
+  const meta = await getMeta();
+  const sb = createClient(meta.SUPABASE_URL, meta.SUPABASE_ANON_KEY, {
+    auth: { persistSession: true, autoRefreshToken: true },
+  });
+  return sb;
 }
 
-window.addEventListener("DOMContentLoaded", boot);
+const Auth = {
+  ready: (async () => {
+    Auth.sb = await createSb();
+    log("supabase ready");
+  })(),
+
+  // если есть сессия — уходим в /ui/ (или в /ui/settings.html, если настроек ещё нет)
+  async bounceIfAuthed() {
+    const { data: { session } } = await Auth.sb.auth.getSession();
+    log("session", !!session);
+    if (!session) return;
+
+    try {
+      await fetchJson("/settings/me", { headers: await this.authHeader() });
+      location.replace("/ui/");
+    } catch (e) {
+      if (e.status === 404) {
+        location.replace("/ui/settings.html");
+      } else {
+        // при любой другой ошибке — всё равно в приложение, чтобы показать ошибку внутри
+        location.replace("/ui/");
+      }
+    }
+  },
+
+  async authHeader() {
+    const { data: { session } } = await Auth.sb.auth.getSession();
+    if (!session?.access_token) return {};
+    return { "Authorization": `Bearer ${session.access_token}` };
+  },
+
+  // ----------- SMS -----------
+  async signInPhoneOtp(phone) {
+    log("signInPhoneOtp", phone);
+    const { error } = await Auth.sb.auth.signInWithOtp({
+      phone,
+      options: { channel: "sms", shouldCreateUser: true },
+    });
+    if (error) throw error;
+    return true;
+  },
+
+  async verifyPhoneOtp(phone, token) {
+    log("verifyPhoneOtp", phone);
+    const { data, error } = await Auth.sb.auth.verifyOtp({
+      phone, token, type: "sms",
+    });
+    if (error) throw error;
+    log("verifyPhoneOtp ok", !!data?.session);
+    return !!data?.session;
+  },
+
+  // ----------- EMAIL -----------
+  async signInEmailOtp(email) {
+    log("signInEmailOtp", email);
+    const { error } = await Auth.sb.auth.signInWithOtp({
+      email,
+      options: {
+        shouldCreateUser: true,
+        emailRedirectTo: location.origin + "/ui/",
+      },
+    });
+    if (error) throw error;
+    return true;
+  },
+
+  async verifyEmailOtp(email, token) {
+    log("verifyEmailOtp", email);
+    const { data, error } = await Auth.sb.auth.verifyOtp({
+      email, token, type: "email",
+    });
+    if (error) throw error;
+    log("verifyEmailOtp ok", !!data?.session);
+    return !!data?.session;
+  },
+
+  async redirectAfterLogin() {
+    // после успешной верификации — проверяем наличие настроек
+    try {
+      await fetchJson("/settings/me", { headers: await this.authHeader() });
+      location.replace("/ui/");
+    } catch (e) {
+      if (e.status === 404) location.replace("/ui/settings.html");
+      else location.replace("/ui/");
+    }
+  },
+};
+
+window.Auth = Auth;
