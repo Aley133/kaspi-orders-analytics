@@ -189,41 +189,42 @@
     </main>
   </div>
 
+  <!-- 1) Auth + authedFetch (создаём СРАЗУ) -->
   <script type="module">
-  import { Auth } from "./lib/auth.js";
+    import { Auth } from "./lib/auth.js";
 
-  // Всегда ждём инициализации и сессию требуем
-  await Auth.ready;
-  await Auth.requireAuth();
+    // Глобальный авторизованный fetch — доступен мгновенно
+    window.authedFetch = async (input, init = {}) => {
+      await Auth.ready;
+      try {
+        const headers = { ...(init.headers || {}), ...(await Auth.authHeader()) };
+        const res = await fetch(input, { ...init, headers });
+        if (res.status === 401) {
+          await Auth.signOutAndGoLogin();
+          throw new Error("Unauthorized");
+        }
+        return res;
+      } catch (e) {
+        if (String(e?.message || e).includes('Unauthorized')) {
+          await Auth.signOutAndGoLogin();
+        }
+        throw e;
+      }
+    };
+    // Удобный прокси
+    window.AF = (...args) => window.authedFetch(...args);
+    globalThis.authedFetch = window.authedFetch;
+    globalThis.AF = window.AF;
 
-  // Надёжная обёртка
-  window.authedFetch = async (input, init = {}) => {
-    await Auth.ready; // защита от гонок
-    const headers = { ...(init.headers || {}) };
-    try {
-      const authHdr = await Auth.authHeader(); // может упасть, если сессия протухла
-      Object.assign(headers, authHdr);
-    } catch (e) {
-      console.warn('auth header failed', e);
-      await Auth.signOutAndGoLogin();
-      throw e;
-    }
-    const res = await fetch(input, { ...init, headers });
-    if (res.status === 401) {
-      await Auth.signOutAndGoLogin();
-      throw new Error("Unauthorized");
-    }
-    return res;
-  };
-  window.af = window.authedFetch;
-  globalThis.authedFetch = window.authedFetch;
-  globalThis.af = window.authedFetch;
+    // Инициализация сессии
+    await Auth.ready;
+    await Auth.requireAuth();
 
-  // кнопка «Выход» (если есть в DOM)
-  document.getElementById('btnSignOut')?.addEventListener('click', Auth.signOutAndGoLogin);
-</script>
+    // «Выход»
+    document.getElementById('btnSignOut')?.addEventListener('click', Auth.signOutAndGoLogin);
+  </script>
 
-  <!-- 2) Helpers (глобализация) -->
+  <!-- 2) Helpers -->
   <script type="module">
     const nf = new Intl.NumberFormat('ru-RU');
     function num(x, d=0){ const n = Number(String(x).replace(/\s| |,/g,'').replace(/[^\d.-]/g,'')); return Number.isFinite(n) ? (d?n.toFixed(d):n) : 0; }
@@ -273,8 +274,6 @@
 
   <!-- 3) API-Key перехват + fetchBridgeJSON -->
   <script type="module">
-    const { authedFetch, setNote } = window;
-
     (()=>{
       const KEY="KASPI_API_KEY";
       const badge=()=>document.getElementById('profitKeyBadge');
@@ -317,7 +316,7 @@
     })();
 
     async function fetchBridgeJSON(url, opts, _retry){
-      const r=await authedFetch(url, opts||{});
+      const r = await AF(url, opts||{});
       if(r.status===401||r.status===403){
         if(!_retry){
           const v=prompt('Требуется X-API-Key для FIFO:', window.KASPI_API_KEY||'');
@@ -334,7 +333,7 @@
 
   <!-- 4) FIFO рендер (enriched) -->
   <script type="module">
-    const { fetchBridgeJSON, fmt, setNote } = window;
+    const { fetchBridgeJSON, fmt } = window;
 
     async function fetchEnrichedByCodes(codes, order='asc'){
       if(!codes || !codes.length) return {orders:[], stats:{orders:0,lines:0,revenue:0,cost:0,profit:0}};
@@ -446,356 +445,275 @@
   </script>
 
   <!-- 5) UI/STATE + analytics fallback -->
-<script type="module">
-  const { authedFetch, setNote, fmt, setBusy } = window;
+  <script type="module">
+    // Глобальное состояние UI
+    let citiesChart = null;
+    window.APP_CURRENCY = 'KZT';
+    window.__ordersByPeriod = {};
+    window.__orderToSkus = {};
+    window.__allOrderCodes = [];
+    window.CURRENT_JOB_ID = null;
 
-  // Глобальное состояние UI
-  let citiesChart = null;
-  window.APP_CURRENCY = 'KZT';
-  window.__ordersByPeriod = {};
-  window.__orderToSkus = {};
-  window.__allOrderCodes = [];
-  let CURRENT_JOB_ID = null;
-
-  // Справочники статусов
-  const STATUS_DICT = {
-    NEW: 'Новый',
-    APPROVED_BY_BANK: 'Оплата подтверждена',
-    ACCEPTED_BY_MERCHANT: 'Принят магазином',
-    READY_FOR_SHIPMENT: 'Готов к отгрузке',
-    KASPI_DELIVERY: 'Kaspi Доставка (передан)',
-    DELIVERED: 'Доставлен',
-    ARCHIVE: 'Завершён (архив)',
-    ARCHIVED: 'Архив (история)',
-    RETURNED: 'Возврат',
-    CANCELED: 'Отменён'
-  };
-  const STATUS_ORDER = [
-    'NEW',
-    'APPROVED_BY_BANK',
-    'ACCEPTED_BY_MERCHANT',
-    'READY_FOR_SHIPMENT',
-    'KASPI_DELIVERY',
-    'DELIVERED',
-    'ARCHIVE',
-    'ARCHIVED',
-    'RETURNED',
-    'CANCELED'
-  ];
-  const LABEL_TO_CODE = Object.fromEntries(
-    Object.entries(STATUS_DICT).map(([k, v]) => [v.toLowerCase(), k])
-  );
-
-  window.STATUS_SELECTED = new Set();
-
-  // ── UI helpers (локальные для этого модуля) ──────────────────────────────
-  function ruLabel(code) {
-    return STATUS_DICT[code] || code;
-  }
-
-  function renderStatusGrid() {
-    const g = document.getElementById('statusGrid');
-    if (!g) return;
-    g.innerHTML = '';
-    STATUS_ORDER.forEach(code => {
-      const id = 'st_' + code;
-      const lab = document.createElement('label');
-      lab.innerHTML = `<input type="checkbox" id="${id}" value="${code}"> <span>${ruLabel(code)}</span>`;
-      const input = lab.querySelector('input');
-      input.checked = window.STATUS_SELECTED.has(code);
-      input.addEventListener('change', (e) => {
-        if (e.target.checked) window.STATUS_SELECTED.add(code);
-        else window.STATUS_SELECTED.delete(code);
-        renderStatusChips();
-        syncStatesInput();
-      });
-      g.appendChild(lab);
-    });
-  }
-
-  function renderStatusChips() {
-    const box = document.getElementById('statusChips');
-    if (!box) return;
-    box.innerHTML = '';
-    if (window.STATUS_SELECTED.size === 0) {
-      box.innerHTML = '<span class="muted">ничего не выбрано</span>';
-      return;
-    }
-    [...window.STATUS_SELECTED].forEach(code => {
-      const c = document.createElement('span');
-      c.className = 'chip';
-      c.innerHTML = `${ruLabel(code)}<span class="x" title="убрать">×</span>`;
-      c.querySelector('.x').onclick = () => {
-        window.STATUS_SELECTED.delete(code);
-        renderStatusChips();
-        renderStatusGrid();
-        syncStatesInput();
-      };
-      box.appendChild(c);
-    });
-  }
-
-  function normalizeStatesValue(val) {
-    if (!val) return '';
-    const merged = new Set();
-    val.split(/[\s,;]+/).filter(Boolean).forEach(raw => {
-      const t = raw.trim();
-      const code = LABEL_TO_CODE[t.toLowerCase()] || t.toUpperCase();
-      merged.add(code);
-    });
-    return [...merged].join(',');
-  }
-
-  function syncStatesInput() {
-    const inp = document.getElementById('states');
-    if (!inp) return;
-    const manual = normalizeStatesValue((inp.value || '').trim());
-    const fromSet = [...window.STATUS_SELECTED];
-    const merged = new Set();
-    if (manual) manual.split(',').forEach(x => merged.add(x));
-    fromSet.forEach(x => merged.add(x));
-    inp.value = [...merged].filter(Boolean).join(',');
-  }
-
-  function openStatusMenu() {
-    const m = document.getElementById('statusMenu');
-    if (!m) return;
-    m.classList.add('open');
-    renderStatusGrid();
-    const close = (ev) => {
-      const btn = document.getElementById('btnStates');
-      if (!m.contains(ev.target) && !btn?.contains(ev.target)) {
-        m.classList.remove('open');
-        document.removeEventListener('click', close, true);
-      }
+    // Справочники статусов
+    const STATUS_DICT = {
+      NEW: 'Новый',
+      APPROVED_BY_BANK: 'Оплата подтверждена',
+      ACCEPTED_BY_MERCHANT: 'Принят магазином',
+      READY_FOR_SHIPMENT: 'Готов к отгрузке',
+      KASPI_DELIVERY: 'Kaspi Доставка (передан)',
+      DELIVERED: 'Доставлен',
+      ARCHIVE: 'Завершён (архив)',
+      ARCHIVED: 'Архив (история)',
+      RETURNED: 'Возврат',
+      CANCELED: 'Отменён'
     };
-    setTimeout(() => document.addEventListener('click', close, true), 0);
-  }
+    const STATUS_ORDER = ['NEW','APPROVED_BY_BANK','ACCEPTED_BY_MERCHANT','READY_FOR_SHIPMENT','KASPI_DELIVERY','DELIVERED','ARCHIVE','ARCHIVED','RETURNED','CANCELED'];
+    const LABEL_TO_CODE = Object.fromEntries(Object.entries(STATUS_DICT).map(([k,v])=>[v.toLowerCase(),k]));
 
-  const DATE_FIELD_LABELS = {
-    creationDate: 'Создание заказа',
-    plannedShipmentDate: 'План передачи',
-    shipmentDate: 'Фактическая передача',
-    deliveryDate: 'Фактическая доставка'
-  };
+    window.STATUS_SELECTED = new Set();
 
-  // ── Загрузка меты (дефолты) ──────────────────────────────────────────────
-  async function loadMeta() {
-    try {
-      const meta = await (await authedFetch('/meta')).json();
-      window.__meta = meta;
+    function ruLabel(code){ return STATUS_DICT[code] || code; }
 
-      const sel = document.getElementById('date_field');
-      if (sel) {
-        sel.innerHTML = '';
-        (meta.date_field_options || ['creationDate']).forEach(v => {
-          const o = document.createElement('option');
-          o.value = v;
-          o.textContent = DATE_FIELD_LABELS[v] || v;
-          sel.appendChild(o);
+    function renderStatusGrid(){
+      const g=document.getElementById('statusGrid'); if(!g) return;
+      g.innerHTML='';
+      STATUS_ORDER.forEach(code=>{
+        const id='st_'+code;
+        const lab=document.createElement('label');
+        lab.innerHTML=`<input type="checkbox" id="${id}" value="${code}"> <span>${ruLabel(code)}</span>`;
+        const input=lab.querySelector('input');
+        input.checked = window.STATUS_SELECTED.has(code);
+        input.addEventListener('change', (e)=>{
+          if(e.target.checked) window.STATUS_SELECTED.add(code);
+          else window.STATUS_SELECTED.delete(code);
+          renderStatusChips();
+          syncStatesInput();
         });
-        sel.value = meta.date_field_default || 'creationDate';
-      }
-
-      const tzEl = document.getElementById('tz');
-      if (tzEl) tzEl.value = meta.timezone || 'Asia/Almaty';
-
-      const bdStartEl = document.getElementById('bd_start');
-      if (bdStartEl) bdStartEl.value = meta.business_day_start || '20:00';
-
-      const storeUntilEl = document.getElementById('store_until');
-      if (storeUntilEl) storeUntilEl.value = meta.store_accept_until || '17:00';
-    } catch (_) {
-      // ignore
-    }
-
-    // Дата «сегодня» по умолчанию
-    const d = new Date();
-    const z = n => String(n).padStart(2, '0');
-    const ymd = `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())}`;
-    const startEl = document.getElementById('start');
-    const endEl = document.getElementById('end');
-    if (startEl) startEl.value = ymd;
-    if (endEl) endEl.value = ymd;
-
-    renderStatusChips();
-  }
-
-  // ── Подпись режима дня ───────────────────────────────────────────────────
-  function uiModeHint() {
-    const use_bd = document.getElementById('use_bd')?.checked;
-    const bd = document.getElementById('bd_start')?.value || '20:00';
-    const cutoff = document.getElementById('store_until')?.value || '17:00';
-    const mode = document.getElementById('assign_mode')?.value;
-    const el = document.getElementById('bdInfo');
-
-    if (!el) return;
-
-    if (mode === 'smart') {
-      el.textContent = `Умный режим: приём до ${cutoff}; доставленные — бизнес-день ${bd}`;
-    } else if (mode === 'business') {
-      el.textContent = `Бизнес-день: ${bd} → ${bd}`;
-    } else {
-      el.textContent = 'Режим: по выбранному полю даты';
-    }
-    if (!use_bd) el.textContent += ' · День магазина: выключен';
-  }
-
-  // ── Главный раннер: аналитика (graceful) + ids + FIFO ────────────────────
-  async function run(e) {
-    if (e && typeof e.preventDefault === 'function') e.preventDefault();
-
-    try {
-      setBusy(true);
-
-      // Параметры фильтра
-      const start = document.getElementById('start')?.value || '';
-      const end = document.getElementById('end')?.value || '';
-      const tz = document.getElementById('tz')?.value || 'Asia/Almaty';
-
-      // ВАЖНО: date_field с фолбэком к мета-дефолту
-      let date_field = document.getElementById('date_field')?.value || '';
-      if (!date_field) date_field = (window.__meta?.date_field_default) || 'creationDate';
-
-      // Статусы
-      const statesNorm = normalizeStatesValue(document.getElementById('states')?.value || '');
-      const statesEl = document.getElementById('states');
-      if (statesEl) statesEl.value = statesNorm;
-      const exc = document.getElementById('exclude_states')?.checked ? 'CANCELED' : '';
-
-      // Режим дня / срез
-      const use_bd = document.getElementById('use_bd')?.checked ? '1' : '0';
-      const bd_start = document.getElementById('bd_start')?.value || '';
-      const assign_mode = document.getElementById('assign_mode')?.value || 'smart';
-      const store_until = document.getElementById('store_until')?.value || '17:00';
-
-      // Параметры запроса
-      const p = new URLSearchParams({
-        start,
-        end,
-        tz,
-        date_field,
-        use_bd,
-        assign_mode,
-        store_accept_until: store_until
+        g.appendChild(lab);
       });
-      if (bd_start) p.set('business_day_start', bd_start);
-      if (statesNorm) p.set('states', statesNorm);
-      if (exc) p.set('exclude_states', exc);
-
-      // ── /orders/analytics — пробуем, но не блокируем остальное
-      let data = null;
-      try {
-        const r = await authedFetch('/orders/analytics?' + p.toString());
-        if (!r.ok) throw new Error((await r.text()) || r.statusText);
-        data = await r.json();
-      } catch (err) {
-        console.warn('analytics failed:', err);
-        window.APP_CURRENCY = 'KZT';
-        const periodLabel = document.getElementById('periodLabel');
-        const cutoffEl = document.getElementById('periodCutoff');
-        const statesBox = document.getElementById('statesBox');
-        const chartHolder = document.getElementById('chart-cities');
-
-        if (periodLabel) periodLabel.textContent = `${start} → ${end}`;
-        if (cutoffEl) cutoffEl.textContent = (use_bd === '1' ? (bd_start || '20:00') : '24:00');
-        if (statesBox) statesBox.innerHTML = '<div class="muted">Нет данных</div>';
-        if (chartHolder) chartHolder.innerHTML = '<div class="muted" style="padding:12px">Нет данных по городам</div>';
-
-        setNote('Аналитика недоступна, показываю данные по заказам…', 'ok');
-      }
-
-      // ── Если аналитика пришла — обновляем KPI и графики
-      if (data) {
-        window.APP_CURRENCY = data.currency || 'KZT';
-
-        const orders = Number(data.total_orders || 0);
-        const amount = Number(data.total_amount || 0);
-        const startLbl = data.range?.start || start;
-        const endLbl = data.range?.end || end;
-
-        const kpiOrdersEl = document.getElementById('kpiOrders');
-        const kpiAmountEl = document.getElementById('kpiAmount');
-        if (kpiOrdersEl) kpiOrdersEl.textContent = fmt(orders);
-        if (kpiAmountEl) kpiAmountEl.textContent = `${fmt(amount)} ${window.APP_CURRENCY}`;
-
-        const periodLabel = document.getElementById('periodLabel');
-        const cutoffEl = document.getElementById('periodCutoff');
-        if (periodLabel) periodLabel.textContent = `${startLbl} → ${endLbl}`;
-        if (cutoffEl) cutoffEl.textContent = (use_bd === '1' ? (bd_start || '20:00') : '24:00');
-
-        uiModeHint();
-
-        // Разложение по статусам
-        const sb = document.getElementById('statesBox');
-        if (sb) {
-          sb.innerHTML = '';
-          const entries = Object.entries(data.state_breakdown || {}).sort((a, b) => b[1] - a[1]);
-          if (entries.length) {
-            for (const [k, v] of entries) {
-              const pill = document.createElement('span');
-              pill.className = 'pill';
-              pill.textContent = `${k}: ${v}`;
-              sb.appendChild(pill);
-            }
-          } else {
-            sb.innerHTML = '<div class="muted">Нет данных</div>';
-          }
-        }
-
-        // Города (гистограмма)
-        const labels = (data.cities || []).map(c => c.city);
-        const counts = (data.cities || []).map(c => c.count);
-        const holder = document.getElementById('chart-cities');
-        if (holder) {
-          holder.innerHTML = labels.length
-            ? '<canvas id="cities"></canvas>'
-            : '<div class="muted" style="padding:12px">Нет данных по городам</div>';
-
-          if (labels.length && typeof Chart !== 'undefined') {
-            try { if (citiesChart) citiesChart.destroy(); } catch { /* ignore */ }
-            const ctx = document.getElementById('cities')?.getContext('2d');
-            if (ctx) {
-              citiesChart = new Chart(ctx, {
-                type: 'bar',
-                data: { labels, datasets: [{ label: 'Заказы', data: counts }] },
-                options: { responsive: true, plugins: { legend: { display: false } } }
-              });
-            }
-          }
-        }
-      }
-
-      // ── Независимо от аналитики: ids.async + FIFO
-      await window.runIdsJob();
-      await window.renderBridgeTable();
-
-      setNote('Данные обновлены', 'ок');
-    } catch (err) {
-      setNote('Ошибка загрузки: ' + (err?.message || err), 'err');
-    } finally {
-      setBusy(false);
     }
-  }
 
-  // Экспорт для использования из других модулей/BOOT
-  Object.assign(window, {
-    loadMeta,
-    uiModeHint,
-    run,
-    openStatusMenu,
-    renderStatusGrid,
-    renderStatusChips,
-    normalizeStatesValue,
-    syncStatesInput,
-    ruLabel
-  });
-</script>
+    function renderStatusChips(){
+      const box=document.getElementById('statusChips'); if(!box) return;
+      box.innerHTML='';
+      if(window.STATUS_SELECTED.size===0){
+        box.innerHTML='<span class="muted">ничего не выбрано</span>';
+        return;
+      }
+      [...window.STATUS_SELECTED].forEach(code=>{
+        const c=document.createElement('span');
+        c.className='chip';
+        c.innerHTML=`${ruLabel(code)}<span class="x" title="убрать">×</span>`;
+        c.querySelector('.x').onclick=()=>{
+          window.STATUS_SELECTED.delete(code);
+          renderStatusChips();
+          renderStatusGrid();
+          syncStatesInput();
+        };
+        box.appendChild(c);
+      });
+    }
 
+    function normalizeStatesValue(val){
+      if(!val) return '';
+      const merged=new Set();
+      val.split(/[\s,;]+/).filter(Boolean).forEach(raw=>{
+        const t=raw.trim();
+        const code = LABEL_TO_CODE[t.toLowerCase()] || t.toUpperCase();
+        merged.add(code);
+      });
+      return [...merged].join(',');
+    }
+
+    function syncStatesInput(){
+      const inp=document.getElementById('states'); if(!inp) return;
+      const manual = normalizeStatesValue((inp.value||'').trim());
+      const fromSet=[...window.STATUS_SELECTED];
+      const merged=new Set();
+      if(manual) manual.split(',').forEach(x=>merged.add(x));
+      fromSet.forEach(x=>merged.add(x));
+      inp.value=[...merged].filter(Boolean).join(',');
+    }
+
+    function openStatusMenu(){
+      const m=document.getElementById('statusMenu'); if(!m) return;
+      m.classList.add('open'); renderStatusGrid();
+      const close=(ev)=>{
+        const btn=document.getElementById('btnStates');
+        if(!m.contains(ev.target) && !btn?.contains(ev.target)){
+          m.classList.remove('open');
+          document.removeEventListener('click', close, true);
+        }
+      };
+      setTimeout(()=>document.addEventListener('click', close, true),0);
+    }
+
+    const DATE_FIELD_LABELS = {
+      creationDate:'Создание заказа',
+      plannedShipmentDate:'План передачи',
+      shipmentDate:'Фактическая передача',
+      deliveryDate:'Фактическая доставка'
+    };
+
+    async function loadMeta(){
+      try {
+        const meta = await (await AF('/meta')).json();
+        window.__meta = meta;
+
+        const sel = document.getElementById('date_field');
+        if (sel) {
+          sel.innerHTML = '';
+          (meta.date_field_options || ['creationDate']).forEach(v=>{
+            const o=document.createElement('option');
+            o.value=v; o.textContent=DATE_FIELD_LABELS[v] || v;
+            sel.appendChild(o);
+          });
+          sel.value = meta.date_field_default || 'creationDate';
+        }
+
+        const tzEl=document.getElementById('tz'); if(tzEl) tzEl.value = meta.timezone || 'Asia/Almaty';
+        const bdStartEl=document.getElementById('bd_start'); if(bdStartEl) bdStartEl.value = meta.business_day_start || '20:00';
+        const storeUntilEl=document.getElementById('store_until'); if(storeUntilEl) storeUntilEl.value = meta.store_accept_until || '17:00';
+      } catch(_){/* ignore */}
+      const d=new Date(); const z=n=>String(n).padStart(2,'0'); const ymd=`${d.getFullYear()}-${z(d.getMonth()+1)}-${z(d.getDate())}`;
+      document.getElementById('start').value = ymd;
+      document.getElementById('end').value   = ymd;
+      renderStatusChips();
+    }
+
+    function uiModeHint(){
+      const use_bd = document.getElementById('use_bd')?.checked;
+      const bd = document.getElementById('bd_start')?.value || '20:00';
+      const cutoff = document.getElementById('store_until')?.value || '17:00';
+      const mode = document.getElementById('assign_mode')?.value;
+      const el = document.getElementById('bdInfo');
+      if (!el) return;
+      if(mode==='smart') el.textContent = `Умный режим: приём до ${cutoff}; доставленные — бизнес-день ${bd}`;
+      else if(mode==='business') el.textContent = `Бизнес-день: ${bd} → ${bd}`;
+      else el.textContent = 'Режим: по выбранному полю даты';
+      if(!use_bd) el.textContent += ' · День магазина: выключен';
+    }
+
+    async function run(e){
+      if(e && typeof e.preventDefault==='function') e.preventDefault();
+      try{
+        window.setBusy(true);
+
+        // Параметры
+        const start = document.getElementById('start')?.value || '';
+        const end   = document.getElementById('end')?.value   || '';
+        const tz    = document.getElementById('tz')?.value    || 'Asia/Almaty';
+        let date_field = document.getElementById('date_field')?.value || '';
+        if(!date_field) date_field = (window.__meta?.date_field_default) || 'creationDate';
+
+        const states = normalizeStatesValue(document.getElementById('states')?.value || '');
+        const statesEl=document.getElementById('states'); if(statesEl) statesEl.value = states;
+        const exc    = document.getElementById('exclude_states')?.checked ? 'CANCELED' : '';
+
+        const use_bd = document.getElementById('use_bd')?.checked ? '1' : '0';
+        const bd_start = document.getElementById('bd_start')?.value || '';
+        const assign_mode = document.getElementById('assign_mode')?.value || 'smart';
+        const store_until = document.getElementById('store_until')?.value || '17:00';
+
+        const p = new URLSearchParams({ start, end, tz, date_field, use_bd, assign_mode, store_accept_until: store_until });
+        if(states) p.set('states', states);
+        if(exc) p.set('exclude_states', exc);
+        if(bd_start) p.set('business_day_start', bd_start);
+
+        // Аналитика (graceful)
+        let data=null;
+        try{
+          const r = await AF('/orders/analytics?' + p.toString());
+          if(!r.ok) throw new Error((await r.text())||r.statusText);
+          data = await r.json();
+        }catch(err){
+          console.warn('analytics failed:', err);
+          window.APP_CURRENCY='KZT';
+          const periodLabel = document.getElementById('periodLabel');
+          const cutoffEl = document.getElementById('periodCutoff');
+          const statesBox = document.getElementById('statesBox');
+          const chartHolder = document.getElementById('chart-cities');
+
+          if(periodLabel) periodLabel.textContent = `${start} → ${end}`;
+          if(cutoffEl) cutoffEl.textContent = (use_bd==='1' ? (bd_start||'20:00') : '24:00');
+          if(statesBox) statesBox.innerHTML = '<div class="muted">Нет данных</div>';
+          if(chartHolder) chartHolder.innerHTML = '<div class="muted" style="padding:12px">Нет данных по городам</div>';
+          window.setNote('Аналитика недоступна, показываю данные по заказам…', 'ok');
+        }
+
+        // Отрисовка аналитики
+        if(data){
+          window.APP_CURRENCY = data.currency || 'KZT';
+
+          const orders = Number(data.total_orders||0);
+          const amount = Number(data.total_amount||0);
+          const startLbl = data.range?.start || start;
+          const endLbl   = data.range?.end   || end;
+
+          const kpiOrdersEl = document.getElementById('kpiOrders');
+          const kpiAmountEl = document.getElementById('kpiAmount');
+          if(kpiOrdersEl) kpiOrdersEl.textContent = window.fmt(orders);
+          if(kpiAmountEl) kpiAmountEl.textContent = `${window.fmt(amount)} ${window.APP_CURRENCY}`;
+
+          const periodLabel = document.getElementById('periodLabel');
+          const cutoffEl = document.getElementById('periodCutoff');
+          if(periodLabel) periodLabel.textContent = `${startLbl} → ${endLbl}`;
+          if(cutoffEl) cutoffEl.textContent = (use_bd==='1' ? (bd_start||'20:00') : '24:00');
+
+          uiModeHint();
+
+          const sb = document.getElementById('statesBox');
+          if(sb){
+            sb.innerHTML='';
+            const entries = Object.entries(data.state_breakdown||{}).sort((a,b)=>b[1]-a[1]);
+            if(entries.length){
+              for(const [k,v] of entries){
+                const pill=document.createElement('span');
+                pill.className='pill'; pill.textContent=`${k}: ${v}`;
+                sb.appendChild(pill);
+              }
+            }else{
+              sb.innerHTML = '<div class="muted">Нет данных</div>';
+            }
+          }
+
+          const labels = (data.cities||[]).map(c=>c.city);
+          const counts = (data.cities||[]).map(c=>c.count);
+          const holder = document.getElementById('chart-cities');
+          if(holder){
+            holder.innerHTML = labels.length ? '<canvas id="cities"></canvas>' : '<div class="muted" style="padding:12px">Нет данных по городам</div>';
+            if(labels.length && typeof Chart!=='undefined'){
+              try{ if(citiesChart) citiesChart.destroy(); }catch{}
+              const ctx = document.getElementById('cities')?.getContext('2d');
+              if(ctx){
+                citiesChart = new Chart(ctx,{type:'bar',data:{labels,datasets:[{label:'Заказы',data:counts}]},options:{responsive:true,plugins:{legend:{display:false}}}});
+              }
+            }
+          }
+        }
+
+        // Независимо: ids.async + FIFO
+        await window.runIdsJob();
+        await window.renderBridgeTable();
+
+        window.setNote('Данные обновлены', 'ok');
+      }catch(err){
+        window.setNote('Ошибка загрузки: ' + (err?.message || err), 'err');
+      }finally{
+        window.setBusy(false);
+      }
+    }
+
+    Object.assign(window, {
+      loadMeta, uiModeHint, run,
+      openStatusMenu, renderStatusGrid, renderStatusChips,
+      normalizeStatesValue, syncStatesInput, ruLabel
+    });
+  </script>
 
   <!-- 6) IDs async + мост + рендер -->
   <script type="module">
-    const { authedFetch, setNote, setBusy, setTopLoader, fmt, num, deriveLine, firstNonEmpty } = window;
+    const { setNote, setBusy, setTopLoader, fmt, deriveLine, firstNonEmpty } = window;
 
     function buildOrderItemsTable(group, currency){
       const table = document.createElement('table'); table.className = 'order-table';
@@ -851,7 +769,7 @@
         }
         if(!items.length) return;
 
-        const res = await authedFetch('/profit/bridge/sync-by-ids', {
+        const res = await AF('/profit/bridge/sync-by-ids', {
           method:'POST',
           headers:{'Content-Type':'application/json'},
           body: JSON.stringify(items)
@@ -867,7 +785,8 @@
       const start = document.getElementById('start').value;
       const end   = document.getElementById('end').value;
       const tz    = document.getElementById('tz').value || 'Asia/Almaty';
-      const date_field = document.getElementById('date_field').value;
+      let date_field = document.getElementById('date_field')?.value || '';
+      if(!date_field) date_field = (window.__meta?.date_field_default) || 'creationDate';
       const states = (document.getElementById('states').value||'').trim();
       const exc    = document.getElementById('exclude_states').checked ? 'CANCELED' : '';
       const use_bd = document.getElementById('use_bd')?.checked ? '1' : '0';
@@ -886,7 +805,7 @@
 
     async function runIdsJob(){
       if(window.CURRENT_JOB_ID){
-        try{ await authedFetch(`/jobs/${window.CURRENT_JOB_ID}`, {method:'DELETE'}); }catch(_){}
+        try{ await AF(`/jobs/${window.CURRENT_JOB_ID}`, {method:'DELETE'}); }catch(_){}
         window.CURRENT_JOB_ID = null;
       }
 
@@ -894,20 +813,20 @@
       setBusy(true);
 
       const params = buildParams();
-      const res = await authedFetch(`/orders/ids.async?${params}`, { method:'POST' });
+      const res = await AF(`/orders/ids.async?${params}`, { method:'POST' });
       if(!res.ok){ const txt = await res.text(); setNote(txt || res.statusText, 'err'); setBusy(false); return; }
       const { job_id } = await res.json();
       window.CURRENT_JOB_ID = job_id;
 
       const cancelBtn = document.getElementById('btnCancelJob');
-      if(cancelBtn) cancelBtn.onclick = async () => { try{ await authedFetch(`/jobs/${job_id}`, {method:'DELETE'}); }catch(_){} };
+      if(cancelBtn) cancelBtn.onclick = async () => { try{ await AF(`/jobs/${job_id}`, {method:'DELETE'}); }catch(_){} };
 
       let done=false, errored=false;
       while(!done && !errored){
         await new Promise(r=>setTimeout(r, 700));
         let st;
         try{
-          const r = await authedFetch(`/jobs/${job_id}`);
+          const r = await AF(`/jobs/${job_id}`);
           if(!r.ok){ throw new Error(await r.text()||r.statusText); }
           st = await r.json();
         }catch(e){
@@ -921,7 +840,7 @@
 
         if(st.status==='done'){
           done=true;
-          const rr = await authedFetch(`/jobs/${job_id}/result`);
+          const rr = await AF(`/jobs/${job_id}/result`);
           const data = await rr.json();
           window.CURRENT_JOB_ID=null;
 
@@ -975,7 +894,7 @@
       btnCsv.onclick = async () => {
         try{
           const p = buildParams(); p.set('grouped','0'); p.set('with_items','0'); p.set('limit','100000');
-          const r = await authedFetch(`/orders/ids.csv?${p.toString()}`);
+          const r = await AF(`/orders/ids.csv?${p.toString()}`);
           const text = await r.text();
           const blob = new Blob([text], {type:'text/csv;charset=utf-8'});
           const url  = URL.createObjectURL(blob);
@@ -1022,25 +941,24 @@
   <!-- 7) BOOT -->
   <script type="module">
     document.addEventListener('DOMContentLoaded', async () => {
-      const { loadMeta, uiModeHint, run, setNote } = window;
       try{
-        await loadMeta();
+        await window.loadMeta();
 
         document.getElementById('btnStates')?.addEventListener('click', window.openStatusMenu);
         document.getElementById('btnStatusesAll')?.addEventListener('click', ()=>{ ['NEW','APPROVED_BY_BANK','ACCEPTED_BY_MERCHANT','READY_FOR_SHIPMENT','KASPI_DELIVERY','DELIVERED','ARCHIVE','ARCHIVED','RETURNED','CANCELED'].forEach(k=>window.STATUS_SELECTED.add(k)); window.renderStatusGrid?.(); window.renderStatusChips?.(); window.syncStatesInput?.(); });
         document.getElementById('btnStatusesClear')?.addEventListener('click', ()=>{ window.STATUS_SELECTED.clear(); window.renderStatusGrid?.(); window.renderStatusChips?.(); window.syncStatesInput?.(); });
         document.getElementById('btnStatusesApply')?.addEventListener('click', ()=>{ document.getElementById('statusMenu').classList.remove('open'); window.syncStatesInput?.(); });
 
-        document.getElementById('states')?.addEventListener('blur', ()=>{ document.getElementById('states').value = (window.normalizeStatesValue?.(document.getElementById('states').value)) || document.getElementById('states').value; });
+        document.getElementById('states')?.addEventListener('blur', ()=>{ const s=document.getElementById('states'); s.value = (window.normalizeStatesValue?.(s.value)) || s.value; });
 
-        document.getElementById('f')?.addEventListener('submit', run);
+        document.getElementById('f')?.addEventListener('submit', window.run);
         document.getElementById('themeToggle')?.addEventListener('change', (e)=>{ document.body.setAttribute('data-theme', e.target.checked ? 'dark' : 'light'); });
 
-        ['use_bd','bd_start','assign_mode','store_until'].forEach(id=>{ const el=document.getElementById(id); if(el) el.addEventListener('change', uiModeHint); });
+        ['use_bd','bd_start','assign_mode','store_until'].forEach(id=>{ const el=document.getElementById(id); if(el) el.addEventListener('change', window.uiModeHint); });
 
-        uiModeHint();
-        await run(); // initial
-      }catch(e){ setNote('Ошибка инициализации: ' + (e?.message||e), 'err'); }
+        window.uiModeHint();
+        await window.run(); // initial
+      }catch(e){ window.setNote('Ошибка инициализации: ' + (e?.message||e), 'err'); }
     });
   </script>
 </body>
