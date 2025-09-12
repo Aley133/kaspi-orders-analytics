@@ -189,28 +189,37 @@
     </main>
   </div>
 
-  <!-- 1) Auth + authedFetch -->
   <script type="module">
-    import { Auth } from "./lib/auth.js";
+  import { Auth } from "./lib/auth.js";
 
-    window.authedFetch = async (input, init = {}) => {
-      const headers = { ...(init.headers || {}), ...(await Auth.authHeader()) };
-      const res = await fetch(input, { ...init, headers });
-      if (res.status === 401) {
-        await Auth.signOutAndGoLogin();
-        throw new Error("Unauthorized");
-      }
-      return res;
-    };
-    window.af = window.authedFetch;
+  // Всегда ждём инициализации и сессию требуем
+  await Auth.ready;
+  await Auth.requireAuth();
 
-    await Auth.ready;
-    await Auth.requireAuth();
-
-    document.getElementById('btnSignOut')?.addEventListener('click', async () => {
+  // Надёжная обёртка
+  window.authedFetch = async (input, init = {}) => {
+    await Auth.ready; // защита от гонок
+    const headers = { ...(init.headers || {}) };
+    try {
+      const authHdr = await Auth.authHeader(); // может упасть, если сессия протухла
+      Object.assign(headers, authHdr);
+    } catch (e) {
+      console.warn('auth header failed', e);
       await Auth.signOutAndGoLogin();
-    });
-  </script>
+      throw e;
+    }
+    const res = await fetch(input, { ...init, headers });
+    if (res.status === 401) {
+      await Auth.signOutAndGoLogin();
+      throw new Error("Unauthorized");
+    }
+    return res;
+  };
+  window.af = window.authedFetch;
+
+  // кнопка «Выход» (если есть в DOM)
+  document.getElementById('btnSignOut')?.addEventListener('click', Auth.signOutAndGoLogin);
+</script>
 
   <!-- 2) Helpers (глобализация) -->
   <script type="module">
