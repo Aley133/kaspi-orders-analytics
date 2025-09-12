@@ -1,11 +1,12 @@
 # app/deps/tenant.py
 from __future__ import annotations
+
 import json
 from typing import Optional
-
 from app.db import get_conn
 
-SETTINGS_KEY = "settings"  # одна запись настроек на тенанта
+SETTINGS_KEY = "settings"  # одна запись на тенанта
+
 
 def _ensure_tenants_table(cur) -> None:
     cur.execute("""
@@ -18,17 +19,24 @@ def _ensure_tenants_table(cur) -> None:
     );
     """)
 
+
+def _fetch_col_names(cur) -> set[str]:
+    cur.execute("""
+      select column_name
+      from information_schema.columns
+      where table_schema='public' and table_name='tenant_settings';
+    """)
+    cols: set[str] = set()
+    for r in cur.fetchall():
+        if isinstance(r, dict):
+            cols.add(r.get("column_name"))
+        else:
+            cols.add(r[0])
+    return {c for c in cols if c}
+
+
 def _ensure_settings_table(cur) -> None:
-    """
-    Приводим public.tenant_settings к унифицированной схеме:
-      tenant_id uuid not null  (FK -> tenants)
-      key       text not null default 'settings'
-      value     jsonb not null
-      updated_at timestamptz default now()
-      PRIMARY KEY (tenant_id, key)
-    При наличии «легаси»-версий добавляем/чинем столбцы и ограничения.
-    """
-    # Если таблицы нет — создаём сразу правильную
+    # создаём таблицу, если её нет — сразу в корректной схеме
     cur.execute("""
     create table if not exists public.tenant_settings (
         tenant_id uuid not null
@@ -40,47 +48,36 @@ def _ensure_settings_table(cur) -> None:
     );
     """)
 
-    # Инвентаризация колонок (на случай, если она уже была в другой схеме)
-    cur.execute("""
-      select column_name
-      from information_schema.columns
-      where table_schema='public' and table_name='tenant_settings';
-    """)
-    cols = {r[0] for r in cur.fetchall()}
+    cols = _fetch_col_names(cur)
 
-    if 'key' not in cols:
+    if "key" not in cols:
         cur.execute("alter table public.tenant_settings add column key text;")
 
-    # дефолт и not null для key
     cur.execute("alter table public.tenant_settings alter column key set default 'settings';")
     cur.execute("update public.tenant_settings set key='settings' where key is null;")
     cur.execute("alter table public.tenant_settings alter column key set not null;")
 
-    # убедимся, что есть уникальность/PK по (tenant_id, key)
+    # если нет PK — добавим
     cur.execute("""
     do $$
     begin
       if not exists (
-        select 1 from pg_indexes
-        where schemaname = 'public'
-          and tablename  = 'tenant_settings'
-          and indexname  = 'tenant_settings_tenant_id_key_idx'
-      ) then
-        -- индекс (на случай, если PK уже есть — индекс просто появится)
-        create unique index tenant_settings_tenant_id_key_idx
-          on public.tenant_settings(tenant_id, key);
-      end if;
-      -- если primary key отсутствует — добавим
-      if not exists (
-        select 1 from pg_constraint
-        where conrelid = 'public.tenant_settings'::regclass
-          and contype = 'p'
+        select 1
+        from   pg_constraint
+        where  conrelid = 'public.tenant_settings'::regclass
+        and    contype  = 'p'
       ) then
         alter table public.tenant_settings
           add constraint tenant_settings_pkey primary key (tenant_id, key);
       end if;
     end $$;
     """)
+
+    cur.execute("""
+    create unique index if not exists tenant_settings_tenant_id_key_idx
+      on public.tenant_settings(tenant_id, key);
+    """)
+
 
 def ensure_tenant_exists(tenant_id: str, email: Optional[str] = None) -> None:
     with get_conn() as conn, conn.cursor() as cur:
@@ -91,6 +88,7 @@ def ensure_tenant_exists(tenant_id: str, email: Optional[str] = None) -> None:
           on conflict (id) do nothing;
         """, (tenant_id, email))
         conn.commit()
+
 
 def get_settings(tenant_id: str) -> Optional[dict]:
     with get_conn() as conn, conn.cursor() as cur:
@@ -103,11 +101,15 @@ def get_settings(tenant_id: str) -> Optional[dict]:
           limit 1;
         """, (tenant_id, SETTINGS_KEY))
         row = cur.fetchone()
-        return row[0] if row else None
+        if not row:
+            return None
+        return row.get("value") if isinstance(row, dict) else row[0]
 
-# Чтобы не рушить импорты в settings.py
+
+# для совместимости с существующими import'ами
 def get_settings_row(tenant_id: str) -> Optional[dict]:
     return get_settings(tenant_id)
+
 
 def upsert_settings(tenant_id: str, value: dict) -> None:
     with get_conn() as conn, conn.cursor() as cur:
@@ -121,12 +123,13 @@ def upsert_settings(tenant_id: str, value: dict) -> None:
         """, (tenant_id, SETTINGS_KEY, json.dumps(value)))
         conn.commit()
 
+
 def resolve_kaspi_token(tenant_id: Optional[str]) -> Optional[str]:
     if not tenant_id:
         return None
-    val = get_settings(tenant_id)
-    if isinstance(val, dict):
-        tok = val.get("kaspi_token") or val.get("KASPI_TOKEN")
+    st = get_settings(tenant_id)
+    if isinstance(st, dict):
+        tok = st.get("kaspi_token") or st.get("KASPI_TOKEN")
         if isinstance(tok, str) and tok.strip():
             return tok.strip()
     return None
