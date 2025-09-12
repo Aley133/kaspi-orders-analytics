@@ -500,12 +500,10 @@ class AnalyticsResponse(BaseModel):
 _ARCHIVE_ALIASES = {"ARCHIVE", "ARCHIVED"}
 
 def _expand_with_archive(states_inc: Optional[set[str]]) -> set[str]:
-    """
-    Если фильтр не задан — не фильтруем (пустое множество).
-    Если в фильтре есть KASPI_DELIVERY — добавляем синонимы ARCHIVE/ARCHIVED.
-    """
+    # если фильтр не задан — не фильтруем вовсе
     if not states_inc:
         return set()
+    # если включили KASPI_DELIVERY — добавим архивные псевдонимы
     if "KASPI_DELIVERY" in states_inc:
         return set(states_inc) | _ARCHIVE_ALIASES
     return set(states_inc)
