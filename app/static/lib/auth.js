@@ -1,95 +1,85 @@
-// app/static/lib/auth.js
-;(function () {
-  if (window.Auth) return; // защита от повторного подключения
+// /ui/lib/auth.js
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-  let _client = null;
+async function getMeta() {
+  const r = await fetch("/auth/meta");
+  if (!r.ok) throw new Error("auth/meta failed");
+  return r.json();
+}
 
-  async function _ensureClient() {
-    if (_client) return _client;
+function qs(id) { return document.getElementById(id); }
 
-    // если страница уже создала window.supabase — используем его
-    if (window.supabase) {
-      _client = window.supabase;
-      return _client;
+let supabase;
+
+async function ensureSb() {
+  if (supabase) return supabase;
+  const meta = await getMeta();
+  supabase = createClient(meta.SUPABASE_URL, meta.SUPABASE_ANON_KEY, {
+    auth: { persistSession: true, autoRefreshToken: true }
+  });
+  return supabase;
+}
+
+function setMode(mode) {
+  qs("tab-email").classList.toggle("active", mode === "email");
+  qs("tab-sms").classList.toggle("active", mode === "sms");
+  qs("pane-email").style.display = mode === "email" ? "" : "none";
+  qs("pane-sms").style.display   = mode === "sms"   ? "" : "none";
+  localStorage.setItem("login-mode", mode);
+}
+
+async function onClickGetCode() {
+  try {
+    const sb = await ensureSb();
+    const mode = qs("tab-email").classList.contains("active") ? "email" : "sms";
+    qs("getCodeBtn").disabled = true;
+
+    if (mode === "email") {
+      const email = (qs("email").value || "").trim();
+      if (!email) throw new Error("Введите email");
+      const { error } = await sb.auth.signInWithOtp({
+        email,
+        options: { emailRedirectTo: location.origin + "/ui/" }
+      });
+      if (error) throw error;
+      qs("hint").textContent = "Если почта верна — проверьте письмо со ссылкой для входа.";
+    } else {
+      const phone = (qs("phone").value || "").trim();
+      if (!phone) throw new Error("Введите телефон в формате +7...");
+      const { error } = await sb.auth.signInWithOtp({
+        phone, options: { channel: "sms" }
+      });
+      if (error) throw error;
+      qs("hint").textContent = "Мы отправили SMS-код. Введите его в открывшемся окне Supabase (если настроено).";
     }
+  } catch (e) {
+    console.error(e);
+    alert(e.message || e);
+  } finally {
+    qs("getCodeBtn").disabled = false;
+  }
+}
 
-    const meta = await fetch('/auth/meta').then(r => r.json());
-    const { createClient } = await import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm');
+async function boot() {
+  // не делаем никаких fetch'ей к /settings на странице логина
+  const sb = await ensureSb();
 
-    // Создаём один раз и кладём в window
-    window.supabase = _client = createClient(meta.SUPABASE_URL, meta.SUPABASE_ANON_KEY);
-    return _client;
+  // если уже залогинен — отправляем в приложение
+  const { data: { session } } = await sb.auth.getSession();
+  if (session) {
+    location.replace("/ui/");
+    return;
   }
 
-  async function getSession() {
-    const cli = await _ensureClient();
-    const { data: { session } } = await cli.auth.getSession();
-    return session;
-  }
+  // табы
+  qs("tab-email").addEventListener("click", () => setMode("email"));
+  qs("tab-sms").addEventListener("click", () => setMode("sms"));
+  setMode(localStorage.getItem("login-mode") || "email");
 
-  async function getToken() {
-    const s = await getSession();
-    return s?.access_token || null;
-  }
+  // главное — кнопка type="button", и отдельный обработчик клика
+  qs("getCodeBtn").addEventListener("click", onClickGetCode);
 
-  // Email OTP
-  async function signInEmailOtp(email) {
-    const cli = await _ensureClient();
-    const { error } = await cli.auth.signInWithOtp({ email });
-    if (error) throw error;
-    return true;
-  }
-  async function verifyEmailOtp(email, code) {
-    const cli = await _ensureClient();
-    const { data, error } = await cli.auth.verifyOtp({ email, token: code, type: 'email' });
-    if (error) throw error;
-    return !!data?.session;
-  }
+  console.log("[login] ready");
+}
 
-  // SMS OTP
-  async function signInPhoneOtp(phoneE164) {
-    const cli = await _ensureClient();
-    const { error } = await cli.auth.signInWithOtp({ phone: phoneE164 });
-    if (error) throw error;
-    return true;
-  }
-  async function verifyPhoneOtp(phoneE164, code) {
-    const cli = await _ensureClient();
-    const { data, error } = await cli.auth.verifyOtp({ phone: phoneE164, token: code, type: 'sms' });
-    if (error) throw error;
-    return !!data?.session;
-  }
-
-  async function authedFetch(input, init = {}) {
-    const t = await getToken();
-    init.headers = Object.assign({}, init.headers || {}, { Authorization: `Bearer ${t}` });
-    return fetch(input, init);
-  }
-
-  async function redirectAfterLogin() {
-    try {
-      const r = await authedFetch('/settings/me');
-      if (r.status === 404) location.href = '/ui/settings.html';
-      else if (r.ok)      location.href = '/ui/';
-      else                location.href = '/ui/settings.html';
-    } catch {
-      location.href = '/ui/login.html';
-    }
-  }
-
-  async function bounceIfAuthed() {
-    const s = await getSession();
-    if (!s) return;
-    try {
-      const r = await authedFetch('/settings/me');
-      if (r.ok) location.href = '/ui/';
-    } catch {}
-  }
-
-  window.Auth = {
-    getSession, getToken, authedFetch,
-    signInEmailOtp, verifyEmailOtp,
-    signInPhoneOtp, verifyPhoneOtp,
-    redirectAfterLogin, bounceIfAuthed,
-  };
-})();
+window.addEventListener("DOMContentLoaded", boot);
