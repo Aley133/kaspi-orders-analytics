@@ -14,11 +14,6 @@ from .tenant import resolve_kaspi_token
 # Храним текущий kaspi-token в ContextVar, чтобы его могли читать клиенты ниже по стеку
 kaspi_token_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("kaspi_token", default="")
 
-try:
-    kaspi_tok = resolve_kaspi_token(tenant_id) if tenant_id else None
-except Exception as e:
-    print("tenant settings lookup failed:", e)
-    kaspi_tok = None
     
 def _decode_jwt_noverify(token: str) -> Dict:
     """
@@ -55,14 +50,16 @@ def get_current_tenant_id(request: Request) -> Optional[str]:
     return getattr(request.state, "tenant_id", None)
 
 def get_current_user(request: Request) -> Dict:
-    """
-    Шим для совместимости с app.api.authz.
-    """
     tenant_id = get_current_tenant_id(request)
     if not tenant_id:
         raise HTTPException(status_code=401, detail="unauthorized")
-    return {"tenant_id": tenant_id}
-
+    # подстрахуем ожидаемые ключи
+    return {
+        "tenant_id": tenant_id,
+        "user_id": getattr(request.state, "user_id", None),
+        "email": getattr(request.state, "email", None),
+        "role": getattr(request.state, "role", None),
+    }
 def get_current_kaspi_token() -> Optional[str]:
     """
     Читаем текущий kaspi-token из контекста.
