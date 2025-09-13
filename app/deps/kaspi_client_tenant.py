@@ -63,19 +63,16 @@ class KaspiClient:
             "filter[orders][by]": field,
         }
 
-        # ← Критично: всегда задаём creationDate
-        params["filter[orders][creationDate][$ge]"] = start_ms
-        params["filter[orders][creationDate][$le]"] = end_ms
-
-        # Для совместимости с разными версиями API Kaspi:
-        # если ищем по creationDate — дублируем в [date]
         if field == "creationDate":
+            params["filter[orders][creationDate][$ge]"] = start_ms
+            params["filter[orders][creationDate][$le]"] = end_ms
+    # совместимость c API, где creationDate зовётся 'date'
             params["filter[orders][date][$ge]"] = start_ms
             params["filter[orders][date][$le]"] = end_ms
         else:
-            # если другое поле — добавляем его собственный диапазон
             params[f"filter[orders][{field}][$ge]"] = start_ms
             params[f"filter[orders][{field}][$le]"] = end_ms
+       
 
         with httpx.Client(base_url=self.base_url, timeout=60.0) as cli:
             url = "/orders"
