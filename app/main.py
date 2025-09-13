@@ -310,7 +310,7 @@ async def _get_json_with_retries(cli: httpx.AsyncClient, url: str, *, params: Di
             await asyncio.sleep(backoff)
 
 # -------------------- «Умное» назначение операционного дня --------------------
-_DELIVERED_STATES = {"KASPI_DELIVERY", "ARCHIVE", "ARCHIVED"}
+_DELIVERED_STATES = {"KASPI_DELIVERY", "DELIVERED", "ARCHIVE", "ARCHIVED"}
 
 def _smart_operational_day(attrs: dict, state: str, tzinfo: pytz.BaseTzInfo,
                            store_accept_until: str, business_day_start: str) -> Tuple[str, str]:
@@ -460,12 +460,13 @@ class AnalyticsResponse(BaseModel):
 # -------------------- Вспомогательное расширение состояний --------------------
 _ARCHIVE_ALIASES = {"ARCHIVE", "ARCHIVED"}
 
-def _expand_with_archive(states_inc: Optional[set[str]]) -> set[str]:
+def _normalize_states_inc(states_inc: set[str] | None, expand_archive: bool = False) -> set[str]:
     if not states_inc:
-        return set(DEFAULT_INCLUDE_STATES)
-    if "KASPI_DELIVERY" in states_inc:
-        return set(states_inc) | _ARCHIVE_ALIASES
-    return set(states_inc)
+        return set()
+    out = set(states_inc)
+    if expand_archive and (("KASPI_DELIVERY" in out) or ("DELIVERED" in out)):
+        out |= {"ARCHIVE", "ARCHIVED"}
+    return out
 
 # -------------------- Прогресс-джобы --------------------
 Jobs: Dict[str, Dict[str, object]] = {}  # job_id -> state
@@ -586,7 +587,7 @@ async def _collect_range(
     if client is None:
         raise HTTPException(status_code=500, detail="KASPI_TOKEN is not set")
 
-    states_inc = _expand_with_archive(states_inc)
+    states_inc = _normalize_states_inc(states_inc, expand_archive=False)
 
     range_start_day = start_dt.astimezone(tzinfo).date().isoformat()
     range_end_day   = end_dt.astimezone(tzinfo).date().isoformat()
@@ -615,7 +616,9 @@ async def _collect_range(
                         if st in states_ex:
                             continue
 
-                        ms = extract_ms(attrs, date_field if date_field in attrs else try_field)
+                        field_for_ms = date_field if (attrs.get(date_field) not in (None, "", 0)) else try_field
+                        ms = extract_ms(attrs, field_for_ms)
+
                         if ms is None:
                             continue
                         dtt = datetime.fromtimestamp(ms / 1000.0, tz=pytz.UTC).astimezone(tzinfo)
