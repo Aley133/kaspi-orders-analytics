@@ -37,6 +37,7 @@ from app.api import settings as settings_api
 
 # tenant-aware Kaspi client
 from app.deps.kaspi_client_tenant import KaspiClient as TenantKaspiClient
+
 # ---------- ENV ----------
 load_dotenv()
 
@@ -436,7 +437,7 @@ async def _all_items_details(order_id: str, return_candidates: bool = True, time
             best_sku = None
             for k in ("offer.code", "merchantProduct.code", "product.code", "code", "sku"):
                 vv = sku_cands.get(k)
-                if isinstance(vv, str) and vv.strip():
+                if isinstance(vv, str) and v.strip():
                     best_sku = vv.strip()
                     break
             if not best_sku:
@@ -604,7 +605,8 @@ async def _collect_range(
     states_inc: Optional[set], states_ex: set,
     assign_mode: str, store_accept_until: str,
     progress: Optional[Callable[[str, int, int, str], None]] = None
-) -> tuple[list[DayPoint], Dict[str, int], int, float, Dict[str, int], List[Dict[str, object]]]:
+) -> Tuple[List[DayPoint], Dict[str, int], int, float, Dict[str, int], List[Dict[str, object]]]:
+
     tzinfo = tzinfo_of(tz)
 
     seen_ids: set[str] = set()
@@ -619,10 +621,15 @@ async def _collect_range(
     if client is None:
         raise HTTPException(status_code=500, detail="Kaspi client is not configured")
 
+    # нормализуем включаемые статусы (без авто-ARCHIVE)
     states_inc = _normalize_states_inc(states_inc, expand_archive=False)
 
+    # границы "операционных" дней
     range_start_day = start_dt.astimezone(tzinfo).date().isoformat()
     range_end_day   = end_dt.astimezone(tzinfo).date().isoformat()
+
+    # если период > 1 дня и есть фильтр статусов — применяем его только к последнему дню
+    last_day_only = bool(states_inc) and (range_start_day != range_end_day)
 
     chs = list(iter_chunks(start_dt, end_dt, CHUNK_DAYS))
     total_chunks = max(1, len(chs))
@@ -641,19 +648,16 @@ async def _collect_range(
                         if oid in seen_ids:
                             continue
                         attrs = order.get("attributes", {}) or {}
-
                         st = norm_state(str(attrs.get("state", "")))
-                        if states_inc and st not in states_inc:
-                            continue
-                        if st in states_ex:
-                            continue
 
+                        # 1) выбираем базовое время (с фолбэком к creationDate, если выбранное поле пустое)
                         field_for_ms = date_field if (attrs.get(date_field) not in (None, "", 0)) else "creationDate"
                         ms = extract_ms(attrs, field_for_ms)
                         if ms is None:
                             continue
                         dtt = datetime.fromtimestamp(ms / 1000.0, tz=pytz.UTC).astimezone(tzinfo)
 
+                        # 2) назначаем «операционный день» согласно выбранному режиму
                         if assign_mode == "smart":
                             op_day, reason = _smart_operational_day(attrs, st, tzinfo, store_accept_until, _EFF_BDS)
                         elif assign_mode == "business":
@@ -661,8 +665,24 @@ async def _collect_range(
                         else:
                             op_day, reason = dtt.date().isoformat(), "raw"
 
+                        # диапазон дней
                         if not (range_start_day <= op_day <= range_end_day):
                             continue
+
+                        # 3) исключающие статусы — всегда применяем
+                        if st in states_ex:
+                            continue
+
+                        # 4) включающие статусы:
+                        #    - если last_day_only: применяем ТОЛЬКО на последнем дне
+                        #    - иначе: применяем на всех днях
+                        if states_inc:
+                            if last_day_only:
+                                if op_day == range_end_day and (st not in states_inc):
+                                    continue
+                            else:
+                                if st not in states_inc:
+                                    continue
 
                         amt = extract_amount(attrs)
                         city = extract_city(attrs)
