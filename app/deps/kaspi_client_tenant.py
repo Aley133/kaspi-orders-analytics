@@ -56,20 +56,18 @@ class KaspiClient:
             field = "creationDate"
 
         # Базовые параметры
-        params: Dict[str, object] = {
+        params = {
             "include": "entries",
             "page[size]": 200,
             "page[number]": 1,
             "filter[orders][by]": field,
         }
-
-        # ← Критично: всегда задаём creationDate
-        params["filter[orders][creationDate][$ge]"] = start_ms
-        params["filter[orders][creationDate][$le]"] = end_ms
-
         # Для совместимости с разными версиями API Kaspi:
         # если ищем по creationDate — дублируем в [date]
         if field == "creationDate":
+            params["filter[orders][creationDate][$ge]"] = start_ms
+            params["filter[orders][creationDate][$le]"] = end_ms
+    # совместимость c API, где creationDate зовётся 'date'
             params["filter[orders][date][$ge]"] = start_ms
             params["filter[orders][date][$le]"] = end_ms
         else:
