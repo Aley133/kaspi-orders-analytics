@@ -437,7 +437,7 @@ async def _all_items_details(order_id: str, return_candidates: bool = True, time
             best_sku = None
             for k in ("offer.code", "merchantProduct.code", "product.code", "code", "sku"):
                 vv = sku_cands.get(k)
-                if isinstance(vv, str) and v.strip():
+                if isinstance(vv, str) and vv.strip():
                     best_sku = vv.strip()
                     break
             if not best_sku:
@@ -628,8 +628,9 @@ async def _collect_range(
     range_start_day = start_dt.astimezone(tzinfo).date().isoformat()
     range_end_day   = end_dt.astimezone(tzinfo).date().isoformat()
 
-    # если период > 1 дня и есть фильтр статусов — применяем его только к последнему дню
-    last_day_only = bool(states_inc) and (range_start_day != range_end_day)
+    # last_day_only включаем ТОЛЬКО если ВСЕ выбранные статусы — доставочные и диапазон > 1 дня
+    delivered_only = bool(states_inc) and all(s in _DELIVERED_STATES for s in states_inc)
+    last_day_only = delivered_only and (range_start_day != range_end_day)
 
     chs = list(iter_chunks(start_dt, end_dt, CHUNK_DAYS))
     total_chunks = max(1, len(chs))
@@ -674,8 +675,8 @@ async def _collect_range(
                             continue
 
                         # 4) включающие статусы:
-                        #    - если last_day_only: применяем ТОЛЬКО на последнем дне
-                        #    - иначе: применяем на всех днях
+                        #    - если last_day_only: применяем ТОЛЬКО на последнем дне (для доставочных)
+                        #    - иначе: применяем на всех днях (для NEW и т.п.)
                         if states_inc:
                             if last_day_only:
                                 if op_day == range_end_day and (st not in states_inc):
