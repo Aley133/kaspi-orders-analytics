@@ -648,7 +648,7 @@ async def _collect_range(
                         if st in states_ex:
                             continue
 
-                        field_for_ms = date_field if (attrs.get(date_field) not in (None, "", 0)) else try_field
+                        field_for_ms = date_field if (attrs.get(date_field) not in (None, "", 0)) else "creationDate"
                         ms = extract_ms(attrs, field_for_ms)
                         if ms is None:
                             continue
@@ -830,7 +830,7 @@ async def _list_ids_core(
 
     inc = parse_states_csv(states)
     exc = parse_states_csv(exclude_states) or set()
-    inc = _expand_with_archive(inc)
+    inc = _normalize_states_inc(inc, expand_archive=False)
 
     days, cities_dict, tot, tot_amt, st_counts, out = await _collect_range(
         start_dt, end_dt, tz, date_field, inc, exc,
