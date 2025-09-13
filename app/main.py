@@ -1,4 +1,5 @@
 # app/main.py
+
 from __future__ import annotations
 
 # ---------- imports ----------
@@ -22,105 +23,20 @@ from fastapi.responses import RedirectResponse, PlainTextResponse, JSONResponse
 from cachetools import TTLCache
 from pydantic import BaseModel
 
-# --------- optional debug_sku helpers (fallback if module not present) ----------
-try:
-    # если модуль есть — используем его реализации
-    from app.debug_sku import (
-        get_debug_router,
-        _index_included,
-        _extract_entry,
-        title_candidates as _title_candidates_from_attrs,
-        _rel_id,
-        sku_candidates as _sku_candidates_from_attrs,
-    )
-    _HAS_DEBUG_ROUTER = True
-except Exception:
-    # fallback-реализации, чтобы не падать, даже если модуля нет
-    _HAS_DEBUG_ROUTER = False
+# middleware, который кладёт tenant/token в request.state
+from app.deps.auth import attach_kaspi_token_middleware, get_current_kaspi_token
 
-    def get_debug_router():
-        from fastapi import APIRouter
-        r = APIRouter()
-        @r.get("/debug/ping")
-        def _ping():
-            return {"ok": True}
-        return r
-
-    def _index_included(included: List[dict]) -> Dict[Tuple[str, str], dict]:
-        idx: Dict[Tuple[str, str], dict] = {}
-        for it in included or []:
-            t = str(it.get("type") or "")
-            i = str(it.get("id") or "")
-            if t and i:
-                idx[(t, i)] = it
-        return idx
-
-    def _rel_id(entry: dict, rel_key: str) -> Tuple[Optional[str], Optional[str]]:
-        rel = (entry.get("relationships") or {}).get(rel_key) or {}
-        data = rel.get("data") or {}
-        if isinstance(data, dict):
-            return str(data.get("type") or ""), str(data.get("id") or "")
-        return None, None
-
-    def _extract_entry(entry: dict, idx: Dict[Tuple[str, str], dict]) -> dict:
-        attrs = entry.get("attributes", {}) or {}
-        qty = int(attrs.get("quantity") or attrs.get("qty") or 1)
-        unit_price = attrs.get("basePrice") or attrs.get("unitPrice") or attrs.get("price") or 0
-        try:
-            unit_price = float(unit_price)
-        except Exception:
-            unit_price = 0.0
-        offer = attrs.get("offer") or {}
-        sku = ""
-        if isinstance(offer, dict):
-            sku = str(offer.get("code") or "")
-        return {"qty": qty, "unit_price": unit_price, "sku": sku}
-
-    def _title_candidates_from_attrs(attrs: dict) -> Dict[str, str]:
-        out: Dict[str, str] = {}
-        for k in ("offerName", "title", "name", "productName", "shortName"):
-            v = attrs.get(k)
-            if isinstance(v, str) and v.strip():
-                out[k] = v.strip()
-        return out
-
-    def _sku_candidates_from_attrs(attrs: dict) -> Dict[str, str]:
-        out: Dict[str, str] = {}
-        for k in ("sku", "code", "productCode"):
-            v = attrs.get(k)
-            if isinstance(v, str) and v.strip():
-                out[k] = v.strip()
-        offer = attrs.get("offer") or {}
-        if isinstance(offer, dict) and offer.get("code"):
-            out["offer.code"] = str(offer["code"])
-        return out
-
-# ---------- Kaspi client ----------
-try:
-    from app.kaspi_client import KaspiClient  # type: ignore
-except Exception:
-    try:
-        from .kaspi_client import KaspiClient  # type: ignore
-    except Exception:
-        from kaspi_client import KaspiClient  # type: ignore
-
-# ---------- products router ----------
-try:
-    from app.api.products import get_products_router
-except Exception as _e1:
-    try:
-        from .api.products import get_products_router
-    except Exception as _e2:
-        import traceback
-        print("Failed to import app.api.products:", repr(_e1), "| secondary:", repr(_e2))
-        traceback.print_exc()
-        raise
-
-# ---------- other domain routers ----------
+# доменные роутеры
 from app.api.bridge_v2 import router as bridge_router
 from app.api.profit_fifo import get_profit_fifo_router
 from app.api.authz import router as auth_router
+from app.api.products import get_products_router
 
+# модуль настроек подключаем явно (без try/except)
+from app.api import settings as settings_api
+
+# tenant-aware Kaspi client
+from app.deps.kaspi_client_tenant import KaspiClient as TenantKaspiClient
 # ---------- ENV ----------
 load_dotenv()
 
@@ -144,14 +60,17 @@ CACHE_TTL = int(os.getenv("CACHE_TTL", "300") or 300)
 SHOP_NAME = os.getenv("SHOP_NAME", "LeoXpress")
 PARTNER_ID = os.getenv("PARTNER_ID", "")
 
-BUSINESS_DAY_START = os.getenv("BUSINESS_DAY_START", "20:00")
-USE_BUSINESS_DAY = os.getenv("USE_BUSINESS_DAY", "true").lower() in ("1", "true", "yes", "on")
+# ВАЖНО: правильное имя переменной
 STORE_ACCEPT_UNTIL = os.getenv("STORE_ACCEPT_UNTIL", "17:00")
 
+BUSINESS_DAY_START = os.getenv("BUSINESS_DAY_START", "20:00")
+USE_BUSINESS_DAY = os.getenv("USE_BUSINESS_DAY", "true").lower() in ("1", "true", "yes", "on")
+
+# Конкурентность обогащения (используется ниже)
 ENRICH_CONCURRENCY = int(os.getenv("ENRICH_CONCURRENCY", "6") or 6)
 
-# Effective flags for bucket_date
-_EFF_USE_BD: bool = USE_BUSINESS_DAY
+# Глобальные «эффективные» параметры для bucket_date (безопасные дефолты)
+_EFF_USE_BD: bool = False
 _EFF_BDS: str = BUSINESS_DAY_START
 
 # ---------- FastAPI ----------
@@ -167,65 +86,47 @@ if origins:
         allow_credentials=False,
     )
 
-# Kaspi client (simple token-based)
-client = KaspiClient(token=KASPI_TOKEN, base_url=KASPI_BASE_URL) if KASPI_TOKEN else None
+# Кладём tenant/token в request.state (per-tenant режим)
+app.middleware("http")(attach_kaspi_token_middleware)
 
-# Cache
+# Tenant-aware клиент Kaspi
+client = TenantKaspiClient(base_url=KASPI_BASE_URL)
+
+# Кэш ответов
 orders_cache = TTLCache(maxsize=512, ttl=CACHE_TTL)
 
-# ---------- Safe static UI mounting ----------
-def _detect_ui_dir() -> Optional[str]:
-    # приоритет переменной окружения
-    env_dir = os.getenv("UI_DIR", "").strip()
-    candidates: List[Path] = []
-    if env_dir:
-        candidates.append(Path(env_dir))
-    base = Path(__file__).resolve().parent
-    candidates += [
-        base / "ui",
-        base / "static",
-        Path("app/ui"),
-        Path("app/static"),
-        Path("/app/ui"),
-        Path("/app/static"),
-        Path("ui"),
-        Path("static"),
-    ]
-    for p in candidates:
-        try:
-            if p.is_dir():
-                return str(p)
-        except Exception:
-            continue
-    return None
+# /ui статика (ищем директорию гибко)
+_ui_candidates = ("app/static", "app/ui", "static", "ui")
+_ui_dir = next((p for p in _ui_candidates if Path(p).is_dir()), None)
+if _ui_dir:
+    app.mount("/ui", StaticFiles(directory=_ui_dir, html=True), name="ui")
 
-_UI_DIR = _detect_ui_dir()
-if _UI_DIR:
-    app.mount("/ui", StaticFiles(directory=_UI_DIR, html=True), name="ui")
-
-# ---------- Routers ----------
+# ---------- РОУТЕРЫ ----------
 app.include_router(get_products_router(client), prefix="/products")
 app.include_router(get_profit_fifo_router(), prefix="/profit")
 app.include_router(bridge_router, prefix="/profit")
 app.include_router(auth_router)
-if _HAS_DEBUG_ROUTER:
-    app.include_router(get_debug_router())
+app.include_router(settings_api.router, prefix="/settings", tags=["settings"])
 
 # ---------- helpers ----------
 def _bd_delta(hhmm: str) -> timedelta:
+    """Преобразует 'HH:MM' в timedelta с начала суток (для бизнес-дня)."""
     try:
         h, m = hhmm.split(":")
         return timedelta(hours=int(h), minutes=int(m))
     except Exception:
-        raise HTTPException(status_code=400, detail=f"Bad HH:MM time: {hhmm}")
+        return timedelta(0)
 
 def _days_between(a: datetime, b: datetime) -> int:
+    """Количество календарных дней в диапазоне [a..b]."""
     return (b.date() - a.date()).days + 1
 
 def norm_state(s: str) -> str:
+    """Нормализация названия статуса."""
     return (s or "").strip().upper()
 
 def parse_states_csv(s: Optional[str]) -> Optional[set[str]]:
+    """Парсинг CSV/списка статусов с разделителями пробел/запятая/точка с запятой."""
     if not s:
         return None
     return {norm_state(x) for x in re.split(r"[\s,;]+", s) if x.strip()}
@@ -256,6 +157,7 @@ def apply_hhmm(dt_local: datetime, hhmm: str) -> datetime:
     return dt_local.replace(hour=hh, minute=mm, second=0, microsecond=0)
 
 def iter_chunks(start_dt: datetime, end_dt: datetime, step_days: int) -> Iterable[Tuple[datetime, datetime]]:
+    """Итерация по диапазону дат кусками step_days (включая конечные миллисекунды)."""
     cur = start_dt
     while cur <= end_dt:
         nxt = min(cur + timedelta(days=step_days) - timedelta(milliseconds=1), end_dt)
@@ -352,10 +254,12 @@ BASE_TIMEOUT = httpx.Timeout(connect=10.0, read=80.0, write=20.0, pool=60.0)
 HTTPX_LIMITS = httpx.Limits(max_connections=20, max_keepalive_connections=10)
 
 def _kaspi_headers() -> Dict[str, str]:
-    if not KASPI_TOKEN:
-        raise HTTPException(status_code=500, detail="KASPI_TOKEN is not set")
+    tok = get_current_kaspi_token()
+    if not tok:
+        # отсутствие персонального токена для текущего аккаунта
+        raise HTTPException(status_code=401, detail="Kaspi token is not set for this tenant")
     return {
-        "X-Auth-Token": KASPI_TOKEN,
+        "X-Auth-Token": tok,
         "Accept": "application/vnd.api+json",
         "Content-Type": "application/vnd.api+json",
         "User-Agent": "Mozilla/5.0",
@@ -394,7 +298,7 @@ async def _get_json_with_retries(cli: httpx.AsyncClient, url: str, *, params: Di
             await asyncio.sleep(backoff)
 
 # ---------- «Умное» назначение операционного дня ----------
-_DELIVERED_STATES = {"KASPI_DELIVERY", "DELIVERED", "ARCHIVE", "ARCHIVED"}
+_DELIVERED_STATES = {"KASPI_DELIVERY", "ARCHIVE", "ARCHIVED"}
 
 def _smart_operational_day(attrs: dict, state: str, tzinfo: pytz.BaseTzInfo,
                            store_accept_until: str, business_day_start: str) -> Tuple[str, str]:
@@ -423,6 +327,56 @@ def _smart_operational_day(attrs: dict, state: str, tzinfo: pytz.BaseTzInfo,
             return (dt_creation + timedelta(days=1)).date().isoformat(), "created_after_cutoff_next_day"
 
     return datetime.now(tzinfo).date().isoformat(), "fallback_now"
+
+# ---------- Хелперы для позиций ----------
+def _index_included(included: List[dict]) -> Dict[Tuple[str, str], dict]:
+    idx: Dict[Tuple[str, str], dict] = {}
+    for it in included or []:
+        t = str(it.get("type") or "")
+        i = str(it.get("id") or "")
+        if t and i:
+            idx[(t, i)] = it
+    return idx
+
+def _rel_id(entry: dict, rel_key: str) -> Tuple[Optional[str], Optional[str]]:
+    rel = (entry.get("relationships") or {}).get(rel_key) or {}
+    data = rel.get("data") or {}
+    if isinstance(data, dict):
+        return data.get("type"), data.get("id")
+    return None, None
+
+def _extract_entry(entry: dict, idx: Dict[Tuple[str, str], dict]) -> dict:
+    attrs = entry.get("attributes", {}) or {}
+    qty = int(attrs.get("quantity") or attrs.get("qty") or 1)
+    unit_price = attrs.get("basePrice") or attrs.get("unitPrice") or attrs.get("price") or 0
+    try:
+        unit_price = float(unit_price)
+    except Exception:
+        unit_price = 0.0
+    offer = attrs.get("offer") or {}
+    sku = ""
+    if isinstance(offer, dict):
+        sku = str(offer.get("code") or "")
+    return {"qty": qty, "unit_price": unit_price, "sku": sku}
+
+def _title_candidates_from_attrs(attrs: dict) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    for k in ("offerName", "title", "name", "productName", "shortName"):
+        v = attrs.get(k)
+        if isinstance(v, str) and v.strip():
+            out[k] = v.strip()
+    return out
+
+def _sku_candidates_from_attrs(attrs: dict) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    for k in ("sku", "code", "productCode"):
+        v = attrs.get(k)
+        if isinstance(v, str) and v.strip():
+            out[k] = v.strip()
+    offer = attrs.get("offer") or {}
+    if isinstance(offer, dict) and offer.get("code"):
+        out["offer.code"] = str(offer["code"])
+    return out
 
 # ---------- Вытягивание позиций (ВСЕ SKU) ----------
 async def _all_items_details(order_id: str, return_candidates: bool = True, timeout_scale: float = 1.0) -> List[Dict[str, object]]:
@@ -542,23 +496,23 @@ class AnalyticsResponse(BaseModel):
 _ARCHIVE_ALIASES = {"ARCHIVE", "ARCHIVED"}
 
 def _expand_with_archive(states_inc: Optional[set[str]]) -> set[str]:
+    # если фильтр не задан — не фильтруем вовсе
     if not states_inc:
         return set()
-    out = set(states_inc)
-    # если в фильтре есть KASPI_DELIVERY — добавим "архивные" псевдостатусы
-    if "KASPI_DELIVERY" in out or "DELIVERED" in out:
-        out |= _ARCHIVE_ALIASES
-    return out
+    # если включили KASPI_DELIVERY — добавим архивные псевдонимы
+    if "KASPI_DELIVERY" in states_inc:
+        return set(states_inc) | _ARCHIVE_ALIASES
+    return set(states_inc)
 
 # ---------- Прогресс-джобы ----------
-Jobs: Dict[str, Dict[str, object]] = {}
+Jobs: Dict[str, Dict[str, object]] = {}  # job_id -> state
 
 def _new_job() -> str:
     job_id = uuid.uuid4().hex
     Jobs[job_id] = {
-        "status": "queued",
-        "phase": "scan",
-        "progress": 0.0,
+        "status": "queued",         # queued | running | done | error | canceled
+        "phase": "scan",            # scan | enrich
+        "progress": 0.0,            # 0..1
         "message": "",
         "created": datetime.utcnow().isoformat() + "Z",
         "updated": datetime.utcnow().isoformat() + "Z",
@@ -590,8 +544,7 @@ def _job_progress_cb(job_id: Optional[str]):
                 prog = min(0.6, 0.6 * (done / total))
             else:
                 prog = 0.6 + min(0.4, 0.4 * (done / total))
-        _job_update(job_id, phase=phase, progress=prog, done=done, total=total,
-                    message=extra_msg or Jobs[job_id].get("message",""))
+        _job_update(job_id, phase=phase, progress=prog, done=done, total=total, message=extra_msg or Jobs[job_id].get("message",""))
     return cb
 
 @app.get("/auth/meta", tags=["auth"])
@@ -652,8 +605,7 @@ async def _collect_range(
     states_inc: Optional[set], states_ex: set,
     assign_mode: str, store_accept_until: str,
     progress: Optional[Callable[[str, int, int, str], None]] = None
-) -> Tuple[List[DayPoint], Dict[str, int], int, float, Dict[str, int], List[Dict[str, object]]]:
-
+) -> tuple[list[DayPoint], Dict[str, int], int, float, Dict[str, int], List[Dict[str, object]]]:
     tzinfo = tzinfo_of(tz)
 
     seen_ids: set[str] = set()
@@ -666,9 +618,8 @@ async def _collect_range(
     total_amount = 0.0
 
     if client is None:
-        raise HTTPException(status_code=500, detail="KASPI_TOKEN is not set")
+        raise HTTPException(status_code=500, detail="Kaspi client is not configured")
 
-    # авторасширение архива под доставку
     states_inc = _expand_with_archive(states_inc)
 
     range_start_day = start_dt.astimezone(tzinfo).date().isoformat()
@@ -691,21 +642,18 @@ async def _collect_range(
                         if oid in seen_ids:
                             continue
                         attrs = order.get("attributes", {}) or {}
-                        st = norm_state(str(attrs.get("state", "")))
 
+                        st = norm_state(str(attrs.get("state", "")))
                         if states_inc and st not in states_inc:
                             continue
                         if st in states_ex:
                             continue
 
-                        # timestamp c fallback на creationDate
-                        field_for_ms = date_field if (attrs.get(date_field) not in (None, "", 0)) else "creationDate"
-                        ms = extract_ms(attrs, field_for_ms)
+                        ms = extract_ms(attrs, date_field if date_field in attrs else try_field)
                         if ms is None:
                             continue
                         dtt = datetime.fromtimestamp(ms / 1000.0, tz=pytz.UTC).astimezone(tzinfo)
 
-                        # назначаем «операционный день»
                         if assign_mode == "smart":
                             op_day, reason = _smart_operational_day(attrs, st, tzinfo, store_accept_until, _EFF_BDS)
                         elif assign_mode == "business":
@@ -713,7 +661,6 @@ async def _collect_range(
                         else:
                             op_day, reason = dtt.date().isoformat(), "raw"
 
-                        # отсекаем по диапазону уже ПОСЛЕ бакетизации
                         if not (range_start_day <= op_day <= range_end_day):
                             continue
 
@@ -837,23 +784,25 @@ async def analytics(start: str = Query(...), end: str = Query(...), tz: str = Qu
         "state_breakdown": st_counts,
     }
 
-# ---------- list_ids core ----------
+# ---------- Вспомогательная «ядровая» функция list_ids ----------
 def _select_targets(out: List[Dict[str, object]], enrich_day: str, enrich_scope: str, limit: int) -> List[Dict[str, object]]:
     if enrich_scope == "all":
-        return out
+        return out if not limit or limit <= 0 else out[:limit]
     if enrich_scope == "last_day":
         sel = [it for it in out if str(it["op_day"]) == enrich_day]
-        return sel
+        return sel if not limit or limit <= 0 else sel[:limit]
     if enrich_scope == "last_week":
         y, m, d = map(int, enrich_day.split("-"))
         last_dt = date(y, m, d)
         scope = {(last_dt - timedelta(days=i)).isoformat() for i in range(7)}
-        return [it for it in out if str(it["op_day"]) in scope]
+        sel = [it for it in out if str(it["op_day"]) in scope]
+        return sel if not limit or limit <= 0 else sel[:limit]
     if enrich_scope == "last_month":
         y, m, d = map(int, enrich_day.split("-"))
         last_dt = date(y, m, d)
         scope = {(last_dt - timedelta(days=i)).isoformat() for i in range(30)}
-        return [it for it in out if str(it["op_day"]) in scope]
+        sel = [it for it in out if str(it["op_day"]) in scope]
+        return sel if not limit or limit <= 0 else sel[:limit]
     return []
 
 async def _list_ids_core(
@@ -1093,5 +1042,4 @@ async def job_cancel(job_id: str):
 # ---------- ROOT ----------
 @app.get("/", include_in_schema=False)
 async def root():
-    # если фронтовая статика смонтирована — отправим на /ui/, иначе — в /docs
-    return RedirectResponse(url="/ui/" if _UI_DIR else "/docs")
+    return RedirectResponse(url="/ui/")
