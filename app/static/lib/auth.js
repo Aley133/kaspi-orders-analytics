@@ -113,15 +113,6 @@ export const Auth = {
   },
 };
 
-Auth.signOutAndGoLogin = async function () {
-  try { await Auth.ready; } catch {}
-  try { await Auth.sb?.auth?.signOut?.(); } catch {}
-  try { localStorage.removeItem('KASPI_API_KEY'); } catch {}
-  // На всякий — подчистим возможные следы
-  try { sessionStorage.clear(); } catch {}
-  // Возврат на страницу логина
-  location.replace('/ui/login.html');
-};
 // в самый низ файла, рядом с export const Auth = { ... }
 Auth.requireAuth = async () => {
   await Auth.ready; // ждём инициализации клиента
