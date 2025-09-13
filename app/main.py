@@ -648,7 +648,8 @@ async def _collect_range(
                         if st in states_ex:
                             continue
 
-                        ms = extract_ms(attrs, date_field if date_field in attrs else try_field)
+                        field_for_ms = date_field if (attrs.get(date_field) not in (None, "", 0)) else try_field
+                        ms = extract_ms(attrs, field_for_ms)
                         if ms is None:
                             continue
                         dtt = datetime.fromtimestamp(ms / 1000.0, tz=pytz.UTC).astimezone(tzinfo)
