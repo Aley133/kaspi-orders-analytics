@@ -604,7 +604,8 @@ async def _collect_range(
     start_dt: datetime, end_dt: datetime, tz: str, date_field: str,
     states_inc: Optional[set], states_ex: set,
     assign_mode: str, store_accept_until: str,
-    progress: Optional[Callable[[str, int, int, str], None]] = None
+    progress: Optional[Callable[[str, int, int, str], None]] = None,
+    states_scope: str = "all",   # NEW: all | last_day
 ) -> Tuple[List[DayPoint], Dict[str, int], int, float, Dict[str, int], List[Dict[str, object]]]:
 
     tzinfo = tzinfo_of(tz)
@@ -621,16 +622,11 @@ async def _collect_range(
     if client is None:
         raise HTTPException(status_code=500, detail="Kaspi client is not configured")
 
-    # нормализуем включаемые статусы (без авто-ARCHIVE)
+    # включающие статусы НЕ расширяем автоматически
     states_inc = _normalize_states_inc(states_inc, expand_archive=False)
 
-    # границы "операционных" дней
-    range_start_day = start_dt.astimezone(tzinfo).date().isoformat()
-    range_end_day   = end_dt.astimezone(tzinfo).date().isoformat()
-
-    # last_day_only включаем ТОЛЬКО если ВСЕ выбранные статусы — доставочные и диапазон > 1 дня
-    delivered_only = bool(states_inc) and all(s in _DELIVERED_STATES for s in states_inc)
-    last_day_only = delivered_only and (range_start_day != range_end_day)
+    # «последний день» для логики last_day (через те же правила бакетизации)
+    last_day = bucket_date(end_dt.astimezone(tzinfo))
 
     chs = list(iter_chunks(start_dt, end_dt, CHUNK_DAYS))
     total_chunks = max(1, len(chs))
@@ -651,14 +647,25 @@ async def _collect_range(
                         attrs = order.get("attributes", {}) or {}
                         st = norm_state(str(attrs.get("state", "")))
 
-                        # 1) выбираем базовое время (с фолбэком к creationDate, если выбранное поле пустое)
+                        # 1) исключающие статусы — всегда
+                        if st in states_ex:
+                            continue
+
+                        # 2) включающие статусы:
+                        #   - states_scope == "all": применяем сразу (как раньше)
+                        #   - states_scope == "last_day": проверим после вычисления op_day
+                        if states_inc and states_scope == "all":
+                            if st not in states_inc:
+                                continue
+
+                        # 3) берём timestamp с fallback на creationDate
                         field_for_ms = date_field if (attrs.get(date_field) not in (None, "", 0)) else "creationDate"
                         ms = extract_ms(attrs, field_for_ms)
                         if ms is None:
                             continue
                         dtt = datetime.fromtimestamp(ms / 1000.0, tz=pytz.UTC).astimezone(tzinfo)
 
-                        # 2) назначаем «операционный день» согласно выбранному режиму
+                        # 4) назначаем операционный день (БЕЗ дополнительного отсечения по диапазону!)
                         if assign_mode == "smart":
                             op_day, reason = _smart_operational_day(attrs, st, tzinfo, store_accept_until, _EFF_BDS)
                         elif assign_mode == "business":
@@ -666,24 +673,11 @@ async def _collect_range(
                         else:
                             op_day, reason = dtt.date().isoformat(), "raw"
 
-                        # диапазон дней
-                        if not (range_start_day <= op_day <= range_end_day):
-                            continue
-
-                        # 3) исключающие статусы — всегда применяем
-                        if st in states_ex:
-                            continue
-
-                        # 4) включающие статусы:
-                        #    - если last_day_only: применяем ТОЛЬКО на последнем дне (для доставочных)
-                        #    - иначе: применяем на всех днях (для NEW и т.п.)
-                        if states_inc:
-                            if last_day_only:
-                                if op_day == range_end_day and (st not in states_inc):
-                                    continue
-                            else:
-                                if st not in states_inc:
-                                    continue
+                        # если включающие статусы применяются только к последнему дню
+                        if states_inc and states_scope == "last_day":
+                            if (op_day == last_day) and (st not in states_inc):
+                                continue
+                            # на остальные дни включающие статусы не накладываем
 
                         amt = extract_amount(attrs)
                         city = extract_city(attrs)
@@ -740,7 +734,8 @@ async def analytics(start: str = Query(...), end: str = Query(...), tz: str = Qu
                     start_time: Optional[str] = Query(None), end_time: Optional[str] = Query(None),
                     use_bd: Optional[bool] = Query(None), business_day_start: Optional[str] = Query(None),
                     assign_mode: str = Query("smart", pattern="^(smart|business|raw)$"),
-                    store_accept_until: Optional[str] = Query(None)):
+                    store_accept_until: Optional[str] = Query(None),
+                    states_scope: str = Query("all", pattern="^(all|last_day)$")):
 
     tzinfo = tzinfo_of(tz)
 
@@ -774,7 +769,9 @@ async def analytics(start: str = Query(...), end: str = Query(...), tz: str = Qu
 
     days, cities_dict, tot, tot_amt, st_counts, _ = await _collect_range(
         start_dt, end_dt, tz, date_field, inc, exc,
-        assign_mode=assign_mode, store_accept_until=(store_accept_until or STORE_ACCEPT_UNTIL)
+        assign_mode=assign_mode,
+        store_accept_until=(store_accept_until or STORE_ACCEPT_UNTIL),
+        states_scope=states_scope
     )
 
     cities_list = [{"city": c, "count": n} for c, n in sorted(cities_dict.items(), key=lambda x: -x[1])]
@@ -786,7 +783,9 @@ async def analytics(start: str = Query(...), end: str = Query(...), tz: str = Qu
         prev_start = prev_end - timedelta(days=span_days) + timedelta(milliseconds=1)
         prev_days, _, _, _, _, _ = await _collect_range(
             prev_start, prev_end, tz, date_field, inc, exc,
-            assign_mode=assign_mode, store_accept_until=(store_accept_until or STORE_ACCEPT_UNTIL),
+            assign_mode=assign_mode,
+            store_accept_until=(store_accept_until or STORE_ACCEPT_UNTIL),
+            states_scope=states_scope
         )
 
     return {
@@ -834,6 +833,7 @@ async def _list_ids_core(
     with_items: int, enrich_scope: str, items_mode: str, return_candidates: int,
     assign_mode: str, store_accept_until: Optional[str],
     progress_cb: Optional[Callable[[str, int, int, str], None]] = None,
+    states_scope: str = "all",
 ) -> Dict[str, object]:
 
     tzinfo = tzinfo_of(tz)
@@ -855,8 +855,10 @@ async def _list_ids_core(
 
     days, cities_dict, tot, tot_amt, st_counts, out = await _collect_range(
         start_dt, end_dt, tz, date_field, inc, exc,
-        assign_mode=assign_mode, store_accept_until=(store_accept_until or STORE_ACCEPT_UNTIL),
-        progress=progress_cb
+        assign_mode=assign_mode,
+        store_accept_until=(store_accept_until or STORE_ACCEPT_UNTIL),
+        progress=progress_cb,
+        states_scope=states_scope,
     )
 
     out.sort(key=lambda it: (str(it["op_day"]), str(it["date"])), reverse=(order == "desc"))
@@ -958,11 +960,13 @@ async def list_ids(
     return_candidates: int = Query(0, description="1=вернуть title_candidates/sku_candidates"),
     assign_mode: str = Query("smart", pattern="^(smart|business|raw)$"),
     store_accept_until: Optional[str] = Query(None),
+    states_scope: str = Query("all", pattern="^(all|last_day)$"),
 ):
     return await _list_ids_core(
         start, end, tz, date_field, states, exclude_states,
         use_bd, business_day_start, limit, order, grouped, with_items,
-        enrich_scope, items_mode, return_candidates, assign_mode, store_accept_until, None
+        enrich_scope, items_mode, return_candidates, assign_mode, store_accept_until,
+        None, states_scope
     )
 
 # ---------- CSV ----------
@@ -979,13 +983,15 @@ async def list_ids_csv(
     order: str = Query("asc", pattern="^(asc|desc)$"),
     assign_mode: str = Query("smart", pattern="^(smart|business|raw)$"),
     store_accept_until: Optional[str] = Query(None),
+    states_scope: str = Query("all", pattern="^(all|last_day)$"),
 ):
     data = await _list_ids_core(
         start, end, tz, date_field, states, exclude_states,
         use_bd, business_day_start,
         limit=100000, order=order, grouped=0,
         with_items=0, enrich_scope="none", items_mode="all", return_candidates=0,
-        assign_mode=assign_mode, store_accept_until=store_accept_until, progress_cb=None
+        assign_mode=assign_mode, store_accept_until=store_accept_until, progress_cb=None,
+        states_scope=states_scope
     )
     csv = "\n".join([str(it["number"]) for it in data["items"]])
     return csv
@@ -1010,6 +1016,7 @@ async def list_ids_async(
     return_candidates: int = Query(0),
     assign_mode: str = Query("smart"),
     store_accept_until: Optional[str] = Query(None),
+    states_scope: str = Query("all", pattern="^(all|last_day)$"),
 ):
     job_id = _new_job()
 
@@ -1021,7 +1028,8 @@ async def list_ids_async(
                 use_bd, business_day_start, limit, order, grouped,
                 with_items, enrich_scope, items_mode, return_candidates,
                 assign_mode, store_accept_until,
-                progress_cb=_job_progress_cb(job_id)
+                progress_cb=_job_progress_cb(job_id),
+                states_scope=states_scope
             )
             if Jobs.get(job_id, {}).get("cancel"):
                 _job_update(job_id, status="canceled", message="canceled by user", result=None)
