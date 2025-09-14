@@ -97,7 +97,7 @@
           <label for="phone">Телефон (E.164)</label>
           <input id="phone" placeholder="+7 (___) ___‑__‑__" autocomplete="tel" inputmode="tel"/>
         </div>
-        <button id="sendSms" class="btn" type="button">Продолжить</button>
+        <button id="sendSms" class="btn" type="button">Получить код</button>
 
         <div id="smsOtpBlock" class="row hidden">
           <div>
@@ -114,7 +114,7 @@
           <label for="email">E‑mail</label>
           <input id="email" type="email" placeholder="you@company.kz" autocomplete="email"/>
         </div>
-        <button id="sendEmail" class="btn" type="button">Продолжить</button>
+        <button id="sendEmail" class="btn" type="button">Получить код/ссылку</button>
 
         <div id="emailOtpBlock" class="row hidden">
           <div>
@@ -142,6 +142,10 @@
     const $=(s)=>document.querySelector(s);
     const setMsg=(t,err=false)=>{const m=$('#msg');m.textContent=t||'';m.classList.toggle('err',!!err)};
 
+    // Reset‑хелперы, чтобы в каждой вкладке был только один CTA
+    const resetSms = () => { $('#smsOtpBlock').classList.add('hidden'); $('#sendSms').classList.remove('hidden'); setMsg(''); };
+    const resetEmail = () => { $('#emailOtpBlock').classList.add('hidden'); $('#sendEmail').classList.remove('hidden'); setMsg(''); };
+
     // Вкладки
     function setTab(mode){ const sms=mode==='sms';
       $('#tabSms').classList.toggle('active',sms);
@@ -150,6 +154,8 @@
       $('#tabEmail').setAttribute('aria-selected',!sms);
       $('#paneSms').classList.toggle('hidden',!sms);
       $('#paneEmail').classList.toggle('hidden',sms);
+      // сбрасываем состояние вкладок при переключении
+      sms ? resetSms() : resetEmail();
       localStorage.setItem('login-mode', mode);
       (sms?$('#phone'):$('#email')).focus(); }
     $('#tabSms').onclick = ()=>setTab('sms');
@@ -166,7 +172,7 @@
     $('#sendSms').onclick = async ()=>{
       const phone=($('#phone').value||'').trim(); if(!phone) return setMsg('Укажите телефон в формате +7…',true);
       setMsg('Отправляем SMS…');
-      try{ await Auth.signInPhoneOtp(phone); $('#smsOtpBlock').classList.remove('hidden'); setMsg('Код отправлен. Введите его ниже.'); $('#smsOtp').focus(); }
+      try{ await Auth.signInPhoneOtp(phone); $('#smsOtpBlock').classList.remove('hidden'); $('#sendSms').classList.add('hidden'); setMsg('Код отправлен. Введите его ниже.'); $('#smsOtp').focus(); }
       catch(e){ console.error(e); setMsg('Ошибка: '+(e?.message||e),true); }
     };
     $('#verifySms').onclick = async ()=>{
@@ -180,7 +186,7 @@
     $('#sendEmail').onclick = async ()=>{
       const email=($('#email').value||'').trim(); if(!email) return setMsg('Укажите e‑mail',true);
       setMsg('Отправляем код/ссылку…');
-      try{ await Auth.signInEmailOtp(email); $('#emailOtpBlock').classList.remove('hidden'); setMsg('Проверьте почту: пришёл код или ссылка.'); $('#emailOtp').focus(); }
+      try{ await Auth.signInEmailOtp(email); $('#emailOtpBlock').classList.remove('hidden'); $('#sendEmail').classList.add('hidden'); setMsg('Проверьте почту: пришёл код или ссылка.'); $('#emailOtp').focus(); }
       catch(e){ console.error(e); setMsg('Ошибка: '+(e?.message||e),true); }
     };
     $('#verifyEmail').onclick = async ()=>{
