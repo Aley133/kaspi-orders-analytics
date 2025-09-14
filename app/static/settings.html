@@ -6,311 +6,251 @@
   <title>Настройки — Kaspi Analytics</title>
   <link rel="stylesheet" href="style.css" />
   <style>
-    :root{
-      --bg:#0b1020; --fg:#e7edf7; --muted:#9fb0c3; --card:#11162a; --line:#27314a;
-      --pri:#4aa3ff; --ok:#22c55e; --warn:#f59e0b; --err:#ef4444;
-      --chip:#1b2338; --chip-fg:#c9d7ea;
-    }
-    html,body{background:var(--bg); color:var(--fg)}
-    body{padding:28px; max-width:1024px; margin:auto; font:14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, Inter, sans-serif}
-    h1{font-size:24px; margin:0 0 14px}
+    /* Палитра и токены  — синхронизировано со стартовой страницей */
+    :root{ --bg:#0b0c0f; --fg:#e5e7eb; --muted:#9ca3af; --line:#2a2f3a; --card:#111318; --accent:#10b981; --danger:#ef4444; --warn:#f59e0b; }
+    [data-theme="light"]{ --bg:#f8fafc; --fg:#0f172a; --muted:#64748b; --line:#e2e8f0; --card:#ffffff; --accent:#059669; --danger:#dc2626; --warn:#d97706; }
+
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Helvetica Neue","Noto Sans",Arial}
+    a{color:inherit}
     .muted{color:var(--muted)}
 
-    /* layout */
-    .toolbar{display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:18px}
-    .toolbar .who{display:flex; gap:10px; align-items:center}
-    .toolbar .badge{background:var(--chip); color:var(--chip-fg); padding:6px 10px; border-radius:999px; border:1px solid var(--line); font-size:12px}
+    /* общий каркас */
+    .layout{display:flex;min-height:100vh}
+    .sidebar{width:240px;border-right:1px solid var(--line);padding:16px;background:var(--card)}
+    .content{flex:1;min-width:0;padding:16px 18px}
 
-    .grid{display:grid; grid-template-columns: 1.2fr 1fr; gap:16px}
+    .brand{font-weight:800;letter-spacing:.3px;margin-bottom:12px}
+    .nav{display:flex;flex-direction:column;gap:6px;margin:6px 0 16px}
+    .nav a,.nav button{padding:6px 8px;border-radius:8px;color:var(--fg);text-decoration:none;background:transparent;border:0;text-align:left;cursor:pointer}
+    .nav a:hover,.nav button:hover{background:var(--bg)}
 
-    .card{background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px}
-    .card h2{font-size:16px; margin:0 0 10px}
-    .card .hint{font-size:12px; color:var(--muted); margin:-4px 0 12px}
+    .row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+    .btn{height:32px;padding:0 12px;border:1px solid var(--line);background:var(--card);color:var(--fg);border-radius:8px;cursor:pointer}
+    .btn.primary{background:var(--accent); color:#031225; border-color:#06744e}
+    .btn[disabled]{opacity:.6;cursor:not-allowed}
+    input,select{height:36px;padding:0 12px;background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:10px}
 
-    .field{display:flex; flex-direction:column; gap:6px; margin-bottom:12px}
-    .field label{font-size:12px; color:var(--muted)}
-    .row{display:flex; gap:10px; align-items:center; flex-wrap:wrap}
-    .grow{flex:1}
+    .shell{border:1px solid var(--line);background:var(--card);border-radius:14px;padding:16px;margin:16px 0}
+    h1{margin:0 0 12px}
 
-    input, select{height:36px; padding:0 12px; color:var(--fg); background:#0f1527; border:1px solid var(--line); border-radius:10px; outline:none}
-    input[type="checkbox"]{height:auto}
-    button{height:36px; padding:0 14px; border-radius:10px; border:1px solid var(--line); color:var(--fg); background:#121a31; cursor:pointer}
-    button.primary{background:var(--pri); color:#031225; border-color:#2d7ad1}
-    button.ghost{background:transparent}
-    button[disabled]{opacity:.6; cursor:not-allowed}
+    .card h2{font-size:16px;margin:0 0 8px}
+    .hint{font-size:12px;color:var(--muted);margin:-4px 0 10px}
+    .pill{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:999px;padding:4px 8px;background:var(--card);font-size:12px}
 
-    .pwd{display:flex; gap:8px; align-items:center}
-    .pill{display:inline-flex; align-items:center; gap:6px; padding:4px 8px; border:1px solid var(--line); border-radius:999px; background:#0f1527; font-size:12px}
-    .status{display:flex; align-items:center; gap:8px; font-size:13px}
-    .dot{width:8px; height:8px; border-radius:50%; background:#64748b}
-    .dot.ok{background:var(--ok)}
-    .dot.warn{background:var(--warn)}
-    .dot.err{background:var(--err)}
+    .grid{display:grid;grid-template-columns:1.2fr 1fr;gap:16px}
 
-    .section-title{font-weight:600; margin:2px 0 8px}
-    .split{display:grid; grid-template-columns: 1fr 1fr; gap:12px}
+    .field{display:flex;flex-direction:column;gap:6px;margin-bottom:12px}
+    .footer{display:flex;gap:10px;align-items:center;margin-top:10px}
 
-    .footer{display:flex; gap:10px; align-items:center; margin-top:10px}
-    .link{color:var(--pri); text-decoration:none}
+    .dot{width:8px;height:8px;border-radius:50%;background:#9ca3af;display:inline-block}
+    .dot.ok{background:var(--accent)} .dot.warn{background:var(--warn)} .dot.err{background:var(--danger)}
   </style>
 </head>
-<body>
-  <div class="toolbar">
-    <div>
+<body data-theme="light">
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="brand">⚡ LeoXpress</div>
+      <nav class="nav">
+        <a href="index.html">Аналитика</a>
+        <a href="stock.html">Мой склад</a>
+        <a href="settings.html" aria-current="page">Настройки</a>
+        <button id="btnSignOut" class="btn">Выход</button>
+      </nav>
+      <div class="row">
+        <label class="row" style="gap:8px"><input type="checkbox" id="themeToggle"> Тёмная тема</label>
+      </div>
+    </aside>
+
+    <main class="content">
       <h1>Настройки</h1>
       <div class="muted">Эти параметры используются аналитикой, бизнес-днём и FIFO‑мостом.</div>
-    </div>
-    <div class="who">
-      <span id="who" class="badge">…</span>
-      <button id="btnSignOut" class="ghost" title="Выйти">Выйти</button>
-    </div>
-  </div>
 
-  <div class="grid">
-    <!-- Профиль пользователя: e‑mail / телефон -->
-    <section class="card">
-      <h2>Профиль</h2>
-      <div class="hint">Можно добавить второй способ входа: если зашли по телефону — добавьте e‑mail, и наоборот.</div>
+      <div class="grid">
+        <!-- ПРОФИЛЬ: email/phone, добавление недостающего канала -->
+        <section class="shell card">
+          <h2>Профиль</h2>
+          <div class="hint">Если вошли по телефону — добавьте e‑mail; если по e‑mail — добавьте телефон. Так аккаунт будет доступен обоими способами.</div>
 
-      <div class="field">
-        <div class="row">
-          <div class="pill"><strong>Текущий e‑mail:</strong> <span id="curEmail">—</span></div>
-          <div class="pill"><strong>Телефон:</strong> <span id="curPhone">—</span></div>
-        </div>
+          <div class="row" style="margin-bottom:8px">
+            <span class="pill"><b>Текущий e‑mail:</b> <span id="curEmail">—</span></span>
+            <span class="pill"><b>Телефон:</b> <span id="curPhone">—</span></span>
+          </div>
+
+          <div id="blockPhone" style="display:none">
+            <div class="field"><label>Привязать или сменить телефон</label>
+              <div class="row">
+                <input id="newPhone" class="grow" placeholder="+7XXXXXXXXXX" inputmode="tel" />
+                <button id="btnLinkPhone" class="btn">Отправить код</button>
+                <input id="codePhone" placeholder="Код из SMS" inputmode="numeric" maxlength="6" style="width:140px" />
+                <button id="btnVerifyPhone" class="btn primary">Подтвердить</button>
+              </div>
+            </div>
+          </div>
+
+          <div id="blockEmail" style="display:none">
+            <div class="field"><label>Привязать или сменить e‑mail</label>
+              <div class="row">
+                <input id="newEmail" class="grow" placeholder="you@example.com" type="email" />
+                <button id="btnLinkEmail" class="btn">Отправить код</button>
+                <input id="codeEmail" placeholder="Код из письма" style="width:160px" />
+                <button id="btnVerifyEmail" class="btn primary">Подтвердить</button>
+              </div>
+            </div>
+          </div>
+
+          <div id="acctMsg" class="row" style="gap:8px"><span class="dot"></span><span>Готово к изменениям.</span></div>
+        </section>
+
+        <!-- Проверка токена и переход -->
+        <section class="shell card">
+          <h2>Проверка доступа</h2>
+          <div class="hint">После сохранения настроек можно проверить авторизацию и перейти в панель.</div>
+          <div class="row">
+            <button id="btnCheck" class="btn">Проверить токен</button>
+            <span id="checkMsg" class="row" style="gap:8px"><span class="dot"></span><span>—</span></span>
+          </div>
+          <div class="row" style="margin-top:8px">
+            <a href="/ui/">⟵ На главную панель</a>
+          </div>
+        </section>
       </div>
 
-      <div class="section-title">Привязать или сменить телефон</div>
-      <div class="row">
-        <input id="newPhone" class="grow" placeholder="+7XXXXXXXXXX" inputmode="tel" />
-        <button id="btnLinkPhone">Отправить код</button>
-        <input id="codePhone" placeholder="Код из SMS" inputmode="numeric" maxlength="6" style="width:140px" />
-        <button id="btnVerifyPhone" class="primary">Подтвердить</button>
-      </div>
-
-      <div class="section-title" style="margin-top:12px">Привязать или сменить e‑mail</div>
-      <div class="row">
-        <input id="newEmail" class="grow" placeholder="you@example.com" type="email" />
-        <button id="btnLinkEmail">Отправить код</button>
-        <input id="codeEmail" placeholder="Код из письма" style="width:160px" />
-        <button id="btnVerifyEmail" class="primary">Подтвердить</button>
-      </div>
-
-      <div id="acctMsg" class="status" style="margin-top:10px"><span class="dot"></span><span>Готово к изменениям.</span></div>
-    </section>
-
-    <!-- Системное / проверка токена -->
-    <section class="card">
-      <h2>Проверка доступа</h2>
-      <div class="hint">После сохранения настроек можно проверить авторизацию и перейти в панель.</div>
-      <div class="row">
-        <button id="btnCheck" class="ghost">Проверить токен</button>
-        <span id="checkMsg" class="status"><span class="dot"></span><span>—</span></span>
-      </div>
-      <div class="row" style="margin-top:8px">
-        <a class="link" href="/ui/">⟵ На главную панель</a>
-      </div>
-    </section>
-  </div>
-
-  <!-- Основные настройки магазина / Kaspi / Бизнес‑день -->
-  <section class="card" style="margin-top:16px">
-    <h2>Параметры магазина и расчётов</h2>
-
-    <div class="split">
-      <div>
-        <div class="field">
-          <label>Shop name</label>
-          <input name="shop_name" placeholder="LeoXpress" />
-        </div>
-        <div class="field">
-          <label>Partner ID</label>
-          <input name="partner_id" placeholder="" />
-        </div>
-        <div class="field">
-          <label>KASPI_TOKEN</label>
-          <div class="row pwd">
-            <input name="kaspi_token" placeholder="kaspi_xxx" type="password" class="grow" />
-            <button id="togglePwd" type="button" title="Показать/скрыть токен">🙈</button>
+      <!-- Основные настройки магазина / Kaspi / Бизнес‑день -->
+      <section class="shell">
+        <h2>Параметры магазина и расчётов</h2>
+        <div class="grid" style="grid-template-columns:1fr 1fr">
+          <div>
+            <div class="field"><label>Shop name</label><input name="shop_name" placeholder="LeoXpress" /></div>
+            <div class="field"><label>Partner ID</label><input name="partner_id" placeholder="" /></div>
+            <div class="field"><label>KASPI_TOKEN</label>
+              <div class="row">
+                <input name="kaspi_token" placeholder="kaspi_xxx" type="password" class="grow" />
+                <button id="togglePwd" type="button" class="btn" title="Показать/скрыть токен">🙈</button>
+              </div>
+            </div>
+          </div>
+          <div>
+            <div class="field"><label>Amount fields (CSV)</label><input name="amount_fields" value="totalPrice" /></div>
+            <div class="field"><label>Amount divisor</label><input name="amount_divisor" type="number" step="0.0001" value="1" /></div>
+            <div class="field"><label>Date field default</label><input name="date_field_default" value="creationDate" /></div>
           </div>
         </div>
-      </div>
 
-      <div>
-        <div class="field">
-          <label>Amount fields (CSV)</label>
-          <input name="amount_fields" value="totalPrice" />
+        <div class="grid" style="grid-template-columns:1fr 1fr">
+          <div>
+            <div class="field"><label>Business day start (HH:MM)</label><input name="business_day_start" value="20:00" /></div>
+            <div class="row" style="justify-content:space-between"><label>Use business day</label><input type="checkbox" name="use_business_day" checked /></div>
+          </div>
+          <div>
+            <div class="field"><label>Store accept until</label><input name="store_accept_until" value="17:00" /></div>
+            <div class="field"><label>Allowed origins (CSV)</label><input name="allowed_origins" value="" /></div>
+          </div>
         </div>
-        <div class="field">
-          <label>Amount divisor</label>
-          <input name="amount_divisor" type="number" step="0.0001" value="1" />
-        </div>
-        <div class="field">
-          <label>Date field default</label>
-          <input name="date_field_default" value="creationDate" />
-        </div>
-      </div>
-    </div>
 
-    <div class="split">
-      <div>
-        <div class="field">
-          <label>Business day start (HH:MM)</label>
-          <input name="business_day_start" value="20:00" />
-        </div>
-        <div class="field row" style="gap:10px">
-          <label style="margin-right:auto">Use business day</label>
-          <input type="checkbox" name="use_business_day" checked />
-        </div>
-      </div>
-      <div>
-        <div class="field">
-          <label>Store accept until</label>
-          <input name="store_accept_until" value="17:00" />
-        </div>
-        <div class="field">
-          <label>Allowed origins (CSV)</label>
-          <input name="allowed_origins" value="" />
-        </div>
-      </div>
-    </div>
+        <div class="field"><label>City keys (CSV)</label><input name="city_keys" value="city,deliveryAddress.city" /></div>
 
-    <div class="field" style="margin-top:8px">
-      <label>City keys (CSV)</label>
-      <input name="city_keys" value="city,deliveryAddress.city" />
-    </div>
-
-    <div class="footer">
-      <button id="save" class="primary">Сохранить</button>
-      <span id="msg" class="muted">—</span>
-    </div>
-  </section>
+        <div class="footer">
+          <button id="save" class="btn primary">Сохранить</button>
+          <span id="msg" class="muted">—</span>
+        </div>
+      </section>
+    </main>
+  </div>
 
   <script type="module">
     import { Auth } from './lib/auth.js';
 
-    // ------------- Helpers -------------
     const $ = (s) => document.querySelector(s);
-    const msg = (node, text, cls) => { const dot=node.querySelector('.dot'); const span=node.querySelector('span:nth-child(2)'); dot.className='dot '+(cls||''); span.textContent=text; };
+    const setDot = (el, cls, text) => { const dot=el.querySelector('.dot'); if(dot) dot.className='dot '+(cls||''); const span=el.querySelector('span:nth-child(2)'); if(span) span.textContent=text; };
 
-    // provide authedFetch globally
-    window.authedFetch = async (input, init={}) => {
-      await Auth.ready; const headers={...(init.headers||{}), ...(await Auth.authHeader())};
-      const r = await fetch(input,{...init, headers}); if(r.status===401){ await Auth.signOutAndGoLogin(); throw new Error('Unauthorized'); } return r;
+    // — Тема: читаем/пишем в localStorage, как на главной
+    const THEME_KEY = 'app.theme';
+    const applyTheme = (t) => document.body.setAttribute('data-theme', t || 'light');
+    applyTheme(localStorage.getItem(THEME_KEY) || document.body.getAttribute('data-theme') || 'light');
+    const themeToggle = $('#themeToggle');
+    if(themeToggle){ themeToggle.checked = (document.body.getAttribute('data-theme') !== 'light'); themeToggle.addEventListener('change', e => { const t=e.target.checked?'dark':'light'; applyTheme(t); localStorage.setItem(THEME_KEY, t); }); }
+
+    // — Авторизация и защищённый fetch
+    window.authedFetch = async (input, init = {}) => {
+      await Auth.ready; const headers = { ...(init.headers||{}), ...(await Auth.authHeader()) };
+      const res = await fetch(input, { ...init, headers });
+      if(res.status===401){ await Auth.signOutAndGoLogin(); throw new Error('Unauthorized'); }
+      return res;
     };
     const AF = window.authedFetch;
 
-    // Require auth, show who
     await Auth.ready; await Auth.requireAuth();
     $('#btnSignOut')?.addEventListener('click', Auth.signOutAndGoLogin);
 
-    // Try to obtain supabase client from Auth or window
     const sb = Auth.sb || Auth.client || window.supabase;
 
+    // — Профиль и условный UI: показываем только то, что можно привязать
     async function refreshWho(){
-      try{
-        const { data:{ user } } = await (sb?.auth?.getUser?.() ?? {data:{user:null}});
-        $('#curEmail').textContent = user?.email || '—';
-        $('#curPhone').textContent = user?.phone || '—';
-        const label = user?.email ? `Вошли как ${user.email}` : (user?.phone ? `Вошли как ${user.phone}` : 'Неизвестный пользователь');
-        $('#who').textContent = label;
-      }catch(e){ $('#who').textContent = 'Не удалось получить профиль'; }
+      const { data:{ user } } = await sb.auth.getUser();
+      $('#curEmail').textContent = user?.email || '—';
+      $('#curPhone').textContent = user?.phone || '—';
+      // если вошли по e‑mail — прячем блок e‑mail и показываем блок телефона; и наоборот
+      const hasEmail = !!user?.email; const hasPhone = !!user?.phone;
+      $('#blockEmail').style.display = hasEmail ? 'none' : 'block';
+      $('#blockPhone').style.display = hasPhone ? 'none' : 'block';
     }
-
     await refreshWho();
 
-    // Toggle kaspi token visibility
-    $('#togglePwd').addEventListener('click', () => {
+    // — Показ/скрытие токена
+    $('#togglePwd')?.addEventListener('click', () => {
       const inp = document.querySelector('input[name="kaspi_token"]');
-      const t = inp.type==='password' ? 'text' : 'password';
-      inp.type=t; $('#togglePwd').textContent = t==='password' ? '🙈' : '👁️';
+      if(!inp) return; const t = inp.type==='password' ? 'text' : 'password'; inp.type=t; $('#togglePwd').textContent = t==='password' ? '🙈' : '👁️';
     });
 
-    // Load settings
-    const form = document.querySelector('section.card + section.card + section.card input') ? document.querySelector('body') : document.body; // noop guard
-    const formRoot = document.querySelector('section.card + section.card + section.card'); // last card
-    const formEl = document.querySelector('section.card + section.card + section.card'); // for scope only
-
+    // — Загрузка сохранённых настроек
     async function loadSettings(){
-      const r = await AF('/settings/me');
-      const msgNode = $('#msg');
-      if(r.ok){
-        const data = await r.json();
-        document.querySelectorAll('input[name]').forEach(el=>{
-          const k = el.name; if(!(k in data)) return; const v = data[k];
-          if(el.type==='checkbox') el.checked = !!v; else el.value = (v ?? '').toString();
-        });
-        msgNode.textContent='Настройки загружены';
-      } else if (r.status===404){
-        msgNode.textContent='Нет сохранённых настроек — заполните форму и нажмите «Сохранить».';
-      } else {
-        msgNode.textContent='Ошибка загрузки: '+r.status;
-      }
+      const r = await AF('/settings/me'); const m = $('#msg');
+      if(r.ok){ const data = await r.json(); document.querySelectorAll('input[name]').forEach(el=>{ const k=el.name; if(!(k in data)) return; if(el.type==='checkbox') el.checked=!!data[k]; else el.value=(data[k]??''); }); m.textContent='Настройки загружены'; }
+      else if(r.status===404){ $('#msg').textContent='Нет сохранённых настроек — заполните форму и нажмите «Сохранить».'; }
+      else { $('#msg').textContent='Ошибка загрузки: '+r.status; }
     }
     await loadSettings();
 
-    function collect(){
-      const out={};
-      document.querySelectorAll('input[name]').forEach(el=>{
-        if(el.type==='checkbox') out[el.name]=!!el.checked;
-        else if(el.type==='number'){ const n=Number(el.value); out[el.name]=Number.isFinite(n)?n:null; }
-        else out[el.name]=(el.value??'').trim();
-      });
-      return out;
-    }
-
+    // — Сохранение настроек
+    function collect(){ const out={}; document.querySelectorAll('input[name]').forEach(el=>{ if(el.type==='checkbox') out[el.name]=!!el.checked; else if(el.type==='number'){ const n=Number(el.value); out[el.name]=Number.isFinite(n)?n:null; } else out[el.name]=(el.value??'').trim(); }); return out; }
     async function save(){
-      const payload = collect();
-      const m = $('#msg');
-      $('#save').disabled=true; m.textContent='Сохраняю…';
+      const payload = collect(); const m=$('#msg'); $('#save').disabled=true; m.textContent='Сохраняю…';
       if(!payload.kaspi_token){ m.textContent='Укажите KASPI_TOKEN'; $('#save').disabled=false; return; }
-      const r = await AF('/settings/save', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
-      if(!r.ok){ m.textContent = 'Ошибка сохранения: '+(await r.text().catch(()=>r.status)); $('#save').disabled=false; return; }
+      const r = await AF('/settings/save', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload) });
+      if(!r.ok){ m.textContent='Ошибка сохранения: '+(await r.text().catch(()=>r.status)); $('#save').disabled=false; return; }
       const chk = await AF('/settings/check');
       if(chk.ok){ m.textContent='Сохранено. Перенаправляю…'; setTimeout(()=>location.href='/ui/', 600); }
       else { m.textContent='Сохранено, но проверка токена не прошла: '+chk.status; $('#save').disabled=false; }
     }
-
     $('#save').addEventListener('click', save);
 
-    // Check token quickly
-    $('#btnCheck').addEventListener('click', async()=>{
-      const n = $('#checkMsg'); msg(n,'Проверяю…','');
-      const r = await AF('/settings/check');
-      if(r.ok) msg(n,'Токен принят (200).','ok'); else msg(n,`Нет доступа (${r.status}).`,'err');
+    // — Быстрая проверка токена
+    $('#btnCheck').addEventListener('click', async()=>{ setDot($('#checkMsg'),'','Проверяю…'); const r=await AF('/settings/check'); if(r.ok) setDot($('#checkMsg'),'ok','Токен принят (200)'); else setDot($('#checkMsg'),'err',`Нет доступа (${r.status})`); });
+
+    // — Привязка/верификация телефона
+    $('#btnLinkPhone')?.addEventListener('click', async()=>{
+      const phone = $('#newPhone').value.trim(); if(!phone.startsWith('+')) return setDot($('#acctMsg'),'warn','Формат номера E.164 (+7…)');
+      try{ const { error } = await sb.auth.updateUser({ phone }); if(error) throw error; setDot($('#acctMsg'),'ok','Код SMS отправлен. Введите и подтвердите ниже.'); }
+      catch(e){ setDot($('#acctMsg'),'err','Ошибка отправки SMS: '+(e?.message||e)); }
+    });
+    $('#btnVerifyPhone')?.addEventListener('click', async()=>{
+      const phone=$('#newPhone').value.trim(); const token=$('#codePhone').value.trim();
+      try{ const { error } = await sb.auth.verifyOtp({ phone, token, type:'phone_change' }); if(error) throw error; setDot($('#acctMsg'),'ok','Телефон подтверждён и привязан.'); await refreshWho(); }
+      catch(e){ setDot($('#acctMsg'),'err','Не удалось подтвердить телефон: '+(e?.message||e)); }
     });
 
-    // ---------- Link / verify phone ----------
-    $('#btnLinkPhone').addEventListener('click', async()=>{
-      const phone = $('#newPhone').value.trim(); if(!phone.startsWith('+')) return msg($('#acctMsg'),'Формат номера E.164 (+7…)', 'warn');
-      try{
-        const { error } = await sb.auth.updateUser({ phone });
-        if(error) throw error; msg($('#acctMsg'),'Код SMS отправлен. Введите его ниже и нажмите «Подтвердить».','ok');
-      }catch(e){ msg($('#acctMsg'),'Ошибка отправки SMS: '+(e?.message||e),'err'); }
+    // — Привязка/верификация e‑mail
+    $('#btnLinkEmail')?.addEventListener('click', async()=>{
+      const email=$('#newEmail').value.trim(); if(!email.includes('@')) return setDot($('#acctMsg'),'warn','Укажите корректный e‑mail');
+      try{ const { error } = await sb.auth.updateUser({ email }); if(error) throw error; setDot($('#acctMsg'),'ok','Код отправлен на почту. Введите и подтвердите.'); }
+      catch(e){ setDot($('#acctMsg'),'err','Ошибка отправки кода: '+(e?.message||e)); }
     });
-
-    $('#btnVerifyPhone').addEventListener('click', async()=>{
-      const phone = $('#newPhone').value.trim(); const token = $('#codePhone').value.trim();
-      try{
-        const { error } = await sb.auth.verifyOtp({ phone, token, type:'phone_change' });
-        if(error) throw error; msg($('#acctMsg'),'Телефон подтверждён и привязан.','ok'); await refreshWho();
-      }catch(e){ msg($('#acctMsg'),'Не удалось подтвердить телефон: '+(e?.message||e),'err'); }
-    });
-
-    // ---------- Link / verify email ----------
-    $('#btnLinkEmail').addEventListener('click', async()=>{
-      const email = $('#newEmail').value.trim(); if(!email.includes('@')) return msg($('#acctMsg'),'Укажите корректный e‑mail','warn');
-      try{
-        const { error } = await sb.auth.updateUser({ email });
-        if(error) throw error; msg($('#acctMsg'),'Код отправлен на почту. Введите его и нажмите «Подтвердить e‑mail».','ok');
-      }catch(e){ msg($('#acctMsg'),'Ошибка отправки кода на e‑mail: '+(e?.message||e),'err'); }
-    });
-
-    $('#btnVerifyEmail').addEventListener('click', async()=>{
-      const email = $('#newEmail').value.trim(); const token = $('#codeEmail').value.trim();
-      try{
-        const { error } = await sb.auth.verifyOtp({ email, token, type:'email_change' });
-        if(error) throw error; msg($('#acctMsg'),'E‑mail подтверждён и привязан.','ok'); await refreshWho();
-      }catch(e){ msg($('#acctMsg'),'Не удалось подтвердить e‑mail: '+(e?.message||e),'err'); }
+    $('#btnVerifyEmail')?.addEventListener('click', async()=>{
+      const email=$('#newEmail').value.trim(); const token=$('#codeEmail').value.trim();
+      try{ const { error } = await sb.auth.verifyOtp({ email, token, type:'email_change' }); if(error) throw error; setDot($('#acctMsg'),'ok','E‑mail подтверждён и привязан.'); await refreshWho(); }
+      catch(e){ setDot($('#acctMsg'),'err','Не удалось подтвердить e‑mail: '+(e?.message||e)); }
     });
   </script>
 </body>
