@@ -23,7 +23,7 @@ from fastapi.responses import RedirectResponse, PlainTextResponse, JSONResponse
 from cachetools import TTLCache
 from pydantic import BaseModel
 
-# middleware, который кладёт tenant/token в request.state
+# middleware: кладём tenant/token в request.state
 from app.deps.auth import attach_kaspi_token_middleware, get_current_kaspi_token
 
 # доменные роутеры
@@ -32,11 +32,13 @@ from app.api.profit_fifo import get_profit_fifo_router
 from app.api.authz import router as auth_router
 from app.api.products import get_products_router
 
-# модуль настроек подключаем явно (без try/except)
+# модуль настроек
 from app.api import settings as settings_api
 
 # tenant-aware Kaspi client
 from app.deps.kaspi_client_tenant import KaspiClient as TenantKaspiClient
+
+
 # ---------- ENV ----------
 load_dotenv()
 
@@ -60,18 +62,18 @@ CACHE_TTL = int(os.getenv("CACHE_TTL", "300") or 300)
 SHOP_NAME = os.getenv("SHOP_NAME", "LeoXpress")
 PARTNER_ID = os.getenv("PARTNER_ID", "")
 
-# ВАЖНО: правильное имя переменной
 STORE_ACCEPT_UNTIL = os.getenv("STORE_ACCEPT_UNTIL", "17:00")
 
 BUSINESS_DAY_START = os.getenv("BUSINESS_DAY_START", "20:00")
 USE_BUSINESS_DAY = os.getenv("USE_BUSINESS_DAY", "true").lower() in ("1", "true", "yes", "on")
 
-# Конкурентность обогащения (используется ниже)
+# Конкурентность обогащения
 ENRICH_CONCURRENCY = int(os.getenv("ENRICH_CONCURRENCY", "6") or 6)
 
-# Глобальные «эффективные» параметры для bucket_date (безопасные дефолты)
+# Глобальные «эффективные» параметры для bucket_date
 _EFF_USE_BD: bool = False
 _EFF_BDS: str = BUSINESS_DAY_START
+
 
 # ---------- FastAPI ----------
 app = FastAPI(title="Kaspi Orders Analytics")
@@ -86,7 +88,7 @@ if origins:
         allow_credentials=False,
     )
 
-# Кладём tenant/token в request.state (per-tenant режим)
+# multitenant токен
 app.middleware("http")(attach_kaspi_token_middleware)
 
 # Tenant-aware клиент Kaspi
@@ -95,11 +97,12 @@ client = TenantKaspiClient(base_url=KASPI_BASE_URL)
 # Кэш ответов
 orders_cache = TTLCache(maxsize=512, ttl=CACHE_TTL)
 
-# /ui статика (ищем директорию гибко)
+# /ui статика
 _ui_candidates = ("app/static", "app/ui", "static", "ui")
 _ui_dir = next((p for p in _ui_candidates if Path(p).is_dir()), None)
 if _ui_dir:
     app.mount("/ui", StaticFiles(directory=_ui_dir, html=True), name="ui")
+
 
 # ---------- РОУТЕРЫ ----------
 app.include_router(get_products_router(client), prefix="/products")
@@ -108,9 +111,9 @@ app.include_router(bridge_router, prefix="/profit")
 app.include_router(auth_router)
 app.include_router(settings_api.router, prefix="/settings", tags=["settings"])
 
+
 # ---------- helpers ----------
 def _bd_delta(hhmm: str) -> timedelta:
-    """Преобразует 'HH:MM' в timedelta с начала суток (для бизнес-дня)."""
     try:
         h, m = hhmm.split(":")
         return timedelta(hours=int(h), minutes=int(m))
@@ -118,15 +121,12 @@ def _bd_delta(hhmm: str) -> timedelta:
         return timedelta(0)
 
 def _days_between(a: datetime, b: datetime) -> int:
-    """Количество календарных дней в диапазоне [a..b]."""
     return (b.date() - a.date()).days + 1
 
 def norm_state(s: str) -> str:
-    """Нормализация названия статуса."""
     return (s or "").strip().upper()
 
 def parse_states_csv(s: Optional[str]) -> Optional[set[str]]:
-    """Парсинг CSV/списка статусов с разделителями пробел/запятая/точка с запятой."""
     if not s:
         return None
     return {norm_state(x) for x in re.split(r"[\s,;]+", s) if x.strip()}
@@ -157,7 +157,6 @@ def apply_hhmm(dt_local: datetime, hhmm: str) -> datetime:
     return dt_local.replace(hour=hh, minute=mm, second=0, microsecond=0)
 
 def iter_chunks(start_dt: datetime, end_dt: datetime, step_days: int) -> Iterable[Tuple[datetime, datetime]]:
-    """Итерация по диапазону дат кусками step_days (включая конечные миллисекунды)."""
     cur = start_dt
     while cur <= end_dt:
         nxt = min(cur + timedelta(days=step_days) - timedelta(milliseconds=1), end_dt)
@@ -249,6 +248,7 @@ def _guess_number(attrs: dict, fallback_id: str) -> str:
             return v.strip()
     return str(fallback_id)
 
+
 # ---------- HTTPX и ретраи ----------
 BASE_TIMEOUT = httpx.Timeout(connect=10.0, read=80.0, write=20.0, pool=60.0)
 HTTPX_LIMITS = httpx.Limits(max_connections=20, max_keepalive_connections=10)
@@ -256,7 +256,6 @@ HTTPX_LIMITS = httpx.Limits(max_connections=20, max_keepalive_connections=10)
 def _kaspi_headers() -> Dict[str, str]:
     tok = get_current_kaspi_token()
     if not tok:
-        # отсутствие персонального токена для текущего аккаунта
         raise HTTPException(status_code=401, detail="Kaspi token is not set for this tenant")
     return {
         "X-Auth-Token": tok,
@@ -284,10 +283,8 @@ async def _get_json_with_retries(cli: httpx.AsyncClient, url: str, *, params: Di
             if r.status_code in (429, 500, 502, 503, 504):
                 ra = r.headers.get("Retry-After")
                 if ra:
-                    try:
-                        await asyncio.sleep(float(ra))
-                    except Exception:
-                        pass
+                    try: await asyncio.sleep(float(ra))
+                    except Exception: pass
                 raise HTTPStatusError(f"Retryable status: {r.status_code}", request=r.request, response=r)
             r.raise_for_status()
             return r.json()
@@ -296,6 +293,7 @@ async def _get_json_with_retries(cli: httpx.AsyncClient, url: str, *, params: Di
                 raise
             backoff = min(0.9 * (2 ** i), 16.0) + random.uniform(0.0, 0.4)
             await asyncio.sleep(backoff)
+
 
 # ---------- «Умное» назначение операционного дня ----------
 _DELIVERED_STATES = {"KASPI_DELIVERY", "DELIVERED", "ARCHIVE", "ARCHIVED"}
@@ -328,6 +326,7 @@ def _smart_operational_day(attrs: dict, state: str, tzinfo: pytz.BaseTzInfo,
 
     return datetime.now(tzinfo).date().isoformat(), "fallback_now"
 
+
 # ---------- Хелперы для позиций ----------
 def _index_included(included: List[dict]) -> Dict[Tuple[str, str], dict]:
     idx: Dict[Tuple[str, str], dict] = {}
@@ -349,10 +348,8 @@ def _extract_entry(entry: dict, idx: Dict[Tuple[str, str], dict]) -> dict:
     attrs = entry.get("attributes", {}) or {}
     qty = int(attrs.get("quantity") or attrs.get("qty") or 1)
     unit_price = attrs.get("basePrice") or attrs.get("unitPrice") or attrs.get("price") or 0
-    try:
-        unit_price = float(unit_price)
-    except Exception:
-        unit_price = 0.0
+    try: unit_price = float(unit_price)
+    except Exception: unit_price = 0.0
     offer = attrs.get("offer") or {}
     sku = ""
     if isinstance(offer, dict):
@@ -377,6 +374,7 @@ def _sku_candidates_from_attrs(attrs: dict) -> Dict[str, str]:
     if isinstance(offer, dict) and offer.get("code"):
         out["offer.code"] = str(offer["code"])
     return out
+
 
 # ---------- Вытягивание позиций (ВСЕ SKU) ----------
 async def _all_items_details(order_id: str, return_candidates: bool = True, timeout_scale: float = 1.0) -> List[Dict[str, object]]:
@@ -436,8 +434,8 @@ async def _all_items_details(order_id: str, return_candidates: bool = True, time
             best_sku = None
             for k in ("offer.code", "merchantProduct.code", "product.code", "code", "sku"):
                 vv = sku_cands.get(k)
-                if isinstance(vv, str) and vv.strip():
-                    best_sku = vv.strip()
+                if isinstance(vv, str) and v.strip():
+                    best_sku = v.strip()
                     break
             if not best_sku:
                 best_sku = str(ex.get("sku", ""))
@@ -458,6 +456,7 @@ async def _all_items_details(order_id: str, return_candidates: bool = True, time
     orders_cache[cache_key] = [dict(x) for x in items]
     return items
 
+
 # ---------- (совместимость) первая позиция ----------
 async def _first_item_details(order_id: str, return_candidates: bool = False, timeout_scale: float = 1.0) -> Optional[Dict[str, object]]:
     items = await _all_items_details(order_id, return_candidates=return_candidates, timeout_scale=timeout_scale)
@@ -469,6 +468,7 @@ async def _first_item_details(order_id: str, return_candidates: bool = False, ti
         out["sku_candidates"] = first.get("sku_candidates", {})
         out["title_candidates"] = first.get("title_candidates", {})
     return out
+
 
 # ---------- Models ----------
 class DayPoint(BaseModel):
@@ -491,6 +491,9 @@ class AnalyticsResponse(BaseModel):
     prev_days: List[DayPoint] = []
     cities: List[CityCount] = []
     state_breakdown: Dict[str, int] = {}
+    # Дополнительно (UI не сломается, это опционально):
+    summary: Optional[dict] = None
+
 
 # ---------- Вспомогательное расширение состояний ----------
 _ARCHIVE_ALIASES = {"ARCHIVE", "ARCHIVED"}
@@ -502,6 +505,7 @@ def _normalize_states_inc(states_inc: set[str] | None, expand_archive: bool = Fa
     if expand_archive and (("KASPI_DELIVERY" in out) or ("DELIVERED" in out)):
         out |= {"ARCHIVE", "ARCHIVED"}
     return out
+
 
 # ---------- Прогресс-джобы ----------
 Jobs: Dict[str, Dict[str, object]] = {}  # job_id -> state
@@ -524,8 +528,7 @@ def _new_job() -> str:
 
 def _job_update(job_id: str, **patch):
     st = Jobs.get(job_id)
-    if not st:
-        return
+    if not st: return
     st.update(patch)
     st["updated"] = datetime.utcnow().isoformat() + "Z"
 
@@ -533,10 +536,8 @@ def _job_progress_cb(job_id: Optional[str]):
     if not job_id:
         return None
     def cb(phase: str, done: int, total: int, extra_msg: str = ""):
-        if job_id not in Jobs:
-            return
-        if Jobs[job_id].get("cancel"):
-            return
+        if job_id not in Jobs: return
+        if Jobs[job_id].get("cancel"): return
         prog = 0.0
         if total > 0:
             if phase == "scan":
@@ -546,6 +547,8 @@ def _job_progress_cb(job_id: Optional[str]):
         _job_update(job_id, phase=phase, progress=prog, done=done, total=total, message=extra_msg or Jobs[job_id].get("message",""))
     return cb
 
+
+# ---------- META ----------
 @app.get("/auth/meta", tags=["auth"])
 def auth_meta():
     url = os.getenv("SUPABASE_URL")
@@ -554,7 +557,6 @@ def auth_meta():
         raise HTTPException(status_code=500, detail="Missing SUPABASE_URL or SUPABASE_ANON_KEY")
     return {"SUPABASE_URL": url, "SUPABASE_ANON_KEY": key}
 
-# ---------- Endpoints: META ----------
 @app.get("/meta")
 async def meta():
     return {
@@ -573,30 +575,22 @@ async def meta():
         "store_accept_until": STORE_ACCEPT_UNTIL,
     }
 
+
 # ---------- Внутреннее ядро сбора ----------
 def _calc_timeout_scale(days_span: int, targets: int) -> float:
     scale = 1.0
-    if days_span >= 10:
-        scale += 0.8
-    if days_span >= 30:
-        scale += 0.7
-    if targets >= 300:
-        scale += 0.6
-    if targets >= 1000:
-        scale += 0.8
-    if targets >= 2000:
-        scale += 0.6
+    if days_span >= 10:  scale += 0.8
+    if days_span >= 30:  scale += 0.7
+    if targets >= 300:   scale += 0.6
+    if targets >= 1000:  scale += 0.8
+    if targets >= 2000:  scale += 0.6
     return min(5.0, scale)
 
 def _calc_enrich_params(total_targets: int) -> Tuple[int, float]:
-    if total_targets >= 2000:
-        return max(2, ENRICH_CONCURRENCY // 3), 0.12
-    if total_targets >= 1000:
-        return max(2, ENRICH_CONCURRENCY // 2), 0.08
-    if total_targets >= 400:
-        return max(3, ENRICH_CONCURRENCY // 2 + 1), 0.055
-    if total_targets >= 150:
-        return max(4, ENRICH_CONCURRENCY), 0.035
+    if total_targets >= 2000: return max(2, ENRICH_CONCURRENCY // 3), 0.12
+    if total_targets >= 1000: return max(2, ENRICH_CONCURRENCY // 2), 0.08
+    if total_targets >= 400:  return max(3, ENRICH_CONCURRENCY // 2 + 1), 0.055
+    if total_targets >= 150:  return max(4, ENRICH_CONCURRENCY), 0.035
     return ENRICH_CONCURRENCY, 0.02
 
 async def _collect_range(
@@ -710,6 +704,51 @@ async def _collect_range(
 
     return out_days, city_counts, total_orders, round(total_amount, 2), state_counts, flat_out
 
+
+# ---------- helpers для сравнений (MoM/WoW/DoD) ----------
+from typing import Tuple
+def _align_series(cur, prev):
+    cur_map = {d.x: d for d in (cur or [])}
+    prev_map = {d.x: d for d in (prev or [])}
+    xs = sorted(set(cur_map.keys()) | set(prev_map.keys()))
+    def pick(m, x):
+        d = m.get(x)
+        return {"x": x, "count": int(getattr(d, "count", 0) or 0),
+                "amount": float(getattr(d, "amount", 0.0) or 0.0)}
+    return [pick(cur_map, x) for x in xs], [pick(prev_map, x) for x in xs]
+
+def _delta(a: float, b: float) -> Tuple[float, float]:
+    d = a - b
+    pct = (d / b * 100.0) if b else (100.0 if a else 0.0)
+    return round(d, 2), round(pct, 2)
+
+def _period_summary(days):
+    orders = sum(int(d.count) for d in (days or []))
+    amount = round(sum(float(d.amount) for d in (days or [])), 2)
+    return orders, amount
+
+def _span_prev_equal(start_dt, end_dt):
+    span = (end_dt.date() - start_dt.date()).days + 1
+    prev_end = start_dt - timedelta(milliseconds=1)
+    prev_start = prev_end - timedelta(days=span) + timedelta(milliseconds=1)
+    return prev_start, prev_end
+
+def _month_bounds(dt, tzinfo):
+    start = tzinfo.localize(datetime(dt.year, dt.month, 1))
+    if dt.month == 12:
+        nxt = tzinfo.localize(datetime(dt.year + 1, 1, 1))
+    else:
+        nxt = tzinfo.localize(datetime(dt.year, dt.month + 1, 1))
+    end = nxt - timedelta(milliseconds=1)
+    return start, end
+
+def _week_bounds(dt, tzinfo):
+    wd = (dt.weekday() + 7) % 7  # 0 = Mon
+    start = tzinfo.localize(datetime(dt.year, dt.month, dt.day)) - timedelta(days=wd)
+    end = start + timedelta(days=7) - timedelta(milliseconds=1)
+    return start, end
+
+
 # ---------- Публичные эндпоинты аналитики ----------
 @app.get("/orders/analytics", response_model=AnalyticsResponse)
 async def analytics(start: str = Query(...), end: str = Query(...), tz: str = Query(DEFAULT_TZ),
@@ -736,8 +775,7 @@ async def analytics(start: str = Query(...), end: str = Query(...), tz: str = Qu
         start_dt = tzinfo.localize(datetime.combine((start_dt.date() - timedelta(days=1)), time(0, 0, 0))) + delta
         end_dt = tzinfo.localize(datetime.combine(end_dt.date(), time(0, 0, 0))) + delta - timedelta(milliseconds=1)
     else:
-        if start_time:
-            start_dt = apply_hhmm(start_dt, start_time)
+        if start_time: start_dt = apply_hhmm(start_dt, start_time)
         if end_time:
             e0 = parse_date_local(end, tz)
             end_dt = apply_hhmm(e0, end_time)
@@ -768,6 +806,55 @@ async def analytics(start: str = Query(...), end: str = Query(...), tz: str = Qu
             assign_mode=assign_mode, store_accept_until=(store_accept_until or STORE_ACCEPT_UNTIL),
         )
 
+    # ---- расширенное summary (MoM/WoW/DoD) ----
+    cur_orders, cur_amount = _period_summary(days)
+    prv_orders, prv_amount = _period_summary(prev_days)
+    d_orders = cur_orders - prv_orders
+    d_orders_pct = round((d_orders / prv_orders * 100.0) if prv_orders else (100.0 if cur_orders else 0.0), 2)
+    d_amount = round(cur_amount - prv_amount, 2)
+    d_amount_pct = round((d_amount / prv_amount * 100.0) if prv_amount else (100.0 if cur_amount else 0.0), 2)
+
+    now_local = end_dt.astimezone(tzinfo)
+    # MTD
+    m_start, _m_end_full = _month_bounds(now_local, tzinfo)
+    mtd_days, _, _, _, _, _ = await _collect_range(m_start, end_dt, tz, date_field, inc, exc,
+        assign_mode=assign_mode, store_accept_until=(store_accept_until or STORE_ACCEPT_UNTIL))
+    pm_start, pm_end = _month_bounds((m_start - timedelta(days=1)), tzinfo)
+    prev_month_days, _, _, _, _, _ = await _collect_range(pm_start, pm_end, tz, date_field, inc, exc,
+        assign_mode=assign_mode, store_accept_until=(store_accept_until or STORE_ACCEPT_UNTIL))
+    mtd_cur, mtd_prev = _align_series(mtd_days, prev_month_days)
+    mtd_o, mtd_a = _period_summary(mtd_days)
+    pm_o, pm_a = _period_summary(prev_month_days)
+    mtd_do, mtd_do_pct = _delta(mtd_o, pm_o)
+    mtd_da, mtd_da_pct = _delta(mtd_a, pm_a)
+
+    # WTD
+    w_start, _w_end = _week_bounds(now_local, tzinfo)
+    wtd_days, _, _, _, _, _ = await _collect_range(w_start, end_dt, tz, date_field, inc, exc,
+        assign_mode=assign_mode, store_accept_until=(store_accept_until or STORE_ACCEPT_UNTIL))
+    pw_start, pw_end = _week_bounds((w_start - timedelta(days=1)), tzinfo)
+    prev_w_days, _, _, _, _, _ = await _collect_range(pw_start, pw_end, tz, date_field, inc, exc,
+        assign_mode=assign_mode, store_accept_until=(store_accept_until or STORE_ACCEPT_UNTIL))
+    wtd_cur, wtd_prev = _align_series(wtd_days, prev_w_days)
+    wtd_o, wtd_a = _period_summary(wtd_days)
+    pw_o, pw_a = _period_summary(prev_w_days)
+    wtd_do, wtd_do_pct = _delta(wtd_o, pw_o)
+    wtd_da, wtd_da_pct = _delta(wtd_a, pw_a)
+
+    # DTD
+    today_start = tzinfo.localize(datetime(now_local.year, now_local.month, now_local.day))
+    y_start = today_start - timedelta(days=1)
+    y_end = today_start - timedelta(milliseconds=1)
+    dtd_days, _, _, _, _, _ = await _collect_range(today_start, end_dt, tz, date_field, inc, exc,
+        assign_mode=assign_mode, store_accept_until=(store_accept_until or STORE_ACCEPT_UNTIL))
+    y_days, _, _, _, _, _ = await _collect_range(y_start, y_end, tz, date_field, inc, exc,
+        assign_mode=assign_mode, store_accept_until=(store_accept_until or STORE_ACCEPT_UNTIL))
+    dtd_cur, dtd_prev = _align_series(dtd_days, y_days)
+    dtd_o, dtd_a = _period_summary(dtd_days)
+    yd_o, yd_a = _period_summary(y_days)
+    dtd_do, dtd_do_pct = _delta(dtd_o, yd_o)
+    dtd_da, dtd_da_pct = _delta(dtd_a, yd_a)
+
     return {
         "range": {
             "start": start_dt.astimezone(tzinfo).date().isoformat(),
@@ -782,7 +869,45 @@ async def analytics(start: str = Query(...), end: str = Query(...), tz: str = Qu
         "prev_days": prev_days,
         "cities": cities_list,
         "state_breakdown": st_counts,
+        "summary": {
+            "period": {
+                "current": {"orders": cur_orders, "amount": cur_amount},
+                "previous": {"orders": prv_orders, "amount": prv_amount},
+                "delta": {
+                    "orders": d_orders, "orders_pct": d_orders_pct,
+                    "amount": d_amount, "amount_pct": d_amount_pct,
+                },
+            },
+            "mtd": {
+                "current": {"orders": mtd_o, "amount": mtd_a},
+                "previous": {"orders": pm_o, "amount": pm_a},
+                "delta": {
+                    "orders": mtd_do, "orders_pct": mtd_do_pct,
+                    "amount": mtd_da, "amount_pct": mtd_da_pct,
+                },
+                "series": {"current": mtd_cur, "previous": mtd_prev},
+            },
+            "wtd": {
+                "current": {"orders": wtd_o, "amount": wtd_a},
+                "previous": {"orders": pw_o, "amount": pw_a},
+                "delta": {
+                    "orders": wtd_do, "orders_pct": wtd_do_pct,
+                    "amount": wtd_da, "amount_pct": wtd_da_pct,
+                },
+                "series": {"current": wtd_cur, "previous": wtd_prev},
+            },
+            "dtd": {
+                "current": {"orders": dtd_o, "amount": dtd_a},
+                "previous": {"orders": yd_o, "amount": yd_a},
+                "delta": {
+                    "orders": dtd_do, "orders_pct": dtd_do_pct,
+                    "amount": dtd_da, "amount_pct": dtd_da_pct,
+                },
+                "series": {"current": dtd_cur, "previous": dtd_prev},
+            },
+        },
     }
+
 
 # ---------- Вспомогательная «ядровая» функция list_ids ----------
 def _select_targets(out: List[Dict[str, object]], enrich_day: str, enrich_scope: str, limit: int) -> List[Dict[str, object]]:
@@ -830,7 +955,8 @@ async def _list_ids_core(
 
     inc = parse_states_csv(states)
     exc = parse_states_csv(exclude_states) or set()
-    inc = _expand_with_archive(inc)
+    # расширяем включение: KASPI_DELIVERY/DELIVERED => ARCHIVE/ARCHIVED
+    inc = _normalize_states_inc(inc, expand_archive=True)
 
     days, cities_dict, tot, tot_amt, st_counts, out = await _collect_range(
         start_dt, end_dt, tz, date_field, inc, exc,
@@ -916,6 +1042,7 @@ async def _list_ids_core(
         "period_total_amount": period_total_amount,
         "currency": CURRENCY,
     }
+
 
 # ---------- /orders/ids ----------
 @app.get("/orders/ids")
@@ -1038,6 +1165,7 @@ async def job_cancel(job_id: str):
         raise HTTPException(status_code=404, detail="job not found")
     st["cancel"] = True
     return {"ok": True}
+
 
 # ---------- ROOT ----------
 @app.get("/", include_in_schema=False)
