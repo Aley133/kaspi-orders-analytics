@@ -23,20 +23,44 @@ from fastapi.responses import RedirectResponse, PlainTextResponse, JSONResponse
 from cachetools import TTLCache
 from pydantic import BaseModel
 
-# middleware, который кладёт tenant/token в request.state
-from app.deps.auth import attach_kaspi_token_middleware, get_current_kaspi_token
+# -------- optional app modules (robust imports) --------
+# Kaspi client
+try:
+    from app.kaspi_client import KaspiClient  # type: ignore
+except Exception:
+    try:
+        from .kaspi_client import KaspiClient  # type: ignore
+    except Exception:
+        from kaspi_client import KaspiClient  # type: ignore
 
-# доменные роутеры
+# Products router
+try:
+    from app.api.products import get_products_router
+except Exception:
+    try:
+        from .api.products import get_products_router
+    except Exception as _e:
+        raise
+
+# Profit & bridge & auth routers
 from app.api.bridge_v2 import router as bridge_router
 from app.api.profit_fifo import get_profit_fifo_router
 from app.api.authz import router as auth_router
-from app.api.products import get_products_router
 
-# модуль настроек подключаем явно (без try/except)
-from app.api import settings as settings_api
+# debug_sku router & helpers (optional)
+try:
+    from app.debug_sku import (
+        get_debug_router,
+        _index_included,
+        _extract_entry,
+        title_candidates as _title_candidates_from_attrs,
+        _rel_id,
+        sku_candidates as _sku_candidates_from_attrs,
+    )
+    _HAS_DEBUG = True
+except Exception:
+    _HAS_DEBUG = False
 
-# tenant-aware Kaspi client
-from app.deps.kaspi_client_tenant import KaspiClient as TenantKaspiClient
 # ---------- ENV ----------
 load_dotenv()
 
@@ -60,17 +84,16 @@ CACHE_TTL = int(os.getenv("CACHE_TTL", "300") or 300)
 SHOP_NAME = os.getenv("SHOP_NAME", "LeoXpress")
 PARTNER_ID = os.getenv("PARTNER_ID", "")
 
-# ВАЖНО: правильное имя переменной
+# cutoffs / business-day
 STORE_ACCEPT_UNTIL = os.getenv("STORE_ACCEPT_UNTIL", "17:00")
-
 BUSINESS_DAY_START = os.getenv("BUSINESS_DAY_START", "20:00")
 USE_BUSINESS_DAY = os.getenv("USE_BUSINESS_DAY", "true").lower() in ("1", "true", "yes", "on")
 
-# Конкурентность обогащения (используется ниже)
-ENRICH_CONCURRENCY = int(os.getenv("ENRICH_CONCURRENCY", "6") or 6)
+# enrichment concurrency
+ENRICH_CONCURRENCY = int(os.getenv("ENRICH_CONCURRENCY", "8") or 8)
 
-# Глобальные «эффективные» параметры для bucket_date (безопасные дефолты)
-_EFF_USE_BD: bool = False
+# runtime "effective" flags for bucket_date
+_EFF_USE_BD: bool = USE_BUSINESS_DAY
 _EFF_BDS: str = BUSINESS_DAY_START
 
 # ---------- FastAPI ----------
@@ -86,47 +109,41 @@ if origins:
         allow_credentials=False,
     )
 
-# Кладём tenant/token в request.state (per-tenant режим)
-app.middleware("http")(attach_kaspi_token_middleware)
+# Kaspi client (env-token version)
+client = KaspiClient(token=KASPI_TOKEN, base_url=KASPI_BASE_URL) if KASPI_TOKEN else None
 
-# Tenant-aware клиент Kaspi
-client = TenantKaspiClient(base_url=KASPI_BASE_URL)
-
-# Кэш ответов
+# Cache
 orders_cache = TTLCache(maxsize=512, ttl=CACHE_TTL)
 
-# /ui статика (ищем директорию гибко)
-_ui_candidates = ("app/static", "app/ui", "static", "ui")
+# /ui static — safe mount (won't crash if folder missing)
+_ui_candidates = ("app/ui", "app/static", "static", "ui")
 _ui_dir = next((p for p in _ui_candidates if Path(p).is_dir()), None)
 if _ui_dir:
     app.mount("/ui", StaticFiles(directory=_ui_dir, html=True), name="ui")
 
-# ---------- РОУТЕРЫ ----------
+# Routers
 app.include_router(get_products_router(client), prefix="/products")
 app.include_router(get_profit_fifo_router(), prefix="/profit")
 app.include_router(bridge_router, prefix="/profit")
 app.include_router(auth_router)
-app.include_router(settings_api.router, prefix="/settings", tags=["settings"])
+if _HAS_DEBUG:
+    app.include_router(get_debug_router())
 
 # ---------- helpers ----------
 def _bd_delta(hhmm: str) -> timedelta:
-    """Преобразует 'HH:MM' в timedelta с начала суток (для бизнес-дня)."""
     try:
         h, m = hhmm.split(":")
         return timedelta(hours=int(h), minutes=int(m))
     except Exception:
-        return timedelta(0)
+        raise HTTPException(status_code=400, detail=f"Bad HH:MM time: {hhmm}")
 
 def _days_between(a: datetime, b: datetime) -> int:
-    """Количество календарных дней в диапазоне [a..b]."""
-    return (b.date() - a.date()).days + 1
+    return max(1, (b.date() - a.date()).days + 1)
 
 def norm_state(s: str) -> str:
-    """Нормализация названия статуса."""
     return (s or "").strip().upper()
 
 def parse_states_csv(s: Optional[str]) -> Optional[set[str]]:
-    """Парсинг CSV/списка статусов с разделителями пробел/запятая/точка с запятой."""
     if not s:
         return None
     return {norm_state(x) for x in re.split(r"[\s,;]+", s) if x.strip()}
@@ -157,7 +174,6 @@ def apply_hhmm(dt_local: datetime, hhmm: str) -> datetime:
     return dt_local.replace(hour=hh, minute=mm, second=0, microsecond=0)
 
 def iter_chunks(start_dt: datetime, end_dt: datetime, step_days: int) -> Iterable[Tuple[datetime, datetime]]:
-    """Итерация по диапазону дат кусками step_days (включая конечные миллисекунды)."""
     cur = start_dt
     while cur <= end_dt:
         nxt = min(cur + timedelta(days=step_days) - timedelta(milliseconds=1), end_dt)
@@ -254,12 +270,10 @@ BASE_TIMEOUT = httpx.Timeout(connect=10.0, read=80.0, write=20.0, pool=60.0)
 HTTPX_LIMITS = httpx.Limits(max_connections=20, max_keepalive_connections=10)
 
 def _kaspi_headers() -> Dict[str, str]:
-    tok = get_current_kaspi_token()
-    if not tok:
-        # отсутствие персонального токена для текущего аккаунта
-        raise HTTPException(status_code=401, detail="Kaspi token is not set for this tenant")
+    if not KASPI_TOKEN:
+        raise HTTPException(status_code=500, detail="KASPI_TOKEN is not set")
     return {
-        "X-Auth-Token": tok,
+        "X-Auth-Token": KASPI_TOKEN,
         "Accept": "application/vnd.api+json",
         "Content-Type": "application/vnd.api+json",
         "User-Agent": "Mozilla/5.0",
@@ -328,56 +342,6 @@ def _smart_operational_day(attrs: dict, state: str, tzinfo: pytz.BaseTzInfo,
 
     return datetime.now(tzinfo).date().isoformat(), "fallback_now"
 
-# ---------- Хелперы для позиций ----------
-def _index_included(included: List[dict]) -> Dict[Tuple[str, str], dict]:
-    idx: Dict[Tuple[str, str], dict] = {}
-    for it in included or []:
-        t = str(it.get("type") or "")
-        i = str(it.get("id") or "")
-        if t and i:
-            idx[(t, i)] = it
-    return idx
-
-def _rel_id(entry: dict, rel_key: str) -> Tuple[Optional[str], Optional[str]]:
-    rel = (entry.get("relationships") or {}).get(rel_key) or {}
-    data = rel.get("data") or {}
-    if isinstance(data, dict):
-        return data.get("type"), data.get("id")
-    return None, None
-
-def _extract_entry(entry: dict, idx: Dict[Tuple[str, str], dict]) -> dict:
-    attrs = entry.get("attributes", {}) or {}
-    qty = int(attrs.get("quantity") or attrs.get("qty") or 1)
-    unit_price = attrs.get("basePrice") or attrs.get("unitPrice") or attrs.get("price") or 0
-    try:
-        unit_price = float(unit_price)
-    except Exception:
-        unit_price = 0.0
-    offer = attrs.get("offer") or {}
-    sku = ""
-    if isinstance(offer, dict):
-        sku = str(offer.get("code") or "")
-    return {"qty": qty, "unit_price": unit_price, "sku": sku}
-
-def _title_candidates_from_attrs(attrs: dict) -> Dict[str, str]:
-    out: Dict[str, str] = {}
-    for k in ("offerName", "title", "name", "productName", "shortName"):
-        v = attrs.get(k)
-        if isinstance(v, str) and v.strip():
-            out[k] = v.strip()
-    return out
-
-def _sku_candidates_from_attrs(attrs: dict) -> Dict[str, str]:
-    out: Dict[str, str] = {}
-    for k in ("sku", "code", "productCode"):
-        v = attrs.get(k)
-        if isinstance(v, str) and v.strip():
-            out[k] = v.strip()
-    offer = attrs.get("offer") or {}
-    if isinstance(offer, dict) and offer.get("code"):
-        out["offer.code"] = str(offer["code"])
-    return out
-
 # ---------- Вытягивание позиций (ВСЕ SKU) ----------
 async def _all_items_details(order_id: str, return_candidates: bool = True, timeout_scale: float = 1.0) -> List[Dict[str, object]]:
     cache_key = f"entries:{order_id}"
@@ -395,50 +359,59 @@ async def _all_items_details(order_id: str, return_candidates: bool = True, time
         )
         data = j.get("data", []) or []
         included = j.get("included", []) or []
-        idx = _index_included(included)
+        idx = _index_included(included) if _HAS_DEBUG else {}
 
         for entry in data:
             attrs = entry.get("attributes", {}) or {}
-            ex = _extract_entry(entry, idx)
+            ex = _extract_entry(entry, idx) if _HAS_DEBUG else {
+                # минимальный фолбэк если нет debug_sku
+                "qty": int((attrs.get("quantity") or attrs.get("qty") or 1)),
+                "unit_price": float((attrs.get("basePrice") or attrs.get("unitPrice") or attrs.get("price") or 0) or 0),
+                "sku": str((attrs.get("offer") or {}).get("code") or ""),
+            }
             if not ex:
                 continue
 
-            titles = _title_candidates_from_attrs(attrs)
-            for rel_key in ("product", "merchantProduct", "masterProduct"):
-                t, rel_id = _rel_id(entry, rel_key)
-                if t and rel_id:
-                    ref = (idx.get((str(t), str(rel_id))) or {})
-                    ref_attrs = ref.get("attributes", {}) or {}
-                    for k in ("title", "name", "productName", "shortName"):
-                        v = ref_attrs.get(k)
-                        if isinstance(v, str) and v.strip():
-                            titles[f"{rel_key}.{k}"] = v.strip()
+            titles = _title_candidates_from_attrs(attrs) if _HAS_DEBUG else {}
+            if _HAS_DEBUG:
+                for rel_key in ("product", "merchantProduct", "masterProduct"):
+                    t, rel_id = _rel_id(entry, rel_key)
+                    if t and rel_id:
+                        ref = (idx.get((str(t), str(rel_id))) or {})
+                        ref_attrs = ref.get("attributes", {}) or {}
+                        for k in ("title", "name", "productName", "shortName"):
+                            v = ref_attrs.get(k)
+                            if isinstance(v, str) and v.strip():
+                                titles[f"{rel_key}.{k}"] = v.strip()
 
-            sku_cands = _sku_candidates_from_attrs(attrs)
-            offer = attrs.get("offer") or {}
-            if isinstance(offer, dict) and offer.get("code"):
-                sku_cands["offer.code"] = str(offer["code"])
-            for rel_key in ("product", "merchantProduct", "masterProduct"):
-                t, rel_id = _rel_id(entry, rel_key)
-                if t and rel_id:
-                    ref = (idx.get((str(t), str(rel_id))) or {})
-                    ref_attrs = ref.get("attributes", {}) or {}
-                    if "code" in ref_attrs and ref_attrs["code"]:
-                        sku_cands[f"{rel_key}.code"] = str(ref_attrs["code"])
+            sku_cands = _sku_candidates_from_attrs(attrs) if _HAS_DEBUG else {}
+            if _HAS_DEBUG:
+                offer = attrs.get("offer") or {}
+                if isinstance(offer, dict) and offer.get("code"):
+                    sku_cands["offer.code"] = str(offer["code"])
+                for rel_key in ("product", "merchantProduct", "masterProduct"):
+                    t, rel_id = _rel_id(entry, rel_key)
+                    if t and rel_id:
+                        ref = (idx.get((str(t), str(rel_id))) or {})
+                        ref_attrs = ref.get("attributes", {}) or {}
+                        if "code" in ref_attrs and ref_attrs["code"]:
+                            sku_cands[f"{rel_key}.code"] = str(ref_attrs["code"])
 
             best_title = None
-            for key in ("offer.name", "product.title", "merchantProduct.title", "title", "name", "productName"):
-                v = titles.get(key)
-                if isinstance(v, str) and v.strip():
-                    best_title = v.strip()
-                    break
+            if titles:
+                for key in ("offer.name", "product.title", "merchantProduct.title", "title", "name", "productName"):
+                    v = titles.get(key)
+                    if isinstance(v, str) and v.strip():
+                        best_title = v.strip()
+                        break
 
             best_sku = None
-            for k in ("offer.code", "merchantProduct.code", "product.code", "code", "sku"):
-                vv = sku_cands.get(k)
-                if isinstance(vv, str) and vv.strip():
-                    best_sku = vv.strip()
-                    break
+            if sku_cands:
+                for k in ("offer.code", "merchantProduct.code", "product.code", "code", "sku"):
+                    vv = sku_cands.get(k)
+                    if isinstance(vv, str) and vv.strip():
+                        best_sku = vv.strip()
+                        break
             if not best_sku:
                 best_sku = str(ex.get("sku", ""))
 
@@ -449,7 +422,7 @@ async def _all_items_details(order_id: str, return_candidates: bool = True, time
                 "title": best_title,
                 "raw_entry_id": entry.get("id"),
             }
-            if return_candidates:
+            if return_candidates and _HAS_DEBUG:
                 sku_cands["extracted"] = str(ex.get("sku", ""))
                 row["sku_candidates"] = sku_cands
                 row["title_candidates"] = titles
@@ -465,7 +438,7 @@ async def _first_item_details(order_id: str, return_candidates: bool = False, ti
         return None
     first = items[0]
     out = {"sku": first.get("sku"), "title": first.get("title")}
-    if return_candidates:
+    if return_candidates and _HAS_DEBUG:
         out["sku_candidates"] = first.get("sku_candidates", {})
         out["title_candidates"] = first.get("title_candidates", {})
     return out
@@ -492,7 +465,7 @@ class AnalyticsResponse(BaseModel):
     cities: List[CityCount] = []
     state_breakdown: Dict[str, int] = {}
 
-# ---------- Вспомогательное расширение состояний ----------
+# ---------- States helpers ----------
 _ARCHIVE_ALIASES = {"ARCHIVE", "ARCHIVED"}
 
 def _normalize_states_inc(states_inc: set[str] | None, expand_archive: bool = False) -> set[str]:
@@ -503,15 +476,23 @@ def _normalize_states_inc(states_inc: set[str] | None, expand_archive: bool = Fa
         out |= {"ARCHIVE", "ARCHIVED"}
     return out
 
-# ---------- Прогресс-джобы ----------
-Jobs: Dict[str, Dict[str, object]] = {}  # job_id -> state
+def _expand_with_archive(states_inc: Optional[set[str]]) -> set[str]:
+    if not states_inc:
+        return set()
+    out = set(states_inc)
+    if ("KASPI_DELIVERY" in out) or ("DELIVERED" in out):
+        out |= _ARCHIVE_ALIASES
+    return out
+
+# ---------- Jobs ----------
+Jobs: Dict[str, Dict[str, object]] = {}
 
 def _new_job() -> str:
     job_id = uuid.uuid4().hex
     Jobs[job_id] = {
-        "status": "queued",         # queued | running | done | error | canceled
-        "phase": "scan",            # scan | enrich
-        "progress": 0.0,            # 0..1
+        "status": "queued",
+        "phase": "scan",
+        "progress": 0.0,
         "message": "",
         "created": datetime.utcnow().isoformat() + "Z",
         "updated": datetime.utcnow().isoformat() + "Z",
@@ -554,7 +535,7 @@ def auth_meta():
         raise HTTPException(status_code=500, detail="Missing SUPABASE_URL or SUPABASE_ANON_KEY")
     return {"SUPABASE_URL": url, "SUPABASE_ANON_KEY": key}
 
-# ---------- Endpoints: META ----------
+# ---------- META ----------
 @app.get("/meta")
 async def meta():
     return {
@@ -573,7 +554,7 @@ async def meta():
         "store_accept_until": STORE_ACCEPT_UNTIL,
     }
 
-# ---------- Внутреннее ядро сбора ----------
+# ---------- Internals ----------
 def _calc_timeout_scale(days_span: int, targets: int) -> float:
     scale = 1.0
     if days_span >= 10:
@@ -604,7 +585,8 @@ async def _collect_range(
     states_inc: Optional[set], states_ex: set,
     assign_mode: str, store_accept_until: str,
     progress: Optional[Callable[[str, int, int, str], None]] = None
-) -> tuple[list[DayPoint], Dict[str, int], int, float, Dict[str, int], List[Dict[str, object]]]:
+) -> Tuple[List[DayPoint], Dict[str, int], int, float, Dict[str, int], List[Dict[str, object]]]:
+
     tzinfo = tzinfo_of(tz)
 
     seen_ids: set[str] = set()
@@ -617,10 +599,12 @@ async def _collect_range(
     total_amount = 0.0
 
     if client is None:
-        raise HTTPException(status_code=500, detail="Kaspi client is not configured")
+        raise HTTPException(status_code=500, detail="KASPI_TOKEN is not set")
 
-    states_inc = _normalize_states_inc(states_inc, expand_archive=False)
+    # Аналитика: расширяем доставленные до архивных, чтобы цифры не «падали»
+    states_inc = _normalize_states_inc(states_inc, expand_archive=True)
 
+    # Диапазон по дням «операционной» даты
     range_start_day = start_dt.astimezone(tzinfo).date().isoformat()
     range_end_day   = end_dt.astimezone(tzinfo).date().isoformat()
 
@@ -648,12 +632,14 @@ async def _collect_range(
                         if st in states_ex:
                             continue
 
-                        field_for_ms = date_field if (attrs.get(date_field) not in (None, "", 0)) else try_field
+                        # Если выбранное поле пустое — фолбэк к creationDate
+                        field_for_ms = date_field if (attrs.get(date_field) not in (None, "", 0)) else "creationDate"
                         ms = extract_ms(attrs, field_for_ms)
                         if ms is None:
                             continue
                         dtt = datetime.fromtimestamp(ms / 1000.0, tz=pytz.UTC).astimezone(tzinfo)
 
+                        # Определяем операционный день
                         if assign_mode == "smart":
                             op_day, reason = _smart_operational_day(attrs, st, tzinfo, store_accept_until, _EFF_BDS)
                         elif assign_mode == "business":
@@ -661,6 +647,7 @@ async def _collect_range(
                         else:
                             op_day, reason = dtt.date().isoformat(), "raw"
 
+                        # Отсекаем по диапазону операционных дней
                         if not (range_start_day <= op_day <= range_end_day):
                             continue
 
@@ -690,6 +677,7 @@ async def _collect_range(
                         seen_ids.add(oid)
                     break
                 except HTTPStatusError as ee:
+                    # При 400/422 переключаемся на creationDate
                     if ee.response.status_code in (400, 422) and try_field != "creationDate":
                         try_field = "creationDate"
                         continue
@@ -784,25 +772,22 @@ async def analytics(start: str = Query(...), end: str = Query(...), tz: str = Qu
         "state_breakdown": st_counts,
     }
 
-# ---------- Вспомогательная «ядровая» функция list_ids ----------
+# ---------- list_ids core ----------
 def _select_targets(out: List[Dict[str, object]], enrich_day: str, enrich_scope: str, limit: int) -> List[Dict[str, object]]:
     if enrich_scope == "all":
-        return out if not limit or limit <= 0 else out[:limit]
+        return out
     if enrich_scope == "last_day":
-        sel = [it for it in out if str(it["op_day"]) == enrich_day]
-        return sel if not limit or limit <= 0 else sel[:limit]
+        return [it for it in out if str(it["op_day"]) == enrich_day]
     if enrich_scope == "last_week":
         y, m, d = map(int, enrich_day.split("-"))
         last_dt = date(y, m, d)
         scope = {(last_dt - timedelta(days=i)).isoformat() for i in range(7)}
-        sel = [it for it in out if str(it["op_day"]) in scope]
-        return sel if not limit or limit <= 0 else sel[:limit]
+        return [it for it in out if str(it["op_day"]) in scope]
     if enrich_scope == "last_month":
         y, m, d = map(int, enrich_day.split("-"))
         last_dt = date(y, m, d)
         scope = {(last_dt - timedelta(days=i)).isoformat() for i in range(30)}
-        sel = [it for it in out if str(it["op_day"]) in scope]
-        return sel if not limit or limit <= 0 else sel[:limit]
+        return [it for it in out if str(it["op_day"]) in scope]
     return []
 
 async def _list_ids_core(
@@ -812,6 +797,7 @@ async def _list_ids_core(
     limit: int, order: str, grouped: int,
     with_items: int, enrich_scope: str, items_mode: str, return_candidates: int,
     assign_mode: str, store_accept_until: Optional[str],
+    start_time: Optional[str] = None, end_time: Optional[str] = None,
     progress_cb: Optional[Callable[[str, int, int, str], None]] = None,
 ) -> Dict[str, object]:
 
@@ -827,6 +813,15 @@ async def _list_ids_core(
         delta = _bd_delta(eff_bds)
         start_dt = tzinfo.localize(datetime.combine((start_dt.date() - timedelta(days=1)), time(0, 0, 0))) + delta
         end_dt = tzinfo.localize(datetime.combine(end_dt.date(), time(0, 0, 0))) + delta - timedelta(milliseconds=1)
+    else:
+        if start_time:
+            start_dt = apply_hhmm(start_dt, start_time)
+        if end_time:
+            e0 = parse_date_local(end, tz)
+            end_dt = apply_hhmm(e0, end_time).replace(tzinfo=tzinfo)
+
+    if end_dt < start_dt:
+        raise HTTPException(status_code=400, detail="end < start")
 
     inc = parse_states_csv(states)
     exc = parse_states_csv(exclude_states) or set()
@@ -891,7 +886,7 @@ async def _list_ids_core(
                     if extra:
                         it["sku"] = extra.get("sku")
                         it["title"] = extra.get("title")
-                        if return_candidates:
+                        if return_candidates and _HAS_DEBUG:
                             it["first_item"] = {
                                 "title_candidates": extra.get("title_candidates") or {},
                                 "sku_candidates": extra.get("sku_candidates") or {},
@@ -937,11 +932,14 @@ async def list_ids(
     return_candidates: int = Query(0, description="1=вернуть title_candidates/sku_candidates"),
     assign_mode: str = Query("smart", pattern="^(smart|business|raw)$"),
     store_accept_until: Optional[str] = Query(None),
+    start_time: Optional[str] = Query(None),
+    end_time: Optional[str] = Query(None),
 ):
     return await _list_ids_core(
         start, end, tz, date_field, states, exclude_states,
         use_bd, business_day_start, limit, order, grouped, with_items,
-        enrich_scope, items_mode, return_candidates, assign_mode, store_accept_until, None
+        enrich_scope, items_mode, return_candidates, assign_mode, store_accept_until,
+        start_time, end_time, None
     )
 
 # ---------- CSV ----------
@@ -958,13 +956,16 @@ async def list_ids_csv(
     order: str = Query("asc", pattern="^(asc|desc)$"),
     assign_mode: str = Query("smart", pattern="^(smart|business|raw)$"),
     store_accept_until: Optional[str] = Query(None),
+    start_time: Optional[str] = Query(None),
+    end_time: Optional[str] = Query(None),
 ):
     data = await _list_ids_core(
         start, end, tz, date_field, states, exclude_states,
         use_bd, business_day_start,
         limit=100000, order=order, grouped=0,
         with_items=0, enrich_scope="none", items_mode="all", return_candidates=0,
-        assign_mode=assign_mode, store_accept_until=store_accept_until, progress_cb=None
+        assign_mode=assign_mode, store_accept_until=store_accept_until,
+        start_time=start_time, end_time=end_time, progress_cb=None
     )
     csv = "\n".join([str(it["number"]) for it in data["items"]])
     return csv
@@ -989,6 +990,8 @@ async def list_ids_async(
     return_candidates: int = Query(0),
     assign_mode: str = Query("smart"),
     store_accept_until: Optional[str] = Query(None),
+    start_time: Optional[str] = Query(None),
+    end_time: Optional[str] = Query(None),
 ):
     job_id = _new_job()
 
@@ -1000,6 +1003,7 @@ async def list_ids_async(
                 use_bd, business_day_start, limit, order, grouped,
                 with_items, enrich_scope, items_mode, return_candidates,
                 assign_mode, store_accept_until,
+                start_time, end_time,
                 progress_cb=_job_progress_cb(job_id)
             )
             if Jobs.get(job_id, {}).get("cancel"):
@@ -1042,4 +1046,7 @@ async def job_cancel(job_id: str):
 # ---------- ROOT ----------
 @app.get("/", include_in_schema=False)
 async def root():
-    return RedirectResponse(url="/ui/")
+    # если UI смонтирован — уходим в него, иначе отдаём маленький JSON
+    if _ui_dir:
+        return RedirectResponse(url="/ui/")
+    return {"ok": True, "ui": False, "msg": "UI folder not found; API is up."}
