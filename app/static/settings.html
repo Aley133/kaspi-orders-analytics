@@ -6,216 +6,312 @@
   <title>Настройки — Kaspi Analytics</title>
   <link rel="stylesheet" href="style.css" />
   <style>
-    body { padding: 24px; max-width: 920px; margin: auto; }
-    form { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-    form > div { display: flex; flex-direction: column; gap: 6px; }
-    label { font-size: 12px; opacity: .8; }
-    .row { display: flex; gap: 12px; align-items: center; margin-top: 16px; }
-    .note { margin-top: 8px; font-size: 13px; opacity: .9; }
-    .muted { opacity: .7; }
-    button { height: 34px; padding: 0 14px; border: 1px solid var(--line); background: var(--card); color: var(--fg); border-radius: 8px; cursor: pointer; }
-    button[disabled] { opacity: .6; cursor: not-allowed; }
-    .pwd { display: flex; gap: 8px; align-items: center; }
+    :root{
+      --bg:#0b1020; --fg:#e7edf7; --muted:#9fb0c3; --card:#11162a; --line:#27314a;
+      --pri:#4aa3ff; --ok:#22c55e; --warn:#f59e0b; --err:#ef4444;
+      --chip:#1b2338; --chip-fg:#c9d7ea;
+    }
+    html,body{background:var(--bg); color:var(--fg)}
+    body{padding:28px; max-width:1024px; margin:auto; font:14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, Inter, sans-serif}
+    h1{font-size:24px; margin:0 0 14px}
+    .muted{color:var(--muted)}
+
+    /* layout */
+    .toolbar{display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:18px}
+    .toolbar .who{display:flex; gap:10px; align-items:center}
+    .toolbar .badge{background:var(--chip); color:var(--chip-fg); padding:6px 10px; border-radius:999px; border:1px solid var(--line); font-size:12px}
+
+    .grid{display:grid; grid-template-columns: 1.2fr 1fr; gap:16px}
+
+    .card{background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px}
+    .card h2{font-size:16px; margin:0 0 10px}
+    .card .hint{font-size:12px; color:var(--muted); margin:-4px 0 12px}
+
+    .field{display:flex; flex-direction:column; gap:6px; margin-bottom:12px}
+    .field label{font-size:12px; color:var(--muted)}
+    .row{display:flex; gap:10px; align-items:center; flex-wrap:wrap}
+    .grow{flex:1}
+
+    input, select{height:36px; padding:0 12px; color:var(--fg); background:#0f1527; border:1px solid var(--line); border-radius:10px; outline:none}
+    input[type="checkbox"]{height:auto}
+    button{height:36px; padding:0 14px; border-radius:10px; border:1px solid var(--line); color:var(--fg); background:#121a31; cursor:pointer}
+    button.primary{background:var(--pri); color:#031225; border-color:#2d7ad1}
+    button.ghost{background:transparent}
+    button[disabled]{opacity:.6; cursor:not-allowed}
+
+    .pwd{display:flex; gap:8px; align-items:center}
+    .pill{display:inline-flex; align-items:center; gap:6px; padding:4px 8px; border:1px solid var(--line); border-radius:999px; background:#0f1527; font-size:12px}
+    .status{display:flex; align-items:center; gap:8px; font-size:13px}
+    .dot{width:8px; height:8px; border-radius:50%; background:#64748b}
+    .dot.ok{background:var(--ok)}
+    .dot.warn{background:var(--warn)}
+    .dot.err{background:var(--err)}
+
+    .section-title{font-weight:600; margin:2px 0 8px}
+    .split{display:grid; grid-template-columns: 1fr 1fr; gap:12px}
+
+    .footer{display:flex; gap:10px; align-items:center; margin-top:10px}
+    .link{color:var(--pri); text-decoration:none}
   </style>
 </head>
-<body data-theme="light">
-  <h1>Настройки</h1>
-  <p class="muted">Параметры используются аналитикой, бизнес-днём и FIFO-мостом.</p>
-
-  <form id="form">
+<body>
+  <div class="toolbar">
     <div>
-      <label>Shop name</label>
-      <input name="shop_name" placeholder="LeoXpress" />
+      <h1>Настройки</h1>
+      <div class="muted">Эти параметры используются аналитикой, бизнес-днём и FIFO‑мостом.</div>
     </div>
-
-    <div>
-      <label>Partner ID</label>
-      <input name="partner_id" placeholder="" />
+    <div class="who">
+      <span id="who" class="badge">…</span>
+      <button id="btnSignOut" class="ghost" title="Выйти">Выйти</button>
     </div>
+  </div>
 
-    <div style="grid-column: 1/3">
-      <label>KASPI_TOKEN</label>
-      <div class="pwd">
-        <input name="kaspi_token" placeholder="kaspi_xxx" type="password" style="width: 100%" />
-        <button id="togglePwd" type="button" title="Показать/скрыть токен">🙈</button>
+  <div class="grid">
+    <!-- Профиль пользователя: e‑mail / телефон -->
+    <section class="card">
+      <h2>Профиль</h2>
+      <div class="hint">Можно добавить второй способ входа: если зашли по телефону — добавьте e‑mail, и наоборот.</div>
+
+      <div class="field">
+        <div class="row">
+          <div class="pill"><strong>Текущий e‑mail:</strong> <span id="curEmail">—</span></div>
+          <div class="pill"><strong>Телефон:</strong> <span id="curPhone">—</span></div>
+        </div>
+      </div>
+
+      <div class="section-title">Привязать или сменить телефон</div>
+      <div class="row">
+        <input id="newPhone" class="grow" placeholder="+7XXXXXXXXXX" inputmode="tel" />
+        <button id="btnLinkPhone">Отправить код</button>
+        <input id="codePhone" placeholder="Код из SMS" inputmode="numeric" maxlength="6" style="width:140px" />
+        <button id="btnVerifyPhone" class="primary">Подтвердить</button>
+      </div>
+
+      <div class="section-title" style="margin-top:12px">Привязать или сменить e‑mail</div>
+      <div class="row">
+        <input id="newEmail" class="grow" placeholder="you@example.com" type="email" />
+        <button id="btnLinkEmail">Отправить код</button>
+        <input id="codeEmail" placeholder="Код из письма" style="width:160px" />
+        <button id="btnVerifyEmail" class="primary">Подтвердить</button>
+      </div>
+
+      <div id="acctMsg" class="status" style="margin-top:10px"><span class="dot"></span><span>Готово к изменениям.</span></div>
+    </section>
+
+    <!-- Системное / проверка токена -->
+    <section class="card">
+      <h2>Проверка доступа</h2>
+      <div class="hint">После сохранения настроек можно проверить авторизацию и перейти в панель.</div>
+      <div class="row">
+        <button id="btnCheck" class="ghost">Проверить токен</button>
+        <span id="checkMsg" class="status"><span class="dot"></span><span>—</span></span>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <a class="link" href="/ui/">⟵ На главную панель</a>
+      </div>
+    </section>
+  </div>
+
+  <!-- Основные настройки магазина / Kaspi / Бизнес‑день -->
+  <section class="card" style="margin-top:16px">
+    <h2>Параметры магазина и расчётов</h2>
+
+    <div class="split">
+      <div>
+        <div class="field">
+          <label>Shop name</label>
+          <input name="shop_name" placeholder="LeoXpress" />
+        </div>
+        <div class="field">
+          <label>Partner ID</label>
+          <input name="partner_id" placeholder="" />
+        </div>
+        <div class="field">
+          <label>KASPI_TOKEN</label>
+          <div class="row pwd">
+            <input name="kaspi_token" placeholder="kaspi_xxx" type="password" class="grow" />
+            <button id="togglePwd" type="button" title="Показать/скрыть токен">🙈</button>
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <div class="field">
+          <label>Amount fields (CSV)</label>
+          <input name="amount_fields" value="totalPrice" />
+        </div>
+        <div class="field">
+          <label>Amount divisor</label>
+          <input name="amount_divisor" type="number" step="0.0001" value="1" />
+        </div>
+        <div class="field">
+          <label>Date field default</label>
+          <input name="date_field_default" value="creationDate" />
+        </div>
       </div>
     </div>
 
-    <div>
-      <label>Amount fields (CSV)</label>
-      <input name="amount_fields" value="totalPrice" />
+    <div class="split">
+      <div>
+        <div class="field">
+          <label>Business day start (HH:MM)</label>
+          <input name="business_day_start" value="20:00" />
+        </div>
+        <div class="field row" style="gap:10px">
+          <label style="margin-right:auto">Use business day</label>
+          <input type="checkbox" name="use_business_day" checked />
+        </div>
+      </div>
+      <div>
+        <div class="field">
+          <label>Store accept until</label>
+          <input name="store_accept_until" value="17:00" />
+        </div>
+        <div class="field">
+          <label>Allowed origins (CSV)</label>
+          <input name="allowed_origins" value="" />
+        </div>
+      </div>
     </div>
 
-    <div>
-      <label>Amount divisor</label>
-      <input name="amount_divisor" type="number" step="0.0001" value="1" />
-    </div>
-
-    <div>
-      <label>Date field default</label>
-      <input name="date_field_default" value="creationDate" />
-    </div>
-
-    <div>
-      <label>Business day start (HH:MM)</label>
-      <input name="business_day_start" value="20:00" />
-    </div>
-
-    <div>
-      <label>Use business day</label>
-      <input type="checkbox" name="use_business_day" checked />
-    </div>
-
-    <div>
-      <label>Store accept until</label>
-      <input name="store_accept_until" value="17:00" />
-    </div>
-
-    <div>
+    <div class="field" style="margin-top:8px">
       <label>City keys (CSV)</label>
       <input name="city_keys" value="city,deliveryAddress.city" />
     </div>
 
-    <div>
-      <label>Allowed origins (CSV)</label>
-      <input name="allowed_origins" value="" />
+    <div class="footer">
+      <button id="save" class="primary">Сохранить</button>
+      <span id="msg" class="muted">—</span>
     </div>
-  </form>
+  </section>
 
-  <div class="row">
-    <button id="save" type="button">Сохранить</button>
-    <span id="msg" class="note muted"></span>
-  </div>
-
-  <!-- Модульный скрипт -->
   <script type="module">
     import { Auth } from './lib/auth.js';
 
-    // --- Надёжный authedFetch: доступен сразу, ждёт Auth внутри ---
-    window.authedFetch = async (input, init = {}) => {
-      await Auth.ready;
-      try {
-        const headers = { ...(init.headers || {}), ...(await Auth.authHeader()) };
-        const res = await fetch(input, { ...init, headers });
-        if (res.status === 401) {
-          await Auth.signOutAndGoLogin();
-          throw new Error('Unauthorized');
-        }
-        return res;
-      } catch (e) {
-        if (String(e?.message || e).includes('Unauthorized')) {
-          await Auth.signOutAndGoLogin();
-        }
-        throw e;
-      }
-    };
-    // Глобальные алиасы
-    window.AF = (...args) => window.authedFetch(...args);
-    window.af = window.authedFetch;
-    globalThis.authedFetch = window.authedFetch;
-    globalThis.AF = window.AF;
-
-    // Требуем авторизацию
-    await Auth.ready;
-    await Auth.requireAuth();
-    document.getElementById('btnSignOut')?.addEventListener('click', Auth.signOutAndGoLogin);
-
-    // --- DOM helpers ---
+    // ------------- Helpers -------------
     const $ = (s) => document.querySelector(s);
-    const form    = $('#form');
-    const msg     = $('#msg');
-    const btnSave = $('#save');
-    const btnEye  = $('#togglePwd');
-    const kaspiIn = form.querySelector('input[name="kaspi_token"]');
+    const msg = (node, text, cls) => { const dot=node.querySelector('.dot'); const span=node.querySelector('span:nth-child(2)'); dot.className='dot '+(cls||''); span.textContent=text; };
 
-    // Показать/скрыть токен
-    btnEye?.addEventListener('click', () => {
-      const t = kaspiIn.type === 'password' ? 'text' : 'password';
-      kaspiIn.type = t;
-      btnEye.textContent = t === 'password' ? '🙈' : '👁️';
-    });
+    // provide authedFetch globally
+    window.authedFetch = async (input, init={}) => {
+      await Auth.ready; const headers={...(init.headers||{}), ...(await Auth.authHeader())};
+      const r = await fetch(input,{...init, headers}); if(r.status===401){ await Auth.signOutAndGoLogin(); throw new Error('Unauthorized'); } return r;
+    };
+    const AF = window.authedFetch;
 
-    // Загрузка сохранённых настроек
-    try {
-      const r = await AF('/settings/me');
-      if (r.ok) {
-        const data = await r.json();
-        for (const [k, v] of Object.entries(data)) {
-          const el = form.querySelector(`[name="${k}"]`);
-          if (!el) continue;
-          if (el.type === 'checkbox') el.checked = !!v;
-          else el.value = v ?? '';
-        }
-        msg.textContent = 'Настройки загружены';
-      } else if (r.status === 404) {
-        msg.textContent = 'Нет сохранённых настроек — заполните форму и нажмите «Сохранить».';
-      } else {
-        msg.textContent = 'Ошибка загрузки: ' + r.status;
-      }
-    } catch (e) {
-      msg.textContent = 'Сеть: ' + (e?.message || e);
+    // Require auth, show who
+    await Auth.ready; await Auth.requireAuth();
+    $('#btnSignOut')?.addEventListener('click', Auth.signOutAndGoLogin);
+
+    // Try to obtain supabase client from Auth or window
+    const sb = Auth.sb || Auth.client || window.supabase;
+
+    async function refreshWho(){
+      try{
+        const { data:{ user } } = await (sb?.auth?.getUser?.() ?? {data:{user:null}});
+        $('#curEmail').textContent = user?.email || '—';
+        $('#curPhone').textContent = user?.phone || '—';
+        const label = user?.email ? `Вошли как ${user.email}` : (user?.phone ? `Вошли как ${user.phone}` : 'Неизвестный пользователь');
+        $('#who').textContent = label;
+      }catch(e){ $('#who').textContent = 'Не удалось получить профиль'; }
     }
 
-    // Сериализация формы с приведением типов
-    function readForm() {
-      const out = {};
-      form.querySelectorAll('input').forEach((el) => {
-        if (!el.name) return;
-        if (el.type === 'checkbox') {
-          out[el.name] = !!el.checked;
-        } else if (el.type === 'number') {
-          const n = Number(el.value);
-          out[el.name] = Number.isFinite(n) ? n : null;
-        } else {
-          out[el.name] = (el.value ?? '').trim();
-        }
+    await refreshWho();
+
+    // Toggle kaspi token visibility
+    $('#togglePwd').addEventListener('click', () => {
+      const inp = document.querySelector('input[name="kaspi_token"]');
+      const t = inp.type==='password' ? 'text' : 'password';
+      inp.type=t; $('#togglePwd').textContent = t==='password' ? '🙈' : '👁️';
+    });
+
+    // Load settings
+    const form = document.querySelector('section.card + section.card + section.card input') ? document.querySelector('body') : document.body; // noop guard
+    const formRoot = document.querySelector('section.card + section.card + section.card'); // last card
+    const formEl = document.querySelector('section.card + section.card + section.card'); // for scope only
+
+    async function loadSettings(){
+      const r = await AF('/settings/me');
+      const msgNode = $('#msg');
+      if(r.ok){
+        const data = await r.json();
+        document.querySelectorAll('input[name]').forEach(el=>{
+          const k = el.name; if(!(k in data)) return; const v = data[k];
+          if(el.type==='checkbox') el.checked = !!v; else el.value = (v ?? '').toString();
+        });
+        msgNode.textContent='Настройки загружены';
+      } else if (r.status===404){
+        msgNode.textContent='Нет сохранённых настроек — заполните форму и нажмите «Сохранить».';
+      } else {
+        msgNode.textContent='Ошибка загрузки: '+r.status;
+      }
+    }
+    await loadSettings();
+
+    function collect(){
+      const out={};
+      document.querySelectorAll('input[name]').forEach(el=>{
+        if(el.type==='checkbox') out[el.name]=!!el.checked;
+        else if(el.type==='number'){ const n=Number(el.value); out[el.name]=Number.isFinite(n)?n:null; }
+        else out[el.name]=(el.value??'').trim();
       });
       return out;
     }
 
-    async function saveSettings() {
-      btnSave.disabled = true;
-      msg.textContent = 'Сохраняю...';
-
-      try {
-        const payload = readForm();
-        if (!payload.kaspi_token) {
-          msg.textContent = 'Укажите KASPI_TOKEN';
-          btnSave.disabled = false;
-          return;
-        }
-
-        const r = await AF('/settings/save', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        });
-
-        if (!r.ok) {
-          const t = await r.text().catch(() => String(r.status));
-          msg.textContent = 'Ошибка сохранения: ' + t;
-          btnSave.disabled = false;
-          return;
-        }
-
-        // Быстрая проверка токена
-        const chk = await AF('/settings/check');
-        if (chk.ok) {
-          msg.textContent = 'Сохранено. Перенаправляю...';
-          setTimeout(() => (location.href = '/ui/'), 600);
-        } else {
-          msg.textContent = 'Сохранено, но проверка токена не прошла: ' + chk.status;
-          btnSave.disabled = false;
-        }
-      } catch (e) {
-        msg.textContent = 'Ошибка: ' + (e?.message || e);
-        btnSave.disabled = false;
-      }
+    async function save(){
+      const payload = collect();
+      const m = $('#msg');
+      $('#save').disabled=true; m.textContent='Сохраняю…';
+      if(!payload.kaspi_token){ m.textContent='Укажите KASPI_TOKEN'; $('#save').disabled=false; return; }
+      const r = await AF('/settings/save', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+      if(!r.ok){ m.textContent = 'Ошибка сохранения: '+(await r.text().catch(()=>r.status)); $('#save').disabled=false; return; }
+      const chk = await AF('/settings/check');
+      if(chk.ok){ m.textContent='Сохранено. Перенаправляю…'; setTimeout(()=>location.href='/ui/', 600); }
+      else { m.textContent='Сохранено, но проверка токена не прошла: '+chk.status; $('#save').disabled=false; }
     }
 
-    // Сохранение по кнопке и по Enter в форме
-    btnSave.addEventListener('click', (e) => { e.preventDefault(); saveSettings(); });
-    form.addEventListener('submit', (e) => { e.preventDefault(); saveSettings(); });
+    $('#save').addEventListener('click', save);
+
+    // Check token quickly
+    $('#btnCheck').addEventListener('click', async()=>{
+      const n = $('#checkMsg'); msg(n,'Проверяю…','');
+      const r = await AF('/settings/check');
+      if(r.ok) msg(n,'Токен принят (200).','ok'); else msg(n,`Нет доступа (${r.status}).`,'err');
+    });
+
+    // ---------- Link / verify phone ----------
+    $('#btnLinkPhone').addEventListener('click', async()=>{
+      const phone = $('#newPhone').value.trim(); if(!phone.startsWith('+')) return msg($('#acctMsg'),'Формат номера E.164 (+7…)', 'warn');
+      try{
+        const { error } = await sb.auth.updateUser({ phone });
+        if(error) throw error; msg($('#acctMsg'),'Код SMS отправлен. Введите его ниже и нажмите «Подтвердить».','ok');
+      }catch(e){ msg($('#acctMsg'),'Ошибка отправки SMS: '+(e?.message||e),'err'); }
+    });
+
+    $('#btnVerifyPhone').addEventListener('click', async()=>{
+      const phone = $('#newPhone').value.trim(); const token = $('#codePhone').value.trim();
+      try{
+        const { error } = await sb.auth.verifyOtp({ phone, token, type:'phone_change' });
+        if(error) throw error; msg($('#acctMsg'),'Телефон подтверждён и привязан.','ok'); await refreshWho();
+      }catch(e){ msg($('#acctMsg'),'Не удалось подтвердить телефон: '+(e?.message||e),'err'); }
+    });
+
+    // ---------- Link / verify email ----------
+    $('#btnLinkEmail').addEventListener('click', async()=>{
+      const email = $('#newEmail').value.trim(); if(!email.includes('@')) return msg($('#acctMsg'),'Укажите корректный e‑mail','warn');
+      try{
+        const { error } = await sb.auth.updateUser({ email });
+        if(error) throw error; msg($('#acctMsg'),'Код отправлен на почту. Введите его и нажмите «Подтвердить e‑mail».','ok');
+      }catch(e){ msg($('#acctMsg'),'Ошибка отправки кода на e‑mail: '+(e?.message||e),'err'); }
+    });
+
+    $('#btnVerifyEmail').addEventListener('click', async()=>{
+      const email = $('#newEmail').value.trim(); const token = $('#codeEmail').value.trim();
+      try{
+        const { error } = await sb.auth.verifyOtp({ email, token, type:'email_change' });
+        if(error) throw error; msg($('#acctMsg'),'E‑mail подтверждён и привязан.','ok'); await refreshWho();
+      }catch(e){ msg($('#acctMsg'),'Не удалось подтвердить e‑mail: '+(e?.message||e),'err'); }
+    });
   </script>
 </body>
 </html>
