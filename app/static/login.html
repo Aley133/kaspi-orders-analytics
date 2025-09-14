@@ -6,147 +6,266 @@
   <title>Вход — Kaspi Analytics</title>
   <link rel="stylesheet" href="style.css"/>
   <style>
-    :root { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
-    body { display:flex; align-items:center; justify-content:center; height:100vh; background:#f7f7fb; margin:0; }
-    .card { max-width:460px; width:100%; padding:24px; border:1px solid #e5e7eb; border-radius:16px; background:#fff; }
-    .muted { color:#6b7280 }
-    .row { margin-top:10px }
-    .chip { padding:6px 10px; border-radius:999px; border:1px solid #e5e7eb; background:#fff; cursor:pointer; margin-right:6px }
-    .chip.active { background:#111; color:#fff; border-color:#111 }
-    input { width:100%; padding:10px; border:1px solid #e5e7eb; border-radius:10px; }
-    button.btn { margin-top:12px; padding:10px 14px; border-radius:10px; border:1px solid #111; background:#111; color:#fff; cursor:pointer }
-    button.btn[disabled] { opacity:.6; cursor:default }
-    .hidden { display:none }
+    /* ==== ТЕМА (светлая/тёмная), синхронизируется с localStorage('app.theme') ==== */
+    :root {
+      --bg: #f2f3f5;         /* фон страницы */
+      --card: #ffffff;       /* карточка */
+      --text: #2b2f36;       /* основной текст */
+      --muted: #6b7280;      /* вторичный текст */
+      --line: #e5e7eb;       /* границы */
+      --accent: #167ac6;     /* кнопка, как у Kaspi */
+      --accent-ink: #ffffff; /* цвет текста на кнопке */
+      --danger: #ef4444;     /* ошибки */
+      --kaspi: #ef3d2f;      /* красный акцент вкладок */
+      --input-bg: #ffffff;   /* фон инпута */
+    }
+    [data-theme="dark"] {
+      --bg: #0c0f14;
+      --card: #121722;
+      --text: #e6ebf2;
+      --muted: #94a3b8;
+      --line: #1f2633;
+      --accent: #3fa0ff;
+      --accent-ink: #061224;
+      --danger: #f87171;
+      --kaspi: #ff5246;
+      --input-bg: #0f1420;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      display: grid;
+      place-items: center;
+      background: var(--bg);
+      color: var(--text);
+      font: 15px/1.45 system-ui, -apple-system, Segoe UI, Roboto, Inter, Arial, sans-serif;
+    }
+
+    /* ==== Карточка входа в стиле Kaspi ==== */
+    .wrap { width: min(560px, 100%); padding: 24px; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      box-shadow: 0 6px 22px rgba(0,0,0,.04);
+      padding: 24px 24px 18px;
+    }
+
+    .brand { display: grid; place-items: center; margin: 10px 0 20px; }
+    .logo {
+      width: 64px; height: 64px; border-radius: 50%;
+      display: grid; place-items: center;
+      background: var(--kaspi);
+      color: #fff; font-weight: 800; font-size: 26px;
+      box-shadow: 0 6px 16px rgba(239,61,47,.35);
+      user-select: none;
+    }
+    h1 { margin: 8px 0 0; font-size: 34px; font-weight: 800; letter-spacing: .2px; text-align: center; }
+    .muted { color: var(--muted); }
+    .sub { text-align: center; margin: 4px 0 14px; }
+
+    /* Вкладки Телефон / Email */
+    .tabs { display: grid; grid-template-columns: 1fr 1fr; margin: 10px 0 6px; }
+    .tab {
+      position: relative; text-align: center; padding: 8px 6px; cursor: pointer;
+      color: var(--muted); font-weight: 600; border-radius: 8px;
+    }
+    .tab.active { color: var(--text); }
+    .tab.active::after {
+      content: ""; position: absolute; left: 12%; right: 12%; bottom: 0;
+      height: 3px; background: var(--kaspi); border-radius: 999px;
+    }
+
+    /* Поля и кнопки */
+    label { font-size: 12px; color: var(--muted); margin: 6px 2px; display: inline-block; }
+    input {
+      width: 100%; height: 42px; border-radius: 10px;
+      background: var(--input-bg); color: var(--text);
+      border: 1px solid var(--line); outline: none; padding: 0 12px;
+      transition: box-shadow .15s ease, border-color .15s ease;
+    }
+    input:focus { border-color: var(--kaspi); box-shadow: 0 0 0 3px color-mix(in srgb, var(--kaspi) 25%, transparent); }
+
+    .row { display: grid; gap: 10px; margin-top: 8px; }
+
+    .btn {
+      height: 42px; border-radius: 10px; border: 1px solid color-mix(in srgb, var(--accent) 70%, #0000);
+      background: var(--accent); color: var(--accent-ink); font-weight: 700; cursor: pointer;
+    }
+    .btn.secondary { background: transparent; color: var(--text); border-color: var(--line); }
+    .btn[disabled] { opacity: .6; cursor: default; }
+
+    .hidden { display: none !important; }
+    .msg { min-height: 20px; margin-top: 8px; font-size: 13px; color: var(--muted); }
+    .msg.err { color: var(--danger); }
+
+    /* Мелочи */
+    .foot { display:flex; justify-content:center; gap:10px; margin-top: 12px; }
+    .foot a { color: var(--muted); text-decoration: none; }
   </style>
 </head>
 <body>
-  <div class="card">
-    <h1 style="margin:0 0 12px">Вход</h1>
-    <p class="muted" style="margin:0 0 16px">Войдите по SMS-коду или по e-mail коду/ссылке.</p>
-
-    <div class="row">
-      <button id="tabSms"  class="chip active" type="button">SMS</button>
-      <button id="tabEmail" class="chip"         type="button">Email</button>
+  <div class="wrap">
+    <div class="brand">
+      <div class="logo" aria-label="Kaspi">K</div>
+      <h1>Кабинет продавца</h1>
+      <div class="sub muted">Выберите способ входа и введите код подтверждения</div>
     </div>
 
-    <!-- SMS -->
-    <div id="paneSms" class="row">
-      <label>Телефон (E.164)</label>
-      <input id="phone" placeholder="+77001234567" autocomplete="tel" inputmode="tel"/>
-      <button id="sendSms" class="btn" type="button">Получить код</button>
-
-      <div id="smsOtpBlock" class="row hidden">
-        <label>Код из SMS</label>
-        <input id="smsOtp" inputmode="numeric" maxlength="6" placeholder="123456"/>
-        <button id="verifySms" class="btn" type="button">Войти</button>
+    <div class="card">
+      <div class="tabs" role="tablist">
+        <button id="tabSms"   class="tab active" role="tab" aria-selected="true">Телефон</button>
+        <button id="tabEmail" class="tab"        role="tab" aria-selected="false">Email</button>
       </div>
+
+      <!-- SMS -->
+      <section id="paneSms" class="row" role="tabpanel" aria-labelledby="tabSms">
+        <div>
+          <label for="phone">Телефон (E.164)</label>
+          <input id="phone" placeholder="+77001234567" autocomplete="tel" inputmode="tel"/>
+        </div>
+        <button id="sendSms" class="btn" type="button">Получить код</button>
+
+        <div id="smsOtpBlock" class="row hidden">
+          <div>
+            <label for="smsOtp">Код из SMS</label>
+            <input id="smsOtp" inputmode="numeric" maxlength="6" placeholder="123456"/>
+          </div>
+          <button id="verifySms" class="btn" type="button">Продолжить</button>
+        </div>
+      </section>
+
+      <!-- Email -->
+      <section id="paneEmail" class="row hidden" role="tabpanel" aria-labelledby="tabEmail">
+        <div>
+          <label for="email">E‑mail</label>
+          <input id="email" type="email" placeholder="you@company.kz" autocomplete="email"/>
+        </div>
+        <button id="sendEmail" class="btn" type="button">Получить код/ссылку</button>
+
+        <div id="emailOtpBlock" class="row hidden">
+          <div>
+            <label for="emailOtp">Код из письма</label>
+            <input id="emailOtp" inputmode="numeric" maxlength="6" placeholder="123456"/>
+          </div>
+          <button id="verifyEmail" class="btn" type="button">Продолжить</button>
+        </div>
+        <div class="muted" style="font-size:12px; margin-top:2px">Если включены magic‑link письма, перейдите по ссылке из почты.</div>
+      </section>
+
+      <div id="msg" class="msg" role="status"></div>
     </div>
 
-    <!-- Email -->
-    <div id="paneEmail" class="row hidden">
-      <label>E-mail</label>
-      <input id="email" type="email" placeholder="you@company.kz" autocomplete="email"/>
-      <button id="sendEmail" class="btn" type="button">Получить код/ссылку</button>
-
-      <div id="emailOtpBlock" class="row hidden">
-        <label>Код из письма</label>
-        <input id="emailOtp" inputmode="numeric" maxlength="6" placeholder="123456"/>
-        <button id="verifyEmail" class="btn" type="button">Войти</button>
-      </div>
-      <p class="muted" style="margin-top:6px">
-        В проекте может быть включена <b>magic-link</b> — тогда просто перейдите по ссылке из письма.
-      </p>
+    <div class="foot muted">
+      <a href="/ui/">⟵ На главную</a>
     </div>
-
-    <p id="msg" class="muted row"></p>
   </div>
 
-  <!-- ИСПОЛЬЗУЕМ МОДУЛИ -->
   <script type="module">
     import { Auth } from './lib/auth.js';
 
-    const $ = (s) => document.querySelector(s);
-    const msg = (t) => { $('#msg').textContent = t || ''; };
+    // === Тема из localStorage (как на сайте) ===
+    const THEME_KEY = 'app.theme';
+    const theme = localStorage.getItem(THEME_KEY) || 'light';
+    document.body.setAttribute('data-theme', theme);
 
-    // не даём Enter перезагружать страницу
+    const $ = (s) => document.querySelector(s);
+    const setMsg = (t, isErr=false) => { const m=$('#msg'); m.textContent=t||''; m.classList.toggle('err', !!isErr); };
+
+    // Не даём Enter перезагружать страницу
     window.addEventListener('keydown', (e) => { if (e.key === 'Enter') e.preventDefault(); });
 
     function setTab(mode) {
       const sms = mode === 'sms';
       $('#tabSms').classList.toggle('active', sms);
       $('#tabEmail').classList.toggle('active', !sms);
+      $('#tabSms').setAttribute('aria-selected', sms);
+      $('#tabEmail').setAttribute('aria-selected', !sms);
       $('#paneSms').classList.toggle('hidden', !sms);
       $('#paneEmail').classList.toggle('hidden', sms);
       localStorage.setItem('login-mode', mode);
       (sms ? $('#phone') : $('#email')).focus();
     }
-    $('#tabSms').onclick  = () => setTab('sms');
+    $('#tabSms').onclick   = () => setTab('sms');
     $('#tabEmail').onclick = () => setTab('email');
     setTab(localStorage.getItem('login-mode') || 'sms');
 
-    // ждём инициализации Supabase
+    // Ждём инициализации Supabase
     await Auth.ready;
+    await Auth.bounceIfAuthed(); // если уже авторизованы — уводим в UI
 
-    // если уже авторизованы — уйдём в UI / настройки
-    await Auth.bounceIfAuthed();
-
-    // ---------- SMS ----------
+    // === SMS ===
     $('#sendSms').onclick = async () => {
       const phone = ($('#phone').value || '').trim();
-      if (!phone) return msg('Укажите телефон в формате +7…');
-      msg('Отправляем SMS…');
+      if (!phone) return setMsg('Укажите телефон в формате +7…', true);
+      setMsg('Отправляем SMS…');
       try {
         await Auth.signInPhoneOtp(phone);
         $('#smsOtpBlock').classList.remove('hidden');
-        msg('Код отправлен. Введите его ниже.');
+        setMsg('Код отправлен. Введите его ниже.');
         $('#smsOtp').focus();
       } catch (e) {
-        console.error(e); msg('Ошибка: ' + (e?.message || e));
+        console.error(e); setMsg('Ошибка: ' + (e?.message || e), true);
       }
     };
 
     $('#verifySms').onclick = async () => {
       const phone = ($('#phone').value || '').trim();
       const code  = ($('#smsOtp').value || '').trim();
-      if (!code) return msg('Введите код из SMS');
-      msg('Проверяем код…');
+      if (!code) return setMsg('Введите код из SMS', true);
+      setMsg('Проверяем код…');
       try {
         const ok = await Auth.verifyPhoneOtp(phone, code);
         if (ok) await Auth.redirectAfterLogin();
-        else msg('Код не подошёл');
+        else setMsg('Код не подошёл', true);
       } catch (e) {
-        console.error(e); msg('Ошибка: ' + (e?.message || e));
+        console.error(e); setMsg('Ошибка: ' + (e?.message || e), true);
       }
     };
 
-    // ---------- Email ----------
+    // === Email ===
     $('#sendEmail').onclick = async () => {
       const email = ($('#email').value || '').trim();
-      if (!email) return msg('Укажите e-mail');
-      msg('Отправляем код/ссылку…');
+      if (!email) return setMsg('Укажите e‑mail', true);
+      setMsg('Отправляем код/ссылку…');
       try {
         await Auth.signInEmailOtp(email);
         $('#emailOtpBlock').classList.remove('hidden');
-        msg('Проверьте почту: пришёл код или ссылка.');
+        setMsg('Проверьте почту: пришёл код или ссылка.');
         $('#emailOtp').focus();
       } catch (e) {
-        console.error(e); msg('Ошибка: ' + (e?.message || e));
+        console.error(e); setMsg('Ошибка: ' + (e?.message || e), true);
       }
     };
 
     $('#verifyEmail').onclick = async () => {
       const email = ($('#email').value || '').trim();
       const code  = ($('#emailOtp').value || '').trim();
-      if (!code) return msg('Введите код из письма');
-      msg('Проверяем код…');
+      if (!code) return setMsg('Введите код из письма', true);
+      setMsg('Проверяем код…');
       try {
         const ok = await Auth.verifyEmailOtp(email, code);
         if (ok) await Auth.redirectAfterLogin();
-        else msg('Код не подошёл');
+        else setMsg('Код не подошёл', true);
       } catch (e) {
-        console.error(e); msg('Ошибка: ' + (e?.message || e));
+        console.error(e); setMsg('Ошибка: ' + (e?.message || e), true);
       }
     };
+
+    // Быстрый UX: Enter = отправить/подтвердить в активной вкладке
+    window.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      const smsActive = !$('#paneSms').classList.contains('hidden');
+      if (smsActive) {
+        if ($('#smsOtpBlock').classList.contains('hidden')) $('#sendSms').click();
+        else $('#verifySms').click();
+      } else {
+        if ($('#emailOtpBlock').classList.contains('hidden')) $('#sendEmail').click();
+        else $('#verifyEmail').click();
+      }
+    });
   </script>
 </body>
 </html>
