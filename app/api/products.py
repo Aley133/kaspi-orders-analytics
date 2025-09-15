@@ -42,7 +42,7 @@ except Exception:
 
 DATABASE_URL = (os.getenv("DATABASE_URL") or "").strip()  # PG URL из окружения
 # psycopg3: полностью отключаем server-side prepared statements
-CONNECT_ARGS: Dict[str, Any] = {"prepare_threshold": 0}
+
 
 def _sa_url(url: str) -> str:
     # Нормализуем схему к драйверу psycopg3
