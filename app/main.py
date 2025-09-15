@@ -1,8 +1,13 @@
 # app/main.py
 from __future__ import annotations
 
-import os, re, uuid, asyncio
-from datetime import datetime, timedelta, time
+# ---------- imports ----------
+import os
+import re
+import uuid
+import random
+import asyncio
+from datetime import datetime, timedelta, time, date
 from pathlib import Path
 from typing import Optional, Dict, List, Iterable, Tuple, Callable
 
@@ -17,47 +22,45 @@ from fastapi.responses import RedirectResponse, PlainTextResponse, JSONResponse
 from cachetools import TTLCache
 from pydantic import BaseModel
 
-# tenant token middleware (Supabase → request.state / contextvar)
+# multitenant middleware (кладёт tenant токен в request.state)
 from app.deps.auth import attach_kaspi_token_middleware, get_current_kaspi_token
 
-# routers
+# доменные роутеры
 from app.api.bridge_v2 import router as bridge_router
 from app.api.profit_fifo import get_profit_fifo_router
 from app.api.authz import router as auth_router
 from app.api.products import get_products_router
 from app.api import settings as settings_api
 
-# Kaspi client (читает токен через get_current_kaspi_token)
+# Kaspi client c поддержкой tenant токена (для /orders)
 from app.deps.kaspi_client_tenant import KaspiClient as TenantKaspiClient
-
 
 # ---------- ENV ----------
 load_dotenv()
 
-DEFAULT_TZ      = os.getenv("TZ", "Asia/Almaty")
-KASPI_BASE_URL  = os.getenv("KASPI_BASE_URL", "https://kaspi.kz/shop/api/v2").rstrip("/")
-CURRENCY        = os.getenv("CURRENCY", "KZT")
-SHOP_NAME       = os.getenv("SHOP_NAME", "LeoXpress")
-PARTNER_ID      = os.getenv("PARTNER_ID", "")
+DEFAULT_TZ        = os.getenv("TZ", "Asia/Almaty")
+KASPI_BASE_URL    = os.getenv("KASPI_BASE_URL", "https://kaspi.kz/shop/api/v2").rstrip("/")
+CURRENCY          = os.getenv("CURRENCY", "KZT")
+SHOP_NAME         = os.getenv("SHOP_NAME", "LeoXpress")
+PARTNER_ID        = os.getenv("PARTNER_ID", "")
 
-AMOUNT_FIELDS   = [s.strip() for s in os.getenv("AMOUNT_FIELDS", "totalPrice").split(",") if s.strip()]
-AMOUNT_DIVISOR  = float(os.getenv("AMOUNT_DIVISOR", "1") or 1)
+AMOUNT_FIELDS     = [s.strip() for s in os.getenv("AMOUNT_FIELDS", "totalPrice").split(",") if s.strip()]
+AMOUNT_DIVISOR    = float(os.getenv("AMOUNT_DIVISOR", "1") or 1)
 
 DATE_FIELD_DEFAULT = os.getenv("DATE_FIELD_DEFAULT", "creationDate")
 DATE_FIELD_OPTIONS = [s.strip() for s in os.getenv(
-    "DATE_FIELD_OPTIONS", "creationDate,plannedShipmentDate,shipmentDate,deliveryDate"
+    "DATE_FIELD_OPTIONS", "creationDate,plannedShipmentDate,plannedDeliveryDate,shipmentDate,deliveryDate"
 ).split(",") if s.strip()]
-CITY_KEYS       = [s.strip() for s in os.getenv("CITY_KEYS", "city,deliveryAddress.city").split(",") if s.strip()]
+CITY_KEYS          = [s.strip() for s in os.getenv("CITY_KEYS", "city,deliveryAddress.city").split(",") if s.strip()]
 
-CHUNK_DAYS      = int(os.getenv("CHUNK_DAYS", "7") or 7)
-CACHE_TTL       = int(os.getenv("CACHE_TTL", "300") or 300)
+CHUNK_DAYS  = int(os.getenv("CHUNK_DAYS", "7") or 7)
+CACHE_TTL   = int(os.getenv("CACHE_TTL", "300") or 300)
 
 BUSINESS_DAY_START = os.getenv("BUSINESS_DAY_START", "20:00")   # HH:MM
 USE_BUSINESS_DAY   = os.getenv("USE_BUSINESS_DAY", "true").lower() in ("1","true","yes","on")
 STORE_ACCEPT_UNTIL = os.getenv("STORE_ACCEPT_UNTIL", "17:00")   # HH:MM
 
 ENRICH_CONCURRENCY = int(os.getenv("ENRICH_CONCURRENCY", "6") or 6)
-
 
 # ---------- FastAPI ----------
 app = FastAPI(title="Kaspi Orders Analytics")
@@ -67,50 +70,60 @@ if origins:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=origins,
-        allow_methods=["*"],
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
         allow_headers=["*"],
+        allow_credentials=False,
     )
 
-# прикрепляем токен (пер-tenant) к request/state
+# кладём токен в request.state
 app.middleware("http")(attach_kaspi_token_middleware)
 
-# Kaspi client для /orders (внутри обращается к get_current_kaspi_token())
+# tenant-aware клиент для /orders
 client = TenantKaspiClient(base_url=KASPI_BASE_URL)
 
 # кэш для entries
 orders_cache = TTLCache(maxsize=512, ttl=CACHE_TTL)
 
-# статика UI
+# /ui статика (best-effort)
 _ui_candidates = ("app/static", "app/ui", "static", "ui")
 _ui_dir = next((p for p in _ui_candidates if Path(p).is_dir()), None)
 if _ui_dir:
     app.mount("/ui", StaticFiles(directory=_ui_dir, html=True), name="ui")
 
-# роутеры домена
+# роутеры
 app.include_router(get_products_router(client), prefix="/products")
 app.include_router(get_profit_fifo_router(), prefix="/profit")
 app.include_router(bridge_router, prefix="/profit")
 app.include_router(auth_router)
 app.include_router(settings_api.router, prefix="/settings", tags=["settings"])
 
-
 # ---------- helpers ----------
 def _bd_delta(hhmm: str) -> timedelta:
     try:
-        h, m = map(int, hhmm.split(":"))
-        return timedelta(hours=h, minutes=m)
+        h, m = hhmm.split(":")
+        return timedelta(hours=int(h), minutes=int(m))
     except Exception:
         return timedelta(0)
 
+def norm_state(s: str) -> str:
+    return (s or "").strip().upper()
+
+def parse_states_csv(s: Optional[str]) -> Optional[set[str]]:
+    if not s:
+        return None
+    return {norm_state(x) for x in re.split(r"[\s,;]+", s) if x.strip()}
+
 def tzinfo_of(name: str) -> pytz.BaseTzInfo:
-    try: return pytz.timezone(name)
-    except Exception: raise HTTPException(status_code=400, detail=f"Bad timezone: {name}")
+    try:
+        return pytz.timezone(name)
+    except Exception:
+        raise HTTPException(status_code=400, detail=f"Bad timezone: {name}")
 
 def parse_date_local(d: str, tz: str) -> datetime:
     tzinfo = tzinfo_of(tz)
     try:
         y, m, dd = map(int, d.split("-"))
-        return tzinfo.localize(datetime(y, m, dd))
+        return tzinfo.localize(datetime(y, m, dd, 0, 0, 0, 0))
     except Exception:
         raise HTTPException(status_code=400, detail=f"Bad date: {d}")
 
@@ -127,104 +140,110 @@ def iter_chunks(start_dt: datetime, end_dt: datetime, step_days: int) -> Iterabl
 
 def dict_get_path(d: dict, path: str):
     cur = d
-    for k in path.split("."):
-        if not isinstance(cur, dict) or k not in cur:
+    for key in path.split("."):
+        if not isinstance(cur, dict):
             return None
-        cur = cur[k]
+        if key not in cur:
+            return None
+        cur = cur[key]
     return cur
 
-def norm_state(s: str) -> str:
-    return (s or "").strip().upper()
-
-def parse_states_csv(s: Optional[str]) -> Optional[set[str]]:
-    if not s:
-        return None
-    return {norm_state(x) for x in re.split(r"[\s,;]+", s) if x.strip()}
-
-_CITY_KEY_HINTS = {"city","cityname","town","locality","settlement"}
+_CITY_KEY_HINTS = {"city", "cityname", "town", "locality", "settlement"}
 
 def _normalize_city(s: str) -> str:
-    if not isinstance(s, str): return ""
-    s = re.sub(r"^\s*(г\.?|город)\s+", "", s.strip(), flags=re.IGNORECASE)
-    return s.split(",")[0].strip()
+    if not isinstance(s, str):
+        return ""
+    s = s.strip()
+    s = re.sub(r"^\s*(г\.?|город)\s+", "", s, flags=re.IGNORECASE)
+    s = s.split(",")[0].strip()
+    return s
 
 def _deep_find_city(obj) -> str:
     if isinstance(obj, dict):
         for k, v in obj.items():
-            if isinstance(k, str) and any(h in k.lower() for h in _CITY_KEY_HINTS) and isinstance(v, str) and v.strip():
+            kl = str(k).lower()
+            if any(h in kl for h in _CITY_KEY_HINTS) and isinstance(v, str) and v.strip():
                 return _normalize_city(v)
-            got = _deep_find_city(v)
-            if got: return got
+            found = _deep_find_city(v)
+            if found:
+                return found
     elif isinstance(obj, list):
         for it in obj:
-            got = _deep_find_city(it)
-            if got: return got
+            found = _deep_find_city(it)
+            if found:
+                return found
     return ""
 
 def extract_city(attrs: dict) -> str:
     for k in CITY_KEYS:
         v = dict_get_path(attrs, k) if "." in k else attrs.get(k)
-        if isinstance(v, str) and v.strip(): return _normalize_city(v)
+        if isinstance(v, str) and v.strip():
+            return _normalize_city(v)
         if isinstance(v, (dict, list)):
-            z = _deep_find_city(v)
-            if z: return z
-    return _deep_find_city(attrs) or ""
+            res = _deep_find_city(v)
+            if res:
+                return res
+    res = _deep_find_city(attrs)
+    return res or ""
 
 def extract_amount(attrs: dict) -> float:
     total = 0.0
     for k in AMOUNT_FIELDS:
         v = dict_get_path(attrs, k) if "." in k else attrs.get(k)
-        if v is None: continue
-        try: total += float(v)
-        except Exception: pass
+        if v is None:
+            continue
+        try:
+            total += float(v)
+        except Exception:
+            continue
     return total / (AMOUNT_DIVISOR or 1.0)
 
 def extract_ms(attrs: dict, field: str) -> Optional[int]:
-    # поддержка ISO/миллисекунд и алиаса creationDate<->date
+    """Поддержка ISO/миллисекунд и алиаса creationDate<->date."""
     v = attrs.get(field)
-    if v is None and field == "creationDate": v = attrs.get("date")
-    if v is None: return None
-    try: return int(v)
+    if v is None and field == "creationDate":
+        v = attrs.get("date")
+    if v is None:
+        return None
+    try:
+        return int(v)
     except Exception:
         try:
             return int(datetime.fromisoformat(str(v).replace("Z", "+00:00")).timestamp() * 1000)
         except Exception:
             return None
 
-def bucket_date(dt_local: datetime, use_bd: bool, bds: str) -> str:
+def bucket_date(dt_local: datetime, *, use_bd: bool, business_day_start: str) -> str:
     if use_bd:
-        shift = timedelta(hours=24) - _bd_delta(bds)
+        shift = timedelta(hours=24) - _bd_delta(business_day_start)
         return (dt_local + shift).date().isoformat()
     return dt_local.date().isoformat()
 
 def _guess_number(attrs: dict, fallback_id: str) -> str:
-    for k in ("number","code","orderNumber"):
+    for k in ("number", "code", "orderNumber"):
         v = attrs.get(k)
         if isinstance(v, str) and v.strip():
             return v.strip()
     return str(fallback_id)
 
-
-# ---------- HTTPX for /entries enrichment ----------
+# ---------- HTTPX (для /entries) ----------
 BASE_TIMEOUT = httpx.Timeout(connect=10.0, read=80.0, write=20.0, pool=60.0)
 HTTPX_LIMITS  = httpx.Limits(max_connections=20, max_keepalive_connections=10)
 
-def _kaspi_headers() -> Dict[str, str]:
-    tok = get_current_kaspi_token()
-    if not tok:
-        raise HTTPException(status_code=401, detail="Kaspi token is not set")
-    return {
-        "X-Auth-Token": tok,
-        "Accept": "application/vnd.api+json",
-        "Content-Type": "application/vnd.api+json",
-        "User-Agent": "leo-analytics/1.0",
-    }
+def _async_client(scale: float = 1.0):
+    scale = max(1.0, float(scale))
+    return httpx.AsyncClient(
+        base_url=KASPI_BASE_URL,
+        timeout=httpx.Timeout(
+            connect=BASE_TIMEOUT.connect,
+            read=min(420.0, BASE_TIMEOUT.read * scale),
+            write=min(150.0, BASE_TIMEOUT.write * scale),
+            pool=BASE_TIMEOUT.pool,
+        ),
+        limits=HTTPX_LIMITS,
+    )
 
-def _async_client():
-    return httpx.AsyncClient(base_url=KASPI_BASE_URL, timeout=BASE_TIMEOUT, limits=HTTPX_LIMITS)
-
-
-# ---------- Smart day ----------
+# ---------- «умный» операционный день ----------
 _DELIVERED_STATES = {"KASPI_DELIVERY", "DELIVERED", "ARCHIVE", "ARCHIVED"}
 
 def _smart_operational_day(attrs: dict, state: str, tzinfo: pytz.BaseTzInfo,
@@ -234,8 +253,8 @@ def _smart_operational_day(attrs: dict, state: str, tzinfo: pytz.BaseTzInfo,
     ms_ship     = extract_ms(attrs, "shipmentDate")
 
     dt_creation = datetime.fromtimestamp(ms_creation/1000, tz=pytz.UTC).astimezone(tzinfo) if ms_creation else None
-    dt_planned  = datetime.fromtimestamp(ms_planned/1000,  tz=pytz.UTC).astimezone(tzinfo) if ms_planned else None
-    dt_ship     = datetime.fromtimestamp(ms_ship/1000,     tz=pytz.UTC).astimezone(tzinfo) if ms_ship else None
+    dt_planned  = datetime.fromtimestamp(ms_planned/1000,  tz=pytz.UTC).astimezone(tzinfo) if ms_planned  else None
+    dt_ship     = datetime.fromtimestamp(ms_ship/1000,     tz=pytz.UTC).astimezone(tzinfo) if ms_ship     else None
 
     if state in _DELIVERED_STATES:
         base = dt_ship or dt_planned or dt_creation or datetime.now(tzinfo)
@@ -246,7 +265,7 @@ def _smart_operational_day(attrs: dict, state: str, tzinfo: pytz.BaseTzInfo,
         return dt_planned.date().isoformat(), "planned"
 
     cutoff_h, cutoff_m = map(int, store_accept_until.split(":"))
-    cutoff = time(cutoff_h, cutoff_m)
+    cutoff = time(cutoff_h, cutoff_m, 0)
     if dt_creation:
         if dt_creation.time() <= cutoff:
             return dt_creation.date().isoformat(), "created_before_cutoff"
@@ -255,19 +274,31 @@ def _smart_operational_day(attrs: dict, state: str, tzinfo: pytz.BaseTzInfo,
 
     return datetime.now(tzinfo).date().isoformat(), "fallback_now"
 
+# ---------- обогащение позиций (без 401 при отсутствии токена) ----------
+async def _first_item_details(order_id: str, timeout_scale: float = 1.0) -> Optional[Dict[str, object]]:
+    token = get_current_kaspi_token()
+    if not token:
+        # нет прикрепленного ключа — тихо пропускаем (чтобы не было 401 и не сбивалась сессия)
+        return None
 
-# ---------- enrichment (first item) ----------
-async def _first_item_details(order_id: str) -> Optional[Dict[str, object]]:
-    # быстрый путь — /orderentries
-    try:
-        async with _async_client() as cli:
+    headers = {
+        "X-Auth-Token": token,
+        "Accept": "application/vnd.api+json",
+        "Content-Type": "application/vnd.api+json",
+        "User-Agent": "leo-analytics/1.0",
+    }
+
+    async with _async_client(scale=timeout_scale) as cli:
+        # 1) быстрый путь — /orderentries
+        try:
             r = await cli.get("/orderentries",
                               params={"filter[order.id]": order_id, "page[size]": "200"},
-                              headers=_kaspi_headers())
+                              headers=headers)
+            r.raise_for_status()
             j = r.json()
-            data = j.get("data") or []
+            data = (j.get("data") or [])
             if data:
-                attrs_e = (data[0].get("attributes") or {})
+                attrs_e = data[0].get("attributes", {}) or {}
                 title = ""
                 for key in ("offerName","title","name","productName","shortName"):
                     v = attrs_e.get(key)
@@ -282,18 +313,19 @@ async def _first_item_details(order_id: str) -> Optional[Dict[str, object]]:
                 if isinstance(off, dict) and off.get("code"):
                     sku = off["code"]
                 return {"sku": sku, "title": title}
-    except Exception:
-        pass
-    # запасной путь — /orders/{id}/entries
-    try:
-        async with _async_client() as cli:
+        except Exception:
+            pass
+
+        # 2) запасной путь — /orders/{id}/entries
+        try:
             r = await cli.get(f"/orders/{order_id}/entries",
                               params={"page[size]": "200"},
-                              headers=_kaspi_headers())
+                              headers=headers)
+            r.raise_for_status()
             j = r.json()
             data = j.get("data") or []
             if data:
-                attrs_e = (data[0].get("attributes") or {})
+                attrs_e = data[0].get("attributes", {}) or {}
                 title = ""
                 for key in ("offerName","title","name","productName","shortName"):
                     v = attrs_e.get(key)
@@ -308,12 +340,12 @@ async def _first_item_details(order_id: str) -> Optional[Dict[str, object]]:
                     if isinstance(v, str) and v.strip():
                         sku = v.strip(); break
                 return {"sku": sku, "title": title}
-    except Exception:
-        pass
+        except Exception:
+            pass
+
     return None
 
-
-# ---------- models ----------
+# ---------- модели ----------
 class DayPoint(BaseModel):
     x: str
     count: int
@@ -334,7 +366,6 @@ class AnalyticsResponse(BaseModel):
     prev_days: List[DayPoint] = []
     cities: List[CityCount] = []
     state_breakdown: Dict[str, int] = {}
-
 
 # ---------- META ----------
 @app.get("/auth/meta", tags=["auth"])
@@ -363,8 +394,7 @@ async def meta():
         "store_accept_until": STORE_ACCEPT_UNTIL,
     }
 
-
-# ---------- states helpers ----------
+# ---------- утилиты состояний ----------
 def _normalize_states_inc(states_inc: set[str] | None, expand_archive: bool = False) -> set[str]:
     if not states_inc:
         return set()
@@ -373,13 +403,11 @@ def _normalize_states_inc(states_inc: set[str] | None, expand_archive: bool = Fa
         out |= {"ARCHIVE", "ARCHIVED"}
     return out
 
-
-# ---------- core collection ----------
+# ---------- ядро сбора ----------
 def _collect_range(
     start_dt: datetime, end_dt: datetime, tz: str, date_field: str,
     states_inc: Optional[set], states_ex: set,
     assign_mode: str, store_accept_until: str,
-    use_bd: bool, bds: str,
 ) -> tuple[list[DayPoint], Dict[str, int], int, float, Dict[str, int], List[Dict[str, object]]]:
 
     tzinfo = tzinfo_of(tz)
@@ -389,15 +417,19 @@ def _collect_range(
     day_amounts: Dict[str, float] = {}
     city_counts: Dict[str, int]  = {}
     state_counts: Dict[str, int] = {}
-    flat_out: List[Dict[str, object]] = []
 
     total_orders = 0
     total_amount = 0.0
+    flat_out: List[Dict[str, object]] = []
 
     states_inc = _normalize_states_inc(states_inc, expand_archive=True)
 
-    period_start = start_dt.astimezone(tzinfo).date().isoformat()
-    period_end   = end_dt.astimezone(tzinfo).date().isoformat()
+    # строчные границы периода (для проверки попадания)
+    range_start_day = start_dt.astimezone(tzinfo).date().isoformat()
+    range_end_day   = end_dt.astimezone(tzinfo).date().isoformat()
+
+    if client is None:
+        raise HTTPException(status_code=500, detail="Kaspi client not configured")
 
     for s, e in iter_chunks(start_dt, end_dt, CHUNK_DAYS):
         try:
@@ -405,36 +437,38 @@ def _collect_range(
             while True:
                 try:
                     for order in client.iter_orders(start=s, end=e, filter_field=try_field):
-                        oid = str(order.get("id"))
+                        oid   = str(order.get("id"))
                         if oid in seen_ids:
                             continue
                         attrs = order.get("attributes", {}) or {}
 
-                        st = norm_state(attrs.get("state", ""))
+                        st = norm_state(str(attrs.get("state", "")))
                         if states_inc and st not in states_inc:
                             continue
                         if st in states_ex:
                             continue
 
+                        # исходный штамп (raw)
                         ms = extract_ms(attrs, date_field) or extract_ms(attrs, "creationDate")
                         if ms is None:
                             continue
 
-                        dtt = datetime.fromtimestamp(ms/1000, tz=pytz.UTC).astimezone(tzinfo)
-                        raw_day = dtt.date().isoformat()
+                        dtt      = datetime.fromtimestamp(ms/1000, tz=pytz.UTC).astimezone(tzinfo)
+                        raw_day  = dtt.date().isoformat()
 
+                        # назначение операционного дня
                         if assign_mode == "smart":
-                            op_day, reason = _smart_operational_day(attrs, st, tzinfo, store_accept_until, bds)
+                            op_day, reason = _smart_operational_day(attrs, st, tzinfo, store_accept_until, BUSINESS_DAY_START)
                         elif assign_mode == "business":
-                            op_day, reason = bucket_date(dtt, use_bd=True, bds=bds), "business"
+                            op_day, reason = bucket_date(dtt, use_bd=True, business_day_start=BUSINESS_DAY_START), "business"
                         else:
                             op_day, reason = raw_day, "raw"
 
-                        # мост для однодневных/узких периодов
-                        if not (period_start <= op_day <= period_end) and (period_start <= raw_day <= period_end):
+                        # мост: если smart день выпал за период, но raw попадает — считаем по raw
+                        if not (range_start_day <= op_day <= range_end_day) and (range_start_day <= raw_day <= range_end_day):
                             op_day, reason = raw_day, "raw_bridge"
 
-                        if not (period_start <= op_day <= period_end):
+                        if not (range_start_day <= op_day <= range_end_day):
                             continue
 
                         amt  = extract_amount(attrs)
@@ -442,7 +476,8 @@ def _collect_range(
 
                         day_counts[op_day]  = day_counts.get(op_day, 0) + 1
                         day_amounts[op_day] = day_amounts.get(op_day, 0.0) + amt
-                        if city: city_counts[city] = city_counts.get(city, 0) + 1
+                        if city:
+                            city_counts[city] = city_counts.get(city, 0) + 1
                         state_counts[st]   = state_counts.get(st, 0) + 1
 
                         total_orders += 1
@@ -462,6 +497,7 @@ def _collect_range(
                         seen_ids.add(oid)
                     break
                 except HTTPStatusError as ee:
+                    # магазин не поддерживает фильтрацию по выбранному полю → откат к creationDate
                     if ee.response.status_code in (400, 422) and try_field != "creationDate":
                         try_field = "creationDate"
                         continue
@@ -469,7 +505,7 @@ def _collect_range(
         except RequestError as e:
             raise HTTPException(status_code=502, detail=f"Network: {e}")
 
-    # ось дней
+    # формирование дневной оси
     out_days: List[DayPoint] = []
     cur = start_dt.astimezone(tzinfo).date()
     end_d = end_dt.astimezone(tzinfo).date()
@@ -480,8 +516,7 @@ def _collect_range(
 
     return out_days, city_counts, total_orders, round(total_amount, 2), state_counts, flat_out
 
-
-# ---------- analytics ----------
+# ---------- публичные эндпоинты: аналитика ----------
 @app.get("/orders/analytics", response_model=AnalyticsResponse)
 async def analytics(
     start: str = Query(...), end: str = Query(...), tz: str = Query(DEFAULT_TZ),
@@ -501,6 +536,7 @@ async def analytics(
     start_dt = parse_date_local(start, tz)
     end_dt   = parse_date_local(end, tz) + timedelta(days=1) - timedelta(milliseconds=1)
 
+    # RAW режим позволяет подрезать временем
     if not eff_use_bd:
         if start_time:
             start_dt = apply_hhmm(start_dt, start_time)
@@ -518,11 +554,10 @@ async def analytics(
 
     days, cities_dict, tot, tot_amt, st_counts, _ = _collect_range(
         start_dt, end_dt, tz, date_field, inc, exc,
-        assign_mode=assign_mode, store_accept_until=(store_accept_until or STORE_ACCEPT_UNTIL),
-        use_bd=eff_use_bd, bds=eff_bds,
+        assign_mode=assign_mode, store_accept_until=(store_accept_until or STORE_ACCEPT_UNTIL)
     )
 
-    cities = [{"city": c, "count": n} for c, n in sorted(cities_dict.items(), key=lambda x: -x[1])]
+    cities_list = [{"city": c, "count": n} for c, n in sorted(cities_dict.items(), key=lambda x: -x[1])]
 
     prev_days: List[DayPoint] = []
     if with_prev:
@@ -532,7 +567,6 @@ async def analytics(
         prev_days, _, _, _, _, _ = _collect_range(
             prev_start, prev_end, tz, date_field, inc, exc,
             assign_mode=assign_mode, store_accept_until=(store_accept_until or STORE_ACCEPT_UNTIL),
-            use_bd=eff_use_bd, bds=eff_bds,
         )
 
     return {
@@ -545,12 +579,11 @@ async def analytics(
         "total_amount": tot_amt,
         "days": days,
         "prev_days": prev_days,
-        "cities": cities,
+        "cities": cities_list,
         "state_breakdown": st_counts,
     }
 
-
-# ---------- /orders/ids (core) ----------
+# ---------- /orders/ids CORE ----------
 def _select_targets(out: List[Dict[str, object]], enrich_day: str, enrich_scope: str, limit: int) -> List[Dict[str, object]]:
     if enrich_scope == "none":
         return []
@@ -571,6 +604,7 @@ async def _list_ids_core(
     progress_cb: Optional[Callable[[str, int, int, str], None]] = None,
 ) -> Dict[str, object]:
 
+    tzinfo = tzinfo_of(tz)
     eff_use_bd = USE_BUSINESS_DAY if use_bd is None else bool(use_bd)
     eff_bds    = BUSINESS_DAY_START if not business_day_start else business_day_start
 
@@ -582,70 +616,88 @@ async def _list_ids_core(
 
     _, _, _, _, _, out = _collect_range(
         start_dt, end_dt, tz, date_field, inc, exc,
-        assign_mode=assign_mode, store_accept_until=(store_accept_until or STORE_ACCEPT_UNTIL),
-        use_bd=eff_use_bd, bds=eff_bds,
+        assign_mode=assign_mode, store_accept_until=(store_accept_until or STORE_ACCEPT_UNTIL)
     )
 
+    # сортировка и обрезка
     out.sort(key=lambda it: (str(it["op_day"]), str(it["date"])), reverse=(order == "desc"))
     if limit and limit > 0:
         out = out[:limit]
 
+    # группировка для UI
     groups: List[Dict[str, object]] = []
     if grouped:
-        cur_day = None
+        cur_day: Optional[str] = None
         bucket: List[Dict[str, object]] = []
         for it in out:
             d = str(it["op_day"])
             if cur_day is None:
                 cur_day = d
             if d != cur_day:
-                groups.append({"day": cur_day, "items": bucket,
-                               "total_amount": round(sum(float(x.get("amount", 0) or 0) for x in bucket), 2)})
+                groups.append({
+                    "day": cur_day,
+                    "items": bucket,
+                    "total_amount": round(sum(float(x.get("amount", 0) or 0) for x in bucket), 2),
+                })
                 cur_day, bucket = d, []
             bucket.append(it)
         if cur_day is not None:
-            groups.append({"day": cur_day, "items": bucket,
-                           "total_amount": round(sum(float(x.get("amount", 0) or 0) for x in bucket), 2)})
+            groups.append({
+                "day": cur_day,
+                "items": bucket,
+                "total_amount": round(sum(float(x.get("amount", 0) or 0) for x in bucket), 2),
+            })
 
+    # обогащение (первая позиция)
     if with_items and out and enrich_scope != "none":
-        enrich_day = out[-1]["op_day"] if order == "asc" else out[0]["op_day"]
-        targets = _select_targets(out, enrich_day, enrich_scope, limit)
+        enrich_day  = bucket_date(end_dt.astimezone(tzinfo), use_bd=eff_use_bd, business_day_start=eff_bds)
+        targets     = _select_targets(out, enrich_day, enrich_scope, limit)
+        total_t     = len(targets)
+
         sem = asyncio.Semaphore(max(1, ENRICH_CONCURRENCY))
-        done, total = 0, len(targets)
+        done = 0
+        if progress_cb: progress_cb("enrich", done, total_t, "enrich start")
 
         async def enrich(it):
             nonlocal done
             async with sem:
-                extra = await _first_item_details(str(it["id"]))
+                extra = await _first_item_details(str(it["id"]), timeout_scale=1.0 + (0.5 if total_t >= 400 else 0.0))
                 if extra:
-                    it["sku"] = extra.get("sku")
+                    it["sku"]   = extra.get("sku")
                     it["title"] = extra.get("title")
                 done += 1
                 if progress_cb:
-                    progress_cb("enrich", done, total, f"enrich {done}/{total}")
+                    progress_cb("enrich", done, total_t, f"enrich {done}/{total_t}")
                 await asyncio.sleep(0.02)
 
         await asyncio.gather(*(enrich(it) for it in targets))
 
+    period_total_amount = round(sum(float(it.get("amount", 0) or 0) for it in out), 2)
+    period_total_count  = len(out)
+
     return {
         "items": out,
         "groups": groups,
-        "period_total_count": len(out),
-        "period_total_amount": round(sum(float(it.get("amount", 0) or 0) for it in out), 2),
+        "period_total_count": period_total_count,
+        "period_total_amount": period_total_amount,
         "currency": CURRENCY,
     }
-
 
 # ---------- /orders/ids ----------
 @app.get("/orders/ids")
 async def list_ids(
-    start: str = Query(...), end: str = Query(...),
+    start: str = Query(...),
+    end: str = Query(...),
     tz: str = Query(DEFAULT_TZ),
     date_field: str = Query(DATE_FIELD_DEFAULT),
-    states: Optional[str] = Query(None), exclude_states: Optional[str] = Query(None),
-    use_bd: Optional[bool] = Query(None), business_day_start: Optional[str] = Query(None),
-    limit: int = Query(0), order: str = Query("asc", pattern="^(asc|desc)$"),
-    grouped: int = Query(1), with_items: int = Query(1),
+    states: Optional[str] = Query(None),
+    exclude_states: Optional[str] = Query(None),
+    use_bd: Optional[bool] = Query(None),
+    business_day_start: Optional[str] = Query(None),
+    limit: int = Query(0, description="0 = без ограничения"),
+    order: str = Query("asc", pattern="^(asc|desc)$"),
+    grouped: int = Query(1),
+    with_items: int = Query(1, description="1=тянуть первую позицию"),
     enrich_scope: str = Query("last_day", pattern="^(none|last_day|all)$"),
     assign_mode: str = Query("smart", pattern="^(smart|business|raw)$"),
     store_accept_until: Optional[str] = Query(None),
@@ -659,73 +711,93 @@ async def list_ids(
 # ---------- CSV ----------
 @app.get("/orders/ids.csv", response_class=PlainTextResponse)
 async def list_ids_csv(
-    start: str = Query(...), end: str = Query(...),
-    tz: str = Query(DEFAULT_TZ), date_field: str = Query(DATE_FIELD_DEFAULT),
-    states: Optional[str] = Query(None), exclude_states: Optional[str] = Query(None),
-    use_bd: Optional[bool] = Query(None), business_day_start: Optional[str] = Query(None),
+    start: str = Query(...),
+    end: str = Query(...),
+    tz: str = Query(DEFAULT_TZ),
+    date_field: str = Query(DATE_FIELD_DEFAULT),
+    states: Optional[str] = Query(None),
+    exclude_states: Optional[str] = Query(None),
+    use_bd: Optional[bool] = Query(None),
+    business_day_start: Optional[str] = Query(None),
     order: str = Query("asc", pattern="^(asc|desc)$"),
     assign_mode: str = Query("smart", pattern="^(smart|business|raw)$"),
     store_accept_until: Optional[str] = Query(None),
 ):
     data = await _list_ids_core(
         start, end, tz, date_field, states, exclude_states,
-        use_bd, business_day_start, limit=100000, order=order, grouped=0,
+        use_bd, business_day_start,
+        limit=100000, order=order, grouped=0,
         with_items=0, enrich_scope="none",
         assign_mode=assign_mode, store_accept_until=store_accept_until, progress_cb=None
     )
     return "\n".join([str(it["number"]) for it in data["items"]])
 
-# ---------- Jobs (синхронное выполнение, чтобы не терять токен Supabase/Kaspi) ----------
+# ---------- Async + jobs ----------
 Jobs: Dict[str, Dict[str, object]] = {}
 
 def _new_job() -> str:
     job_id = uuid.uuid4().hex
-    Jobs[job_id] = {"status":"queued","phase":"scan","progress":0.0,"message":"",
-                    "created":datetime.utcnow().isoformat()+"Z","updated":datetime.utcnow().isoformat()+"Z",
-                    "total":0,"done":0,"result":None,"cancel":False}
+    Jobs[job_id] = {
+        "status": "queued", "phase": "scan", "progress": 0.0, "message": "",
+        "created": datetime.utcnow().isoformat()+"Z", "updated": datetime.utcnow().isoformat()+"Z",
+        "total": 0, "done": 0, "result": None, "cancel": False,
+    }
     return job_id
 
 def _job_update(job_id: str, **patch):
-    st = Jobs.get(job_id); 
+    st = Jobs.get(job_id)
     if not st: return
     st.update(patch); st["updated"] = datetime.utcnow().isoformat()+"Z"
 
 def _job_progress_cb(job_id: Optional[str]):
     if not job_id: return None
     def cb(phase: str, done: int, total: int, extra_msg: str = ""):
-        if job_id not in Jobs or Jobs[job_id].get("cancel"): return
+        if job_id not in Jobs: return
+        if Jobs[job_id].get("cancel"): return
         prog = 0.0
         if total > 0:
-            if phase == "scan": prog = min(0.6, 0.6 * (done/total))
-            else:               prog = 0.6 + min(0.4, 0.4 * (done/total))
+            if phase == "scan":
+                prog = min(0.6, 0.6 * (done / total))
+            else:
+                prog = 0.6 + min(0.4, 0.4 * (done / total))
         _job_update(job_id, phase=phase, progress=prog, done=done, total=total, message=extra_msg or Jobs[job_id].get("message",""))
     return cb
 
 @app.post("/orders/ids.async")
 async def list_ids_async(
-    start: str = Query(...), end: str = Query(...),
-    tz: str = Query(DEFAULT_TZ), date_field: str = Query(DATE_FIELD_DEFAULT),
-    states: Optional[str] = Query(None), exclude_states: Optional[str] = Query(None),
-    use_bd: Optional[bool] = Query(None), business_day_start: Optional[str] = Query(None),
-    limit: int = Query(0), order: str = Query("asc", pattern="^(asc|desc)$"),
-    grouped: int = Query(1), with_items: int = Query(1),
+    start: str = Query(...),
+    end: str = Query(...),
+    tz: str = Query(DEFAULT_TZ),
+    date_field: str = Query(DATE_FIELD_DEFAULT),
+    states: Optional[str] = Query(None),
+    exclude_states: Optional[str] = Query(None),
+    use_bd: Optional[bool] = Query(None),
+    business_day_start: Optional[str] = Query(None),
+    limit: int = Query(0, description="0 = без ограничения"),
+    order: str = Query("asc", pattern="^(asc|desc)$"),
+    grouped: int = Query(1),
+    with_items: int = Query(1),
     enrich_scope: str = Query("last_day", pattern="^(none|last_day|all)$"),
     assign_mode: str = Query("smart", pattern="^(smart|business|raw)$"),
     store_accept_until: Optional[str] = Query(None),
 ):
-    # Важно: выполняем работу СИНХРОННО внутри запроса, чтобы не потерять контекст авторизации.
     job_id = _new_job()
-    _job_update(job_id, status="running", message="started")
-    try:
-        res = await _list_ids_core(
-            start, end, tz, date_field, states, exclude_states,
-            use_bd, business_day_start, limit, order, grouped,
-            with_items, enrich_scope, assign_mode, store_accept_until,
-            progress_cb=_job_progress_cb(job_id)
-        )
-        _job_update(job_id, status="done", progress=1.0, message="done", result=res)
-    except Exception as e:
-        _job_update(job_id, status="error", message=str(e))
+    async def worker():
+        try:
+            _job_update(job_id, status="running", message="started")
+            res = await _list_ids_core(
+                start, end, tz, date_field, states, exclude_states,
+                use_bd, business_day_start, limit, order, grouped,
+                with_items, enrich_scope, assign_mode, store_accept_until,
+                progress_cb=_job_progress_cb(job_id)
+            )
+            if Jobs.get(job_id, {}).get("cancel"):
+                _job_update(job_id, status="canceled", message="canceled by user", result=None)
+            else:
+                _job_update(job_id, status="done", progress=1.0, message="done", result=res)
+        except Exception as e:
+            _job_update(job_id, status="error", message=str(e))
+    asyncio.create_task(worker())
     return {"job_id": job_id}
 
 @app.get("/jobs/{job_id}")
