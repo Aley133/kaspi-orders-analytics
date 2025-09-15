@@ -14,7 +14,39 @@ from .tenant import resolve_kaspi_token
 # Храним текущий kaspi-token в ContextVar, чтобы его могли читать клиенты ниже по стеку
 kaspi_token_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("kaspi_token", default="")
 
+async def attach_kaspi_token_middleware(request: Request, call_next):
+    """
+    1) Парсим Bearer JWT → sub → нормализуем в UUID → кладём в request.state.tenant_id
+    2) Резолвим kaspi_token из БД → кладём в request.state.kaspi_token и ContextVar
+    """
+    tenant_id: Optional[str] = None
 
+    # NEW: сохраним сырой bearer, чтобы роуты знали «есть ли сессия»
+    token_hdr = request.headers.get("authorization") or request.headers.get("Authorization") or ""
+    jwt_token: Optional[str] = None
+    if token_hdr.lower().startswith("bearer "):
+        jwt_token = token_hdr.split(" ", 1)[1].strip()
+        claims = _decode_jwt_noverify(jwt_token)
+        sub = claims.get("sub")
+        if sub:
+            tenant_id = _normalize_tenant_id(str(sub))
+
+    # NEW: кладём в state для мягкой проверки сессии
+    request.state.supabase_token = jwt_token or ""
+
+    request.state.tenant_id = tenant_id
+
+    kaspi_tok = resolve_kaspi_token(tenant_id) if tenant_id else None
+    request.state.kaspi_token = kaspi_tok or ""
+    token_token = kaspi_token_ctx.set(kaspi_tok or "")
+
+    try:
+        response = await call_next(request)
+    finally:
+        kaspi_token_ctx.reset(token_token)
+
+    return response
+    
 def _decode_jwt_noverify(token: str) -> Dict:
     """
     Безопасно достаём payload из JWT без проверки подписи
