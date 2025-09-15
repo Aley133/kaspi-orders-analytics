@@ -51,24 +51,20 @@ def db() -> Iterable[Connection]:
 # ──────────────────────────────────────────────────────────────────────────────
 def require_api_key(request: Request):
     """
-    Пропускаем, если:
-      1) у запроса есть Supabase bearer (request.state.supabase_token),
-      2) BRIDGE_API_KEY не задан,
-      3) либо X-API-Key/param api_key совпадает с BRIDGE_API_KEY.
-    Иначе — 401.
+    Пускаем либо по Supabase Bearer (если включено ALLOW_SUPABASE),
+    либо по X-API-Key/ ?api_key=... когда задан BRIDGE_API_KEY.
     """
-    # 1) Supabase сессия от мидлвары auth.attach_kaspi_token_middleware
-    if getattr(request.state, "supabase_token", ""):
+    auth_hdr = request.headers.get("authorization") or request.headers.get("Authorization") or ""
+    if ALLOW_SUPABASE and auth_hdr.lower().startswith("bearer "):
         return True
-    # 2) API-ключ не настроен → считаем открытую конфигурацию
+
     if not REQ_API_KEY:
         return True
-    # 3) Явный ключ
-    provided = request.headers.get("X-API-Key") or request.query_params.get("api_key")
-    if provided == REQ_API_KEY:
-        return True
-    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
 
+    provided = request.headers.get("X-API-Key") or request.query_params.get("api_key")
+    if provided != REQ_API_KEY:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API key")
+    return True
 # ──────────────────────────────────────────────────────────────────────────────
 # Инициализация таблиц (кросс-диалектная)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -306,8 +302,8 @@ def ping(_: bool = Depends(require_api_key)):
             cat = 0
     return {"ok": True, "dialect": DIALECT, "bridge_lines": int(c), "batches": int(b), "categories": int(cat), "ts": NOW_MS()}
 
-@router.post(f"{PFX[0]}/sync-by-ids}")
-@router.post(f"{PFX[1]}/sync-by-ids}")
+@router.post(f"{PFX[0]}/sync-by-ids")
+@router.post(f"{PFX[1]}/sync-by-ids")
 def sync_by_ids(items: List[BridgeLineIn], _: bool = Depends(require_api_key)):
     if not items:
         return {"inserted": 0, "updated": 0, "skipped": 0}
