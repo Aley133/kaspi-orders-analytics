@@ -46,28 +46,20 @@ def db() -> Iterable[Connection]:
     with _engine.begin() as con:
         yield con
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Безопасность: либо Supabase-сессия, либо X-API-Key (если задан)
-# ──────────────────────────────────────────────────────────────────────────────
+ALLOW_SUPABASE = (os.getenv("BRIDGE_ALLOW_SUPABASE", "true").lower() in ("1","true","yes","on"))
+REQ_API_KEY = (os.getenv("BRIDGE_API_KEY") or "").strip() or None
+
 def require_api_key(request: Request):
-    """
-    Пускаем либо по Supabase Bearer (если включено ALLOW_SUPABASE),
-    либо по X-API-Key/ ?api_key=... когда задан BRIDGE_API_KEY.
-    """
     auth_hdr = request.headers.get("authorization") or request.headers.get("Authorization") or ""
     if ALLOW_SUPABASE and auth_hdr.lower().startswith("bearer "):
         return True
-
     if not REQ_API_KEY:
         return True
-
     provided = request.headers.get("X-API-Key") or request.query_params.get("api_key")
     if provided != REQ_API_KEY:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API key")
+        raise HTTPException(status_code=401, detail="Invalid API key")
     return True
-# ──────────────────────────────────────────────────────────────────────────────
-# Инициализация таблиц (кросс-диалектная)
-# ──────────────────────────────────────────────────────────────────────────────
+    
 def _init_bridge_tables() -> None:
     with _engine.begin() as con:
         if IS_PG:
