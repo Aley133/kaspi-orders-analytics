@@ -32,7 +32,7 @@ except Exception:
 # DB backends (PG via SQLAlchemy / fallback SQLite)
 # ──────────────────────────────────────────────────────────────────────────────
 CONNECT_ARGS = {"prepare_threshold": None}
-engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True, connect_args=CONNECT_ARGS)
+
 
 try:
     from sqlalchemy import create_engine, text
@@ -40,7 +40,18 @@ try:
 except Exception:
     _SQLA_OK = False
 
-DATABASE_URL = os.getenv("DATABASE_URL")  # e.g. postgresql+psycopg://...
+DATABASE_URL = (os.getenv("DATABASE_URL") or "").strip()  # PG URL из окружения
+# psycopg3: полностью отключаем server-side prepared statements
+CONNECT_ARGS: Dict[str, Any] = {"prepare_threshold": 0}
+
+def _sa_url(url: str) -> str:
+    # Нормализуем схему к драйверу psycopg3
+    if url.startswith("postgres://"):
+        return url.replace("postgres://", "postgresql+psycopg://", 1)
+    if url.startswith("postgresql://"):
+        return url.replace("postgresql://", "postgresql+psycopg://", 1)
+    return url
+
 _USE_PG = bool(DATABASE_URL and _SQLA_OK)
 
 def _resolve_db_path() -> str:
@@ -65,9 +76,17 @@ if DB_PATH != _OLD_PATH and os.path.exists(_OLD_PATH) and not os.path.exists(DB_
     except Exception:
         pass
 
+# Создаём движок PG (если он нужен). Для SQLite движок не нужен — открываем вручную в _db().
 if _USE_PG:
-    _engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True)
-
+    _engine = create_engine(
+        _sa_url(DATABASE_URL),
+        pool_pre_ping=True,
+        future=True,
+        connect_args=CONNECT_ARGS,
+    )
+else:
+    _engine = None  # для SQLite используем _db() с sqlite3
+    
 @contextmanager
 def _db():
     if _USE_PG:
