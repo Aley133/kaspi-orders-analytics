@@ -4,63 +4,187 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 const DEBUG = true;
 const log = (...a) => DEBUG && console.log("[auth]", ...a);
 
+// ─────────────────────────────────────────────────────────────────────────────
+// helpers
+// ─────────────────────────────────────────────────────────────────────────────
 async function getMeta() {
   const r = await fetch("/auth/meta", { credentials: "same-origin" });
   if (!r.ok) throw new Error(`/auth/meta failed: ${r.status}`);
   return r.json();
 }
 
-function okStatus(code) { return code >= 200 && code < 300; }
+function ok(code) { return code >= 200 && code < 300; }
+function isAbsolute(u) { try { new URL(u); return true; } catch { return false; } }
+function toPath(u) { return isAbsolute(u) ? new URL(u).pathname : u; }
 
-async function fetchJson(url, opts = {}) {
-  const r = await fetch(url, opts);
-  if (!okStatus(r.status)) {
-    const txt = await r.text().catch(() => "");
-    const err = new Error(`${url} -> ${r.status} ${txt}`);
-    err.status = r.status;
-    throw err;
-  }
-  return r.json().catch(() => ({}));
-}
+// какие пути автоматически подписываем Bearer'ом
+const AUTH_PATHS = [/^\/(orders|profit|settings|jobs)\b/];
 
-async function createSb() {
-  const meta = await getMeta();
-  return createClient(meta.SUPABASE_URL, meta.SUPABASE_ANON_KEY, {
-    auth: { persistSession: true, autoRefreshToken: true },
-  });
-}
-
-// внутреннее хранилище клиента
+// ─────────────────────────────────────────────────────────────────────────────
+// Supabase
+// ─────────────────────────────────────────────────────────────────────────────
 let sbClient = null;
+let cachedToken = null;
 
+async function initSupabase() {
+  const meta = await getMeta();
+  sbClient = createClient(meta.SUPABASE_URL, meta.SUPABASE_ANON_KEY, {
+    auth: {
+      persistSession: true,
+      autoRefreshToken: true,
+      detectSessionInUrl: true,
+    },
+  });
+
+  // начальный токен
+  try {
+    const { data: { session } } = await sbClient.auth.getSession();
+    cachedToken = session?.access_token || null;
+  } catch { cachedToken = null; }
+
+  // слежение за изменениями
+  sbClient.auth.onAuthStateChange((event, session) => {
+    cachedToken = session?.access_token || null;
+    log("auth event:", event, !!cachedToken);
+    if (event === "SIGNED_OUT") {
+      // если мы уже на логине — ничего
+      if (!/\/ui\/login\.html$/.test(location.pathname)) {
+        location.replace("/ui/login.html");
+      }
+    }
+  });
+
+  // после инициализации — перехватываем fetch
+  installAuthFetch();
+  log("supabase ready");
+}
+
+async function currentToken() {
+  // быстрый путь
+  if (cachedToken) return cachedToken;
+  try {
+    const { data: { session } } = await sbClient.auth.getSession();
+    cachedToken = session?.access_token || null;
+  } catch { cachedToken = null; }
+  return cachedToken;
+}
+
+async function withAuthHeaders(init = {}, forceToken) {
+  const headers = new Headers(init.headers || {});
+  if (!headers.has("Authorization")) {
+    const tok = forceToken ?? (await currentToken());
+    if (tok) headers.set("Authorization", `Bearer ${tok}`);
+  }
+  return { ...init, headers };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Глобальный перехват fetch: автоматически добавляем Bearer и обрабатываем 401
+// ─────────────────────────────────────────────────────────────────────────────
+function installAuthFetch() {
+  if (!window._authFetchPatched) {
+    const origFetch = window.fetch.bind(window);
+
+    window.fetch = async (input, init = {}) => {
+      const urlStr = typeof input === "string" ? input : input.url;
+      const sameOrigin = !isAbsolute(urlStr) || urlStr.startsWith(location.origin);
+      const path = toPath(urlStr);
+
+      const needsAuth =
+        sameOrigin &&
+        AUTH_PATHS.some((rx) => rx.test(path)) &&
+        !/^\/ui\//.test(path) &&
+        !/\.((html)|(css)|(js)|(png)|(jpg)|(svg)|(ico))$/i.test(path);
+
+      let init1 = init;
+      if (needsAuth) init1 = await withAuthHeaders(init1);
+
+      let res = await origFetch(input, init1);
+
+      // Если истек токен — пробуем тихо обновить и повторить 1 раз
+      if (needsAuth && res.status === 401) {
+        try {
+          // попытка refresh
+          await sbClient.auth.refreshSession();
+          const tok2 = await currentToken();
+          if (tok2) {
+            const init2 = await withAuthHeaders(init, tok2);
+            res = await origFetch(input, init2);
+          }
+        } catch {
+          // игнор
+        }
+
+        // если всё ещё 401 — выходим и ведём на логин
+        if (res.status === 401) {
+          try { await sbClient.auth.signOut(); } catch {}
+          if (!/\/ui\/login\.html$/.test(location.pathname)) {
+            location.replace("/ui/login.html");
+          }
+        }
+      }
+
+      return res;
+    };
+
+    window._authFetchPatched = true;
+    log("fetch patched (auth header auto-inject)");
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Публичный API
+// ─────────────────────────────────────────────────────────────────────────────
 export const Auth = {
-  // ждать инициализации
-  ready: (async () => {
-    sbClient = await createSb();
-    log("supabase ready");
-  })(),
+  // Дождаться инициализации
+  ready: initSupabase(),
 
   get sb() { return sbClient; },
 
   async authHeader() {
-    const { data: { session } } = await sbClient.auth.getSession();
-    const tok = session?.access_token;
-    return tok ? { "Authorization": `Bearer ${tok}` } : {};
+    const tok = await currentToken();
+    return tok ? { Authorization: `Bearer ${tok}` } : {};
   },
 
-  // если есть сессия — уходим на UI или на страницу настроек
+  // Универсальные обёртки поверх fetch
+  async apiFetch(url, init = {}) {
+    return fetch(url, init); // уже пропатчен, Bearer проставится сам
+  },
+
+  async fetchJson(url, init = {}) {
+    const r = await Auth.apiFetch(url, init);
+    if (!ok(r.status)) {
+      const txt = await r.text().catch(() => "");
+      const err = new Error(`${url} -> ${r.status} ${txt}`);
+      err.status = r.status;
+      throw err;
+    }
+    return r.json().catch(() => ({}));
+  },
+
+  // Если есть сессия — уходим на UI/настройки
   async bounceIfAuthed() {
     const { data: { session } } = await sbClient.auth.getSession();
     log("session?", !!session);
     if (!session) return;
 
     try {
-      await fetchJson("/settings/me", { headers: await this.authHeader() });
+      await Auth.fetchJson("/settings/me");
       location.replace("/ui/");
     } catch (e) {
       if (e.status === 404) location.replace("/ui/settings.html");
       else location.replace("/ui/");
     }
+  },
+
+  // Требовать аутентификацию на защищённых страницах
+  async requireAuth() {
+    const { data: { session } } = await sbClient.auth.getSession();
+    if (!session) {
+      location.replace("/ui/login.html");
+      throw new Error("No session");
+    }
+    return session;
   },
 
   // ---------- SMS OTP ----------
@@ -104,7 +228,7 @@ export const Auth = {
 
   async redirectAfterLogin() {
     try {
-      await fetchJson("/settings/me", { headers: await this.authHeader() });
+      await Auth.fetchJson("/settings/me");
       location.replace("/ui/");
     } catch (e) {
       if (e.status === 404) location.replace("/ui/settings.html");
@@ -113,25 +237,16 @@ export const Auth = {
   },
 };
 
+// signOut + зачистка локального состояния
 Auth.signOutAndGoLogin = async function () {
   try { await Auth.ready; } catch {}
   try { await Auth.sb?.auth?.signOut?.(); } catch {}
-  try { localStorage.removeItem('KASPI_API_KEY'); } catch {}
-  // На всякий — подчистим возможные следы
+  try { localStorage.removeItem("KASPI_API_KEY"); } catch {}
+  try { localStorage.removeItem("BRIDGE_API_KEY"); } catch {}
   try { sessionStorage.clear(); } catch {}
-  // Возврат на страницу логина
-  location.replace('/ui/login.html');
+  location.replace("/ui/login.html");
 };
-// в самый низ файла, рядом с export const Auth = { ... }
-Auth.requireAuth = async () => {
-  await Auth.ready; // ждём инициализации клиента
-  const { data: { session } } = await Auth.sb.auth.getSession();
-  if (!session) {
-    location.replace("/ui/login.html");
-    throw new Error("No session");
-  }
-  return session;
-};
-// опционально экспортируем в глобал для отладки
-// (можно удалить)
+
+// Опционально в window для отладки
 window.Auth = Auth;
+ы
