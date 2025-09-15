@@ -1,3 +1,4 @@
+# app/api/bridge_v2.py
 from __future__ import annotations
 
 import os
@@ -7,40 +8,37 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy import create_engine, text
-# ──────────────────────────────────────────────────────────────────────────────
-# DB backend: всегда через SQLAlchemy (и для Postgres, и для SQLite)
-# ──────────────────────────────────────────────────────────────────────────────
+
 from contextlib import contextmanager
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine, Connection
+from sqlalchemy.orm import sessionmaker
 
 router = APIRouter(tags=["bridge_v2"])
 PFX = ("/profit/bridge", "/bridge")
 
-# --------- ENV / конфиг ----------
+# ──────────────────────────────────────────────────────────────────────────────
+# ENV / конфиг
+# ──────────────────────────────────────────────────────────────────────────────
 REQ_API_KEY = (os.getenv("BRIDGE_API_KEY") or "").strip() or None
-
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+DB_PATH = os.getenv("DB_PATH", "/data/kaspi-orders.sqlite3")
 
 def _sa_url(url: str) -> str:
-    # для SQLAlchemy на psycopg3
+    # SQLAlchemy + psycopg (pg8000/psycopg3)
     return url.replace("postgresql://", "postgresql+psycopg://", 1)
 
 if DATABASE_URL:
     SA_URL = _sa_url(DATABASE_URL)
-    _engine = create_engine(SA_URL, pool_pre_ping=True, future=True)
+    _engine: Engine = create_engine(SA_URL, pool_pre_ping=True, future=True)
     DIALECT = _engine.dialect.name
 else:
-    DB_PATH = os.getenv("DB_PATH", "/data/kaspi-orders.sqlite3")
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     _engine = create_engine(f"sqlite+pysqlite:///{DB_PATH}", future=True)
     DIALECT = "sqlite"
 
-SessionLocal = sessionmaker(bind=_engine, autoflush=False, autocommit=False)
-
 IS_PG = DIALECT.startswith("postgres")
+SessionLocal = sessionmaker(bind=_engine, autoflush=False, autocommit=False)
 NOW_MS = lambda: int(time.time() * 1000)
 
 @contextmanager
@@ -48,59 +46,104 @@ def db() -> Iterable[Connection]:
     with _engine.begin() as con:
         yield con
 
-# --------- Безопасность ----------
+# ──────────────────────────────────────────────────────────────────────────────
+# Безопасность: либо Supabase-сессия, либо X-API-Key (если задан)
+# ──────────────────────────────────────────────────────────────────────────────
 def require_api_key(request: Request):
+    """
+    Пропускаем, если:
+      1) у запроса есть Supabase bearer (request.state.supabase_token),
+      2) BRIDGE_API_KEY не задан,
+      3) либо X-API-Key/param api_key совпадает с BRIDGE_API_KEY.
+    Иначе — 401.
+    """
+    # 1) Supabase сессия от мидлвары auth.attach_kaspi_token_middleware
+    if getattr(request.state, "supabase_token", ""):
+        return True
+    # 2) API-ключ не настроен → считаем открытую конфигурацию
     if not REQ_API_KEY:
         return True
+    # 3) Явный ключ
     provided = request.headers.get("X-API-Key") or request.query_params.get("api_key")
-    if provided != REQ_API_KEY:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API key")
-    return True
+    if provided == REQ_API_KEY:
+        return True
+    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Инициализация только наших таблиц (batches/products/categories уже создаёт products.py)
+# Инициализация таблиц (кросс-диалектная)
 # ──────────────────────────────────────────────────────────────────────────────
 def _init_bridge_tables() -> None:
     with _engine.begin() as con:
-        # batches
-        con.execute(text("""
-            create table if not exists public.batches (
-              id             bigserial primary key,
-              sku            text not null,
-              unit_cost      numeric not null default 0,
-              commission_pct numeric not null default 0,
-              date           date,
-              created_at     timestamptz not null default now()
-            )
-        """))
-        con.execute(text("""
-            create index if not exists idx_batches_sku on public.batches(sku)
-        """))
+        if IS_PG:
+            con.execute(text("""
+                CREATE TABLE IF NOT EXISTS public.batches (
+                  id             bigserial PRIMARY KEY,
+                  sku            text NOT NULL,
+                  unit_cost      numeric NOT NULL DEFAULT 0,
+                  commission_pct numeric NOT NULL DEFAULT 0,
+                  date           date,
+                  created_at     timestamptz NOT NULL DEFAULT now()
+                )
+            """))
+            con.execute(text("CREATE INDEX IF NOT EXISTS idx_batches_sku ON public.batches(sku)"))
 
-        # bridge_lines
-        con.execute(text("""
-            create table if not exists bridge_lines(
-              order_id     text not null,
-              order_code   text,
-              state        text,
-              date_utc_ms  bigint,
-              sku          text,
-              title        text,
-              qty          integer default 1,
-              unit_price   double precision default 0,
-              total_price  double precision default 0,
-              line_index   integer not null,
-              created_at   bigint,
-              updated_at   bigint,
-              primary key(order_id, line_index)
-            )
-        """))
-        con.execute(text("create index if not exists ix_lines_date  on bridge_lines(date_utc_ms)"))
-        con.execute(text("create index if not exists ix_lines_state on bridge_lines(state)"))
-        con.execute(text("create index if not exists ix_lines_sku   on bridge_lines(sku)"))
-        con.execute(text("create index if not exists ix_lines_code  on bridge_lines(order_code)"))
+            con.execute(text("""
+                CREATE TABLE IF NOT EXISTS public.bridge_lines(
+                  order_id     text NOT NULL,
+                  order_code   text,
+                  state        text,
+                  date_utc_ms  bigint,
+                  sku          text,
+                  title        text,
+                  qty          integer DEFAULT 1,
+                  unit_price   double precision DEFAULT 0,
+                  total_price  double precision DEFAULT 0,
+                  line_index   integer NOT NULL,
+                  created_at   bigint,
+                  updated_at   bigint,
+                  PRIMARY KEY(order_id, line_index)
+                )
+            """))
+            con.execute(text("CREATE INDEX IF NOT EXISTS ix_lines_date  ON public.bridge_lines(date_utc_ms)"))
+            con.execute(text("CREATE INDEX IF NOT EXISTS ix_lines_state ON public.bridge_lines(state)"))
+            con.execute(text("CREATE INDEX IF NOT EXISTS ix_lines_sku   ON public.bridge_lines(sku)"))
+            con.execute(text("CREATE INDEX IF NOT EXISTS ix_lines_code  ON public.bridge_lines(order_code)"))
+        else:
+            # SQLite
+            con.execute(text("""
+                CREATE TABLE IF NOT EXISTS batches (
+                  id             integer PRIMARY KEY AUTOINCREMENT,
+                  sku            text NOT NULL,
+                  unit_cost      real NOT NULL DEFAULT 0,
+                  commission_pct real NOT NULL DEFAULT 0,
+                  date           text,
+                  created_at     integer NOT NULL DEFAULT 0
+                )
+            """))
+            con.execute(text("CREATE INDEX IF NOT EXISTS idx_batches_sku ON batches(sku)"))
 
-# вызывать один раз при импорте модуля
+            con.execute(text("""
+                CREATE TABLE IF NOT EXISTS bridge_lines(
+                  order_id     text NOT NULL,
+                  order_code   text,
+                  state        text,
+                  date_utc_ms  integer,
+                  sku          text,
+                  title        text,
+                  qty          integer DEFAULT 1,
+                  unit_price   real DEFAULT 0,
+                  total_price  real DEFAULT 0,
+                  line_index   integer NOT NULL,
+                  created_at   integer,
+                  updated_at   integer,
+                  PRIMARY KEY(order_id, line_index)
+                )
+            """))
+            con.execute(text("CREATE INDEX IF NOT EXISTS ix_lines_date  ON bridge_lines(date_utc_ms)"))
+            con.execute(text("CREATE INDEX IF NOT EXISTS ix_lines_state ON bridge_lines(state)"))
+            con.execute(text("CREATE INDEX IF NOT EXISTS ix_lines_sku   ON bridge_lines(sku)"))
+            con.execute(text("CREATE INDEX IF NOT EXISTS ix_lines_code  ON bridge_lines(order_code)"))
+
 _init_bridge_tables()
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -143,17 +186,18 @@ class OrdersResponse(BaseModel):
     stats: Dict[str, float] = Field(default_factory=dict)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Утилиты дат
+# Даты / утилиты
 # ──────────────────────────────────────────────────────────────────────────────
 def _to_ms(value: Any) -> Optional[int]:
     if value is None:
         return None
-    # int seconds/ms
+    # число (сек/мс)
     try:
         n = int(str(value).strip())
         return n if n >= 10_000_000_000 else n * 1000
     except Exception:
         pass
+    # ISO
     s = str(value).strip()
     try:
         if s.endswith("Z"):
@@ -183,36 +227,35 @@ def _canon_sku(s: Optional[str]) -> Optional[str]:
     return v or None
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Привязка к твоей схеме: batches / products / categories
+# Привязка к batches / products / categories
 # ──────────────────────────────────────────────────────────────────────────────
 def _latest_batch(con: Connection, sku: str) -> Optional[Dict[str, Any]]:
     """
-    Возвращает последнюю партию для sku:
-    - сначала по batches.date (DESC)
+    Последняя партия по sku:
+    - сперва по batches.date (DESC)
     - затем по created_at (DESC)
     """
-    # В PG date — DATE; в SQLite date — TEXT 'YYYY-MM-DD'. Оба корректно сортируются по DESC.
-    row = con.execute(
-        text("""
+    if IS_PG:
+        row = con.execute(text("""
             SELECT unit_cost, commission_pct
             FROM batches
             WHERE sku = :sku
             ORDER BY COALESCE(date::text, '') DESC, COALESCE(CAST(created_at AS TEXT), '') DESC
             LIMIT 1
-        """) if IS_PG else text("""
+        """), {"sku": sku}).mappings().first()
+    else:
+        row = con.execute(text("""
             SELECT unit_cost, commission_pct
             FROM batches
             WHERE sku = :sku
             ORDER BY COALESCE(date, '') DESC, COALESCE(created_at, '') DESC
             LIMIT 1
-        """),
-        {"sku": sku}
-    ).mappings().first()
+        """), {"sku": sku}).mappings().first()
     return dict(row) if row else None
 
 def _category_commission_pct(con: Connection, sku: str) -> Optional[float]:
     """
-    Суммируем base_percent + extra_percent + tax_percent по категории продукта.
+    base_percent + extra_percent + tax_percent по категории продукта.
     """
     row = con.execute(text("""
         SELECT c.base_percent, c.extra_percent, c.tax_percent
@@ -230,7 +273,7 @@ def _category_commission_pct(con: Connection, sku: str) -> Optional[float]:
 
 def _cost_commission_for_sku(con: Connection, sku: str) -> Tuple[float, float]:
     """
-    Возвращает (unit_cost, commission_pct).
+    (unit_cost, commission_pct)
     Приоритет комиссии: batches.commission_pct → сумма процентов категории.
     """
     b = _latest_batch(con, sku)
@@ -250,10 +293,9 @@ def _cost_commission_for_sku(con: Connection, sku: str) -> Tuple[float, float]:
 # ──────────────────────────────────────────────────────────────────────────────
 @router.get(f"{PFX[0]}/ping")
 @router.get(f"{PFX[1]}/ping")
-def ping():
+def ping(_: bool = Depends(require_api_key)):
     with db() as con:
         c = con.execute(text("SELECT COUNT(*) AS n FROM bridge_lines")).scalar() or 0
-        # для справки — сколько партий и категорий доступно
         try:
             b = con.execute(text("SELECT COUNT(*) FROM batches")).scalar() or 0
         except Exception:
@@ -264,17 +306,16 @@ def ping():
             cat = 0
     return {"ok": True, "dialect": DIALECT, "bridge_lines": int(c), "batches": int(b), "categories": int(cat), "ts": NOW_MS()}
 
-@router.post(f"{PFX[0]}/sync-by-ids")
-@router.post(f"{PFX[1]}/sync-by-ids")
+@router.post(f"{PFX[0]}/sync-by-ids}")
+@router.post(f"{PFX[1]}/sync-by-ids}")
 def sync_by_ids(items: List[BridgeLineIn], _: bool = Depends(require_api_key)):
     if not items:
         return {"inserted": 0, "updated": 0, "skipped": 0}
 
-    # локальный автоиндекс строк
     counters: Dict[str, int] = {}
-
     now_ms = NOW_MS()
-    upsert_sql = text(f"""
+
+    upsert_sql = text("""
         INSERT INTO bridge_lines
           (order_id, order_code, state, date_utc_ms, sku, title, qty, unit_price, total_price, line_index, created_at, updated_at)
         VALUES
@@ -364,7 +405,7 @@ def sync_by_ids(items: List[BridgeLineIn], _: bool = Depends(require_api_key)):
             updated += 1
 
     processed = len(items) - skipped
-    inserted = max(0, processed - updated)  # для отчёта
+    inserted = max(0, processed - updated)
     return {"inserted": inserted, "updated": updated, "skipped": skipped}
 
 def _collect_orders(where_sql: str, params: Dict[str, Any], order_dir: str) -> OrdersResponse:
@@ -460,7 +501,7 @@ def by_orders(
         params.update({f"s{i}": v for i, v in enumerate(states)})
     return _collect_orders(" AND ".join(parts), params, order_dir)
 
-# ---------- «MS sync» совместимость: считаем покрытие себестоимости ----------
+# ---------- «MS sync» совместимость ----------
 @router.post(f"{PFX[0]}/ms/sync-costs")
 @router.post(f"{PFX[1]}/ms/sync-costs")
 def ms_sync_costs(
@@ -483,7 +524,6 @@ def ms_sync_costs(
             sku_rows = list(con.execute(text("SELECT DISTINCT sku FROM bridge_lines WHERE sku IS NOT NULL")).mappings())
 
         skus = [r["sku"] for r in sku_rows if r["sku"]]
-        # считаем, для скольких SKU есть партии
         if not skus:
             return {"ok": True, "synced": 0, "examples": {}}
         rows = list(con.execute(
