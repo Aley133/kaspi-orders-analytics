@@ -31,6 +31,9 @@ except Exception:
 # ──────────────────────────────────────────────────────────────────────────────
 # DB backends (PG via SQLAlchemy / fallback SQLite)
 # ──────────────────────────────────────────────────────────────────────────────
+CONNECT_ARGS = {"prepare_threshold": None}
+engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True, connect_args=CONNECT_ARGS)
+
 try:
     from sqlalchemy import create_engine, text
     _SQLA_OK = True
