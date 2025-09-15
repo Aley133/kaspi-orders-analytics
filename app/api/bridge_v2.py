@@ -5,7 +5,6 @@ import os
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
-
 from contextlib import contextmanager
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -13,8 +12,6 @@ from pydantic import BaseModel, Field
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine, Connection
-from sqlalchemy.orm import sessionmaker
-
 
 router = APIRouter(tags=["bridge_v2"])
 PFX = ("/profit/bridge", "/bridge")
@@ -22,56 +19,53 @@ PFX = ("/profit/bridge", "/bridge")
 # ──────────────────────────────────────────────────────────────────────────────
 # ENV / конфиг
 # ──────────────────────────────────────────────────────────────────────────────
-ALLOW_SUPABASE = (os.getenv("BRIDGE_ALLOW_SUPABASE", "true").lower() in ("1", "true", "yes", "on"))
+ALLOW_SUPABASE = (os.getenv("BRIDGE_ALLOW_SUPABASE", "true").strip().lower() in ("1", "true", "yes", "on"))
 REQ_API_KEY = (os.getenv("BRIDGE_API_KEY") or "").strip() or None
 
 DATABASE_URL = (os.getenv("DATABASE_URL") or "").strip()
 DB_PATH = os.getenv("DB_PATH", "/data/kaspi-orders.sqlite3").strip()
 
-# psycopg3: выключаем server-side prepared statements (исправляет DuplicatePreparedStatement)
-CONNECT_ARGS: Dict[str, Any] = {"prepare_threshold": 0}
-
+# psycopg3: обязательно отключаем server-side prepared statements
+PG_CONNECT_ARGS: Dict[str, Any] = {"prepare_threshold": 0}
 
 def _sa_url(url: str) -> str:
     """Нормализуем URL под SQLAlchemy + psycopg3."""
-    if url.startswith("postgresql://"):
-        return url.replace("postgresql://", "postgresql+psycopg://", 1)
     if url.startswith("postgres://"):
         return url.replace("postgres://", "postgresql+psycopg://", 1)
+    if url.startswith("postgresql://"):
+        return url.replace("postgresql://", "postgresql+psycopg://", 1)
     return url
 
-
-# Создание движка БД
+# Создание движка
 if DATABASE_URL:
     SA_URL = _sa_url(DATABASE_URL)
     _engine: Engine = create_engine(
         SA_URL,
-        pool_pre_ping=True,
         future=True,
-        connect_args=CONNECT_ARGS,  # <— ВАЖНО для psycopg3
+        pool_pre_ping=True,
+        connect_args=PG_CONNECT_ARGS,  # <— ключ к решению DuplicatePreparedStatement
+        pool_recycle=1800,
     )
-    DIALECT = _engine.dialect.name
+    DIALECT = _engine.dialect.name  # 'postgresql'
 else:
-    # Fallback на SQLite для локального запуска
+    # SQLite fallback для локального запуска
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     _engine = create_engine(
         f"sqlite+pysqlite:///{DB_PATH}",
         future=True,
+        connect_args={"check_same_thread": False},
     )
     DIALECT = "sqlite"
 
 IS_PG = DIALECT.startswith("postgres")
-SessionLocal = sessionmaker(bind=_engine, autoflush=False, autocommit=False)
 NOW_MS = lambda: int(time.time() * 1000)
-
 
 @contextmanager
 def db() -> Iterable[Connection]:
     with _engine.begin() as con:
         yield con
 
-
-def require_api_key(request: Request):
+def require_api_key(request: Request) -> bool:
     """
     Авторизация:
     - если приходит Bearer (Supabase) и это разрешено — пускаем;
@@ -88,14 +82,12 @@ def require_api_key(request: Request):
         raise HTTPException(status_code=401, detail="Invalid API key")
     return True
 
-
 # ──────────────────────────────────────────────────────────────────────────────
-# Инициализация таблиц моста
+# Инициализация таблиц
 # ──────────────────────────────────────────────────────────────────────────────
 def _init_bridge_tables() -> None:
     with _engine.begin() as con:
         if IS_PG:
-            # batches (партии; опционально, для себестоимости/комиссий)
             con.execute(text("""
                 CREATE TABLE IF NOT EXISTS public.batches (
                   id             bigserial PRIMARY KEY,
@@ -108,7 +100,6 @@ def _init_bridge_tables() -> None:
             """))
             con.execute(text("CREATE INDEX IF NOT EXISTS idx_batches_sku ON public.batches(sku)"))
 
-            # bridge_lines — нормализованные строки заказов
             con.execute(text("""
                 CREATE TABLE IF NOT EXISTS public.bridge_lines(
                   order_id     text NOT NULL,
@@ -131,7 +122,6 @@ def _init_bridge_tables() -> None:
             con.execute(text("CREATE INDEX IF NOT EXISTS ix_lines_sku   ON public.bridge_lines(sku)"))
             con.execute(text("CREATE INDEX IF NOT EXISTS ix_lines_code  ON public.bridge_lines(order_code)"))
         else:
-            # SQLite
             con.execute(text("""
                 CREATE TABLE IF NOT EXISTS batches (
                   id             integer PRIMARY KEY AUTOINCREMENT,
@@ -166,7 +156,6 @@ def _init_bridge_tables() -> None:
             con.execute(text("CREATE INDEX IF NOT EXISTS ix_lines_sku   ON bridge_lines(sku)"))
             con.execute(text("CREATE INDEX IF NOT EXISTS ix_lines_code  ON bridge_lines(order_code)"))
 
-
 _init_bridge_tables()
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -185,7 +174,6 @@ class BridgeLineIn(BaseModel):
     amount: Optional[float] = None
     line_index: Optional[int] = None
 
-
 class OrderItemOut(BaseModel):
     sku: Optional[str] = None
     title: Optional[str] = None
@@ -196,7 +184,6 @@ class OrderItemOut(BaseModel):
     commission: Optional[float] = None
     profit: Optional[float] = None
 
-
 class OrderOut(BaseModel):
     order_id: str
     order_code: Optional[str] = None
@@ -205,26 +192,22 @@ class OrderOut(BaseModel):
     items: List[OrderItemOut] = Field(default_factory=list)
     totals: Dict[str, float] = Field(default_factory=dict)
 
-
 class OrdersResponse(BaseModel):
     orders: List[OrderOut] = Field(default_factory=list)
     source_used: str = "bridge_v2"
     stats: Dict[str, float] = Field(default_factory=dict)
 
-
 # ──────────────────────────────────────────────────────────────────────────────
-# Утилиты дат/строк
+# Утилиты
 # ──────────────────────────────────────────────────────────────────────────────
 def _to_ms(value: Any) -> Optional[int]:
     if value is None:
         return None
-    # число (сек/мс)
     try:
         n = int(str(value).strip())
         return n if n >= 10_000_000_000 else n * 1000
     except Exception:
         pass
-    # ISO
     s = str(value).strip()
     try:
         if s.endswith("Z"):
@@ -237,18 +220,15 @@ def _to_ms(value: Any) -> Optional[int]:
     except Exception:
         return None
 
-
 def _ms_to_iso(ms: Optional[int]) -> Optional[str]:
     if ms is None:
         return None
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
 
-
 def _parse_csv(raw: Optional[str]) -> List[str]:
     if not raw:
         return []
     return [p.strip() for p in str(raw).split(",") if p.strip()]
-
 
 def _canon_sku(s: Optional[str]) -> Optional[str]:
     if not s:
@@ -256,60 +236,47 @@ def _canon_sku(s: Optional[str]) -> Optional[str]:
     v = str(s).strip()
     return v or None
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 # Себестоимость / комиссия
 # ──────────────────────────────────────────────────────────────────────────────
 def _latest_batch(con: Connection, sku: str) -> Optional[Dict[str, Any]]:
-    """
-    Последняя партия по sku:
-    - сперва по batches.date (DESC)
-    - затем по created_at (DESC)
-    """
     if IS_PG:
         row = con.execute(text("""
             SELECT unit_cost, commission_pct
-            FROM batches
-            WHERE sku = :sku
-            ORDER BY COALESCE(date::text, '') DESC, COALESCE(CAST(created_at AS TEXT), '') DESC
-            LIMIT 1
+              FROM batches
+             WHERE sku = :sku
+          ORDER BY COALESCE(date::text, '') DESC,
+                   COALESCE(CAST(created_at AS TEXT), '') DESC
+             LIMIT 1
         """), {"sku": sku}).mappings().first()
     else:
         row = con.execute(text("""
             SELECT unit_cost, commission_pct
-            FROM batches
-            WHERE sku = :sku
-            ORDER BY COALESCE(date, '') DESC, COALESCE(created_at, '') DESC
-            LIMIT 1
+              FROM batches
+             WHERE sku = :sku
+          ORDER BY COALESCE(date, '') DESC,
+                   COALESCE(created_at, '') DESC
+             LIMIT 1
         """), {"sku": sku}).mappings().first()
     return dict(row) if row else None
 
-
 def _category_commission_pct(con: Connection, sku: str) -> Optional[float]:
-    """
-    base_percent + extra_percent + tax_percent по категории продукта.
-    Требует таблицы products(category) и categories(base_percent, extra_percent, tax_percent).
-    """
     row = con.execute(text("""
         SELECT c.base_percent, c.extra_percent, c.tax_percent
-        FROM products p
-        JOIN categories c ON c.name = p.category
-        WHERE p.sku = :sku
-        LIMIT 1
+          FROM products p
+          JOIN categories c ON c.name = p.category
+         WHERE p.sku = :sku
+         LIMIT 1
     """), {"sku": sku}).mappings().first()
     if not row:
         return None
     base = float(row.get("base_percent") or 0.0)
     extra = float(row.get("extra_percent") or 0.0)
-    tax = float(row.get("tax_percent") or 0.0)
+    tax   = float(row.get("tax_percent") or 0.0)
     return base + extra + tax
 
-
 def _cost_commission_for_sku(con: Connection, sku: str) -> Tuple[float, float]:
-    """
-    (unit_cost, commission_pct)
-    Приоритет комиссии: batches.commission_pct → сумма процентов категории.
-    """
+    """Возвращает (unit_cost, commission_pct) для SKU."""
     b = _latest_batch(con, sku)
     unit_cost = float((b or {}).get("unit_cost") or 0.0)
     commission_pct: Optional[float] = None
@@ -321,7 +288,6 @@ def _cost_commission_for_sku(con: Connection, sku: str) -> Tuple[float, float]:
     if commission_pct is None:
         commission_pct = _category_commission_pct(con, sku) or 0.0
     return unit_cost, float(commission_pct)
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Endpoints
@@ -339,29 +305,18 @@ def ping(_: bool = Depends(require_api_key)):
             cat = con.execute(text("SELECT COUNT(*) FROM categories")).scalar() or 0
         except Exception:
             cat = 0
-    return {
-        "ok": True,
-        "dialect": DIALECT,
-        "bridge_lines": int(c),
-        "batches": int(b),
-        "categories": int(cat),
-        "ts": NOW_MS(),
-    }
-
+    return {"ok": True, "dialect": DIALECT, "bridge_lines": int(c), "batches": int(b), "categories": int(cat), "ts": NOW_MS()}
 
 @router.post(f"{PFX[0]}/sync-by-ids")
 @router.post(f"{PFX[1]}/sync-by-ids")
 def sync_by_ids(items: List[BridgeLineIn], _: bool = Depends(require_api_key)):
-    """
-    Принимает массив нормализованных линий заказа и upsert'ит их в bridge_lines.
-    """
+    """Upsert массива нормализованных строк заказов в bridge_lines."""
     if not items:
         return {"inserted": 0, "updated": 0, "skipped": 0}
 
     counters: Dict[str, int] = {}
     now_ms = NOW_MS()
 
-    # ON CONFLICT для PG/SQLite
     upsert_sql = text("""
         INSERT INTO bridge_lines
           (order_id, order_code, state, date_utc_ms, sku, title, qty, unit_price, total_price, line_index, created_at, updated_at)
@@ -382,7 +337,7 @@ def sync_by_ids(items: List[BridgeLineIn], _: bool = Depends(require_api_key)):
           (order_id, order_code, state, date_utc_ms, sku, title, qty, unit_price, total_price, line_index, created_at, updated_at)
         VALUES
           (:order_id, :order_code, :state, :date_utc_ms, :sku, :title, :qty, :unit_price, :total_price, :line_index, :created_at, :updated_at)
-        ON CONFLICT (order_id, line_index) DO UPDATE SET
+        ON CONFLICT(order_id, line_index) DO UPDATE SET
           order_code = excluded.order_code,
           state      = excluded.state,
           date_utc_ms= excluded.date_utc_ms,
@@ -398,16 +353,16 @@ def sync_by_ids(items: List[BridgeLineIn], _: bool = Depends(require_api_key)):
     skipped = 0
     with db() as con:
         for it in items:
-            order_id = (it.id or "").strip()
-            if not order_id:
+            oid = (it.id or "").strip()
+            if not oid:
                 skipped += 1
                 continue
 
             order_code = (it.code or "").strip() or None
-            state = (it.state or "").strip() or None
-            date_ms = _to_ms(it.date)
-            sku = _canon_sku(it.sku)
-            title = (it.title or "").strip() or None
+            state      = (it.state or "").strip() or None
+            date_ms    = _to_ms(it.date)
+            sku        = _canon_sku(it.sku)
+            title      = (it.title or "").strip() or None
 
             try:
                 qty = int(it.qty or 1)
@@ -440,46 +395,36 @@ def sync_by_ids(items: List[BridgeLineIn], _: bool = Depends(require_api_key)):
             if it.line_index is not None:
                 line_index = int(it.line_index)
             else:
-                line_index = counters.get(order_id, 0)
-                counters[order_id] = line_index + 1
+                line_index = counters.get(oid, 0)
+                counters[oid] = line_index + 1
 
             con.execute(upsert_sql, {
-                "order_id": order_id,
-                "order_code": order_code,
-                "state": state,
-                "date_utc_ms": date_ms,
-                "sku": sku,
-                "title": title,
-                "qty": qty,
-                "unit_price": unit,
-                "total_price": total,
-                "line_index": line_index,
-                "created_at": now_ms,
-                "updated_at": now_ms,
+                "order_id": oid, "order_code": order_code, "state": state, "date_utc_ms": date_ms,
+                "sku": sku, "title": title, "qty": qty, "unit_price": unit, "total_price": total,
+                "line_index": line_index, "created_at": now_ms, "updated_at": now_ms
             })
             updated += 1
 
     processed = len(items) - skipped
-    inserted = max(0, processed - updated)
+    inserted = max(0, processed - updated)  # точное различение не делаем — упрощённая метрика
     return {"inserted": inserted, "updated": updated, "skipped": skipped}
-
 
 def _collect_orders(where_sql: str, params: Dict[str, Any], order_dir: str) -> OrdersResponse:
     with db() as con:
         sql_orders = f"""
             SELECT order_id, order_code, MIN(date_utc_ms) AS date_utc_ms, MAX(state) AS state
-            FROM bridge_lines
-            WHERE {where_sql}
-            GROUP BY order_id, order_code
-            ORDER BY date_utc_ms {order_dir}
+              FROM bridge_lines
+             WHERE {where_sql}
+          GROUP BY order_id, order_code
+          ORDER BY date_utc_ms {order_dir}
         """
         o_rows = list(con.execute(text(sql_orders), params).mappings())
 
         sql_items = text("""
             SELECT sku, title, qty, unit_price, total_price
-            FROM bridge_lines
-            WHERE order_id = :oid
-            ORDER BY line_index ASC
+              FROM bridge_lines
+             WHERE order_id = :oid
+          ORDER BY line_index ASC
         """)
 
         out: List[OrderOut] = []
@@ -493,32 +438,25 @@ def _collect_orders(where_sql: str, params: Dict[str, Any], order_dir: str) -> O
             revenue = 0.0
 
             for ir in items_rows:
-                qty = int(ir["qty"] or 1)
+                qty  = int(ir["qty"] or 1)
                 unit = float(ir["unit_price"] or 0.0)
-                tot = float(ir["total_price"] or (unit * qty))
+                tot  = float(ir["total_price"] or (unit * qty))
                 revenue += tot
                 total_lines += 1
-                items.append(
-                    OrderItemOut(
-                        sku=ir["sku"], title=ir["title"], qty=qty, unit_price=unit, total_price=tot
-                    )
-                )
+                items.append(OrderItemOut(sku=ir["sku"], title=ir["title"], qty=qty, unit_price=unit, total_price=tot))
 
             revenue_sum += revenue
-            out.append(
-                OrderOut(
-                    order_id=oid,
-                    order_code=oc,
-                    state=r["state"],
-                    date=_ms_to_iso(r["date_utc_ms"]),
-                    items=items,
-                    totals={"revenue": round(revenue, 2)},
-                )
-            )
+            out.append(OrderOut(
+                order_id=oid,
+                order_code=oc,
+                state=r["state"],
+                date=_ms_to_iso(r["date_utc_ms"]),
+                items=items,
+                totals={"revenue": round(revenue, 2)},
+            ))
 
     stats = {"orders": len(out), "lines": total_lines, "revenue": round(revenue_sum, 2)}
     return OrdersResponse(orders=out, source_used="bridge_v2", stats=stats)
-
 
 @router.get(f"{PFX[0]}/by-orders")
 @router.get(f"{PFX[1]}/by-orders")
@@ -532,12 +470,11 @@ def by_orders(
     _: bool = Depends(require_api_key),
 ) -> OrdersResponse:
     states = _parse_csv(state)
-    order_dir = "ASC" if order.lower() == "asc" else "DESC"
+    order_dir = "ASC" if (order or "").lower() == "asc" else "DESC"
 
     codes_list = _parse_csv(codes)
-    ids_list = _parse_csv(ids)
+    ids_list   = _parse_csv(ids)
 
-    # Явный список заказов по кодам/ID
     if codes_list or ids_list:
         parts: List[str] = []
         params: Dict[str, Any] = {}
@@ -553,12 +490,11 @@ def by_orders(
         where_sql = " AND ".join(parts) if parts else "1=0"
         return _collect_orders(where_sql, params, order_dir)
 
-    # По датам
     if not (date_from and date_to):
         raise HTTPException(400, "Either provide (codes/ids) or (date_from & date_to)")
     try:
         start_ms = int(datetime.fromisoformat(date_from).replace(tzinfo=timezone.utc).timestamp() * 1000)
-        end_ms = int((datetime.fromisoformat(date_to).replace(tzinfo=timezone.utc).timestamp() + 86400) * 1000) - 1
+        end_ms   = int((datetime.fromisoformat(date_to).replace(tzinfo=timezone.utc).timestamp() + 86400) * 1000) - 1
     except Exception:
         raise HTTPException(400, "date_from/date_to must be YYYY-MM-DD")
 
@@ -569,8 +505,7 @@ def by_orders(
         params.update({f"s{i}": v for i, v in enumerate(states)})
     return _collect_orders(" AND ".join(parts), params, order_dir)
 
-
-# ---------- «MS sync» совместимость ----------
+# ---------- «MS sync» совместимость ---------- #
 @router.post(f"{PFX[0]}/ms/sync-costs")
 @router.post(f"{PFX[1]}/ms/sync-costs")
 def ms_sync_costs(
@@ -582,18 +517,17 @@ def ms_sync_costs(
         if date_from and date_to:
             try:
                 start_ms = int(datetime.fromisoformat(date_from).replace(tzinfo=timezone.utc).timestamp() * 1000)
-                end_ms = int((datetime.fromisoformat(date_to).replace(tzinfo=timezone.utc).timestamp() + 86400) * 1000) - 1
+                end_ms   = int((datetime.fromisoformat(date_to).replace(tzinfo=timezone.utc).timestamp() + 86400) * 1000) - 1
             except Exception:
                 raise HTTPException(400, "date_from/date_to must be YYYY-MM-DD")
-
             sku_rows = list(con.execute(text("""
-                SELECT DISTINCT sku FROM bridge_lines
-                WHERE sku IS NOT NULL AND date_utc_ms BETWEEN :a AND :b
+                SELECT DISTINCT sku
+                  FROM bridge_lines
+                 WHERE sku IS NOT NULL
+                   AND date_utc_ms BETWEEN :a AND :b
             """), {"a": start_ms, "b": end_ms}).mappings())
         else:
-            sku_rows = list(con.execute(text(
-                "SELECT DISTINCT sku FROM bridge_lines WHERE sku IS NOT NULL"
-            )).mappings())
+            sku_rows = list(con.execute(text("SELECT DISTINCT sku FROM bridge_lines WHERE sku IS NOT NULL")).mappings())
 
         skus = [r["sku"] for r in sku_rows if r["sku"]]
         if not skus:
@@ -606,8 +540,7 @@ def ms_sync_costs(
         present = [r["sku"] for r in rows]
         return {"ok": True, "synced": len(present), "examples": dict((s, True) for s in present[:5])}
 
-
-# ---------- Обогащённая версия: cost/commission/profit ----------
+# ---------- Обогащённая версия: cost/commission/profit ---------- #
 @router.get(f"{PFX[0]}/by-orders-enriched")
 @router.get(f"{PFX[1]}/by-orders-enriched")
 def by_orders_enriched(
@@ -629,7 +562,6 @@ def by_orders_enriched(
         for o in base.orders:
             total_cost = 0.0
             total_commission = 0.0
-
             for it in o.items:
                 sku = (it.sku or "").strip()
                 unit_cost, commission_pct = _cost_commission_for_sku(con, sku) if sku else (0.0, 0.0)
