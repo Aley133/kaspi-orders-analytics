@@ -213,9 +213,9 @@ def extract_ms(attrs: dict, field: str) -> Optional[int]:
         except Exception:
             return None
 
-def bucket_date(dt_local: datetime, *, use_bd: bool, business_day_start: str) -> str:
+def bucket_date(dt_local: datetime, use_bd: bool, bd_start: str) -> str:
     if use_bd:
-        shift = timedelta(hours=24) - _bd_delta(business_day_start)
+        shift = timedelta(hours=24) - _bd_delta(bd_start)
         return (dt_local + shift).date().isoformat()
     return dt_local.date().isoformat()
 
@@ -531,7 +531,7 @@ async def analytics(
     tzinfo = tzinfo_of(tz)
 
     eff_use_bd = USE_BUSINESS_DAY if use_bd is None else bool(use_bd)
-    eff_bds    = BUSINESS_DAY_START if not business_day_start else business_day_start
+    eff_bds    = business_day_start or BUSINESS_DAY_START
 
     start_dt = parse_date_local(start, tz)
     end_dt   = parse_date_local(end, tz) + timedelta(days=1) - timedelta(milliseconds=1)
