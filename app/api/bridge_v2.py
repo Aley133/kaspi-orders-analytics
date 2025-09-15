@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine, Connection
+from sqlalchemy.pool import NullPool
 
 router = APIRouter(tags=["bridge_v2"])
 PFX = ("/profit/bridge", "/bridge")
@@ -26,7 +27,7 @@ DATABASE_URL = (os.getenv("DATABASE_URL") or "").strip()
 DB_PATH = os.getenv("DB_PATH", "/data/kaspi-orders.sqlite3").strip()
 
 # psycopg3: обязательно отключаем server-side prepared statements
-PG_CONNECT_ARGS: Dict[str, Any] = {"prepare_threshold": 0}
+PG_CONNECT_ARGS: Dict[str, Any] = {"prepare_threshold": None}
 
 def _sa_url(url: str) -> str:
     """Нормализуем URL под SQLAlchemy + psycopg3."""
@@ -43,7 +44,8 @@ if DATABASE_URL:
         SA_URL,
         future=True,
         pool_pre_ping=True,
-        connect_args=PG_CONNECT_ARGS,  # <— ключ к решению DuplicatePreparedStatement
+        connect_args=PG_CONNECT_ARGS,
+        poolclass=NullPool,# <— ключ к решению DuplicatePreparedStatement
         pool_recycle=1800,
     )
     DIALECT = _engine.dialect.name  # 'postgresql'
