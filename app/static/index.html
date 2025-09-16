@@ -620,6 +620,9 @@
         if(exc) p.set('exclude_states', exc);
         if(bd_start) p.set('business_day_start', bd_start);
 
+        // ДОБАВЬ:
+        p.set('exclude_canceled', document.getElementById('exclude_states')?.checked ? '1' : '0');
+
         // Аналитика (graceful)
         let data=null;
         try{
