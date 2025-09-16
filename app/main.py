@@ -5,7 +5,7 @@ import os
 import re
 import uuid
 import asyncio
-from datetime import datetime, timedelta, time
+from datetime import datetime, timedelta, time, date as _date
 from pathlib import Path
 from typing import Optional, Dict, List, Iterable, Tuple, Callable
 
@@ -59,6 +59,9 @@ USE_BUSINESS_DAY   = os.getenv("USE_BUSINESS_DAY", "true").lower() in ("1","true
 STORE_ACCEPT_UNTIL = os.getenv("STORE_ACCEPT_UNTIL", "17:00")   # HH:MM
 
 ENRICH_CONCURRENCY = int(os.getenv("ENRICH_CONCURRENCY", "6") or 6)
+
+# ВАЖНО: запас вокруг интервала сбора для защиты от пограничных сдвигов
+FETCH_MARGIN_MINUTES = int(os.getenv("FETCH_MARGIN_MINUTES", "90") or 0)
 
 # ---------- FastAPI ----------
 app = FastAPI(title="Kaspi Orders Analytics")
@@ -455,13 +458,17 @@ def _collect_range(
 
     states_inc = _normalize_states_inc(states_inc, expand_archive=True)
 
+    # период для финальной фильтрации (по операционному дню)
     range_start_day = start_dt.astimezone(tzinfo).date().isoformat()
     range_end_day   = end_dt.astimezone(tzinfo).date().isoformat()
 
     if client is None:
         raise HTTPException(status_code=500, detail="Kaspi client not configured")
 
-    for s, e in iter_chunks(start_dt, end_dt, CHUNK_DAYS):
+    # запас вокруг периода, чтобы не терять пограничные заказы у Kaspi
+    fetch_margin = timedelta(minutes=FETCH_MARGIN_MINUTES)
+
+    for s, e in iter_chunks(start_dt - fetch_margin, end_dt + fetch_margin, CHUNK_DAYS):
         try:
             try_field = date_field
             while True:
@@ -494,7 +501,7 @@ def _collect_range(
                         else:
                             op_day, reason = raw_day, "raw"
 
-                        # мост: если smart день выпал за период, но raw попадает — считаем по raw
+                        # мост: если smart-день выпал за период, но raw попадает — считаем по raw
                         if not (range_start_day <= op_day <= range_end_day) and (range_start_day <= raw_day <= range_end_day):
                             op_day, reason = raw_day, "raw_bridge"
 
@@ -518,6 +525,7 @@ def _collect_range(
                             "number": _guess_number(attrs, oid),
                             "state": st,
                             "date": dtt.isoformat(),
+                            "date_ms": ms,            # ← точный сырой штамп (мс)
                             "op_day": op_day,
                             "op_reason": reason,
                             "amount": round(amt, 2),
@@ -552,7 +560,9 @@ async def analytics(
     start: str = Query(...), end: str = Query(...), tz: str = Query(DEFAULT_TZ),
     date_field: str = Query(DATE_FIELD_DEFAULT),
     states: Optional[str] = Query(None), exclude_states: Optional[str] = Query(None),
-    with_prev: bool = Query(True), exclude_canceled: bool = Query(True),
+    with_prev: bool = Query(True),
+    # ключевая смена: уважаем UI, по умолчанию НЕ навязываем исключение CANCELED
+    exclude_canceled: Optional[bool] = Query(None),
     start_time: Optional[str] = Query(None), end_time: Optional[str] = Query(None),
     use_bd: Optional[bool] = Query(None), business_day_start: Optional[str] = Query(None),
     assign_mode: str = Query("smart", pattern="^(smart|business|raw)$"),
@@ -572,14 +582,15 @@ async def analytics(
             start_dt = apply_hhmm(start_dt, start_time)
         if end_time:
             e0 = parse_date_local(end, tz)
-            end_dt = apply_hhmm(e0, end_time).replace(tzinfo=tzinfo)
+            end_dt = apply_hhmm(e0, end_time).astimezone(tzinfo)
 
     if end_dt < start_dt:
         raise HTTPException(status_code=400, detail="end < start")
 
     inc = parse_states_csv(states)
     exc = parse_states_csv(exclude_states) or set()
-    if exclude_canceled:
+    # уважение чекбокса: исключаем CANCELED только если это явно попросили и не задан собственный exclude_states
+    if (exclude_canceled is True) and not exclude_states:
         exc |= {"CANCELED"}
 
     days, cities_dict, tot, tot_amt, st_counts, _ = _collect_range(
@@ -627,16 +638,15 @@ def _select_targets(out: List[Dict[str, object]], enrich_day: str, enrich_scope:
         sel = [it for it in out if str(it["op_day"]) == enrich_day]
         return sel if not limit or limit <= 0 else sel[:limit]
     if enrich_scope in ("last_week", "last_month"):
-        # берем за последние 7 / 30 дней относительно последнего видимого дня
+        # берем за последние 7 / 30 дней относительно последнего видимого дня (строка YYYY-MM-DD)
         try:
-            end = datetime.fromisoformat(enrich_day)
+            end_d = _date.fromisoformat(enrich_day)
         except Exception:
-            # если вдруг enrich_day это не ISO даты (не должно быть) — просто вернем all
             return out if not limit or limit <= 0 else out[:limit]
         span = 7 if enrich_scope == "last_week" else 30
-        start = (end - timedelta(days=span-1)).date().isoformat()
-        end_s = end.date().isoformat()
-        sel = [it for it in out if start <= str(it["op_day"]) <= end_s]
+        start_d = end_d - timedelta(days=span-1)
+        s, e = start_d.isoformat(), end_d.isoformat()
+        sel = [it for it in out if s <= str(it["op_day"]) <= e]
         return sel if not limit or limit <= 0 else sel[:limit]
     return out
 
