@@ -1,4 +1,3 @@
-# app/main.py
 from __future__ import annotations
 
 # ---------- imports ----------
@@ -247,6 +246,12 @@ def _guess_number(attrs: dict, fallback_id: str) -> str:
         v = attrs.get(k)
         if isinstance(v, str) and v.strip():
             return v.strip()
+        # иногда number приходит числом
+        try:
+            if isinstance(v, (int, float)):
+                return str(v)
+        except Exception:
+            pass
     return str(fallback_id)
 
 # ---------- HTTPX (для /entries) ----------
@@ -541,7 +546,7 @@ def _collect_range(
 
     return out_days, city_counts, total_orders, round(total_amount, 2), state_counts, flat_out
 
-# ---------- публичные эндпоинты: аналитика ----------
+# ---------- публичные эндпойнты: аналитика ----------
 @app.get("/orders/analytics", response_model=AnalyticsResponse)
 async def analytics(
     start: str = Query(...), end: str = Query(...), tz: str = Query(DEFAULT_TZ),
