@@ -112,6 +112,11 @@ RU_STATUS_MAP = {
     "ОТМЕНЕН": "CANCELED",
 }
 
+# поля, которые трактуем как «приём заказа» и считаем по cut-off
+_ACCEPT_FIELDS = {"creationDate", "date"}
+# поля доставки/выдачи, для которых используем «бизнес-день»
+_BUSINESS_FIELDS = {"shipmentDate", "deliveryDate", "plannedDeliveryDate"}
+
 def _bd_delta(hhmm: str) -> timedelta:
     try:
         h, m = hhmm.split(":")
@@ -305,6 +310,40 @@ def _smart_operational_day(attrs: dict, state: str, tzinfo: pytz.BaseTzInfo,
 
     return datetime.now(tzinfo).date().isoformat(), "fallback_now"
 
+
+# --- field-aware assign_day (привязка к выбранному полю даты) ---
+def _assign_day(attrs: dict, state: str, tzinfo: pytz.BaseTzInfo,
+                date_field: str, store_accept_until: str, business_day_start: str) -> Tuple[str, str]:
+    ms_creation = extract_ms(attrs, "creationDate")
+    ms_planned  = extract_ms(attrs, "plannedShipmentDate")
+    ms_ship     = extract_ms(attrs, "shipmentDate")
+    ms_deliv    = extract_ms(attrs, "deliveryDate") or extract_ms(attrs, "plannedDeliveryDate")
+
+    dt_creation = datetime.fromtimestamp(ms_creation/1000, tz=pytz.UTC).astimezone(tzinfo) if ms_creation else None
+    dt_planned  = datetime.fromtimestamp(ms_planned/1000,  tz=pytz.UTC).astimezone(tzinfo) if ms_planned  else None
+    dt_ship     = datetime.fromtimestamp(ms_ship/1000,     tz=pytz.UTC).astimezone(tzinfo) if ms_ship     else None
+    dt_deliv    = datetime.fromtimestamp(ms_deliv/1000,    tz=pytz.UTC).astimezone(tzinfo) if ms_deliv    else None
+
+    if date_field in _ACCEPT_FIELDS:
+        cutoff_h, cutoff_m = map(int, store_accept_until.split(":"))
+        cutoff = time(cutoff_h, cutoff_m, 0)
+        base = dt_creation or dt_planned or dt_ship or dt_deliv or datetime.now(tzinfo)
+        if base.time() <= cutoff:
+            return base.date().isoformat(), "created_before_cutoff"
+        else:
+            return (base + timedelta(days=1)).date().isoformat(), "created_after_cutoff_next_day"
+
+    if date_field == "plannedShipmentDate" and dt_planned:
+        return dt_planned.date().isoformat(), "planned"
+
+    if date_field in _BUSINESS_FIELDS:
+        base = dt_ship or dt_deliv or dt_planned or dt_creation or datetime.now(tzinfo)
+        shift = timedelta(hours=24) - _bd_delta(business_day_start)
+        return (base + shift).date().isoformat(), "business_day"
+
+    base = dt_creation or dt_planned or dt_ship or dt_deliv or datetime.now(tzinfo)
+    return base.date().isoformat(), "fallback"
+
 # ---------- обогащение позиций (без 401 при отсутствии токена) ----------
 async def _first_item_details(order_id: str, timeout_scale: float = 1.0) -> Optional[Dict[str, object]]:
     token = get_current_kaspi_token()
@@ -488,7 +527,7 @@ def _collect_range(
 
                         # назначение операционного дня
                         if assign_mode == "smart":
-                            op_day, reason = _smart_operational_day(attrs, st, tzinfo, store_accept_until, business_day_start)
+                            op_day, reason = _assign_day(attrs, st, tzinfo, date_field, store_accept_until, business_day_start)
                         elif assign_mode == "business":
                             op_day, reason = bucket_date(dtt, use_bd=True, bd_start=business_day_start), "business"
                         else:
@@ -647,8 +686,10 @@ async def _list_ids_core(
     limit: int, order: str, grouped: int,
     with_items: int, enrich_scope: str,
     assign_mode: str, store_accept_until: Optional[str],
+    start_time: Optional[str], end_time: Optional[str],
     progress_cb: Optional[Callable[[str, int, int, str], None]] = None,
 ) -> Dict[str, object]:
+
 
     tzinfo = tzinfo_of(tz)
     eff_use_bd = USE_BUSINESS_DAY if use_bd is None else bool(use_bd)
