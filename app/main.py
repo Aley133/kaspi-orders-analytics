@@ -461,7 +461,9 @@ def _collect_range(
     if client is None:
         raise HTTPException(status_code=500, detail="Kaspi client not configured")
 
-    for s, e in iter_chunks(start_dt, end_dt, CHUNK_DAYS):
+    scan_start = start_dt - timedelta(days=1)
+    scan_end   = end_dt + timedelta(days=1)
+    for s, e in iter_chunks(scan_start, scan_end, CHUNK_DAYS):
         try:
             try_field = date_field
             while True:
@@ -551,12 +553,13 @@ def _collect_range(
 async def analytics(
     start: str = Query(...), end: str = Query(...), tz: str = Query(DEFAULT_TZ),
     date_field: str = Query(DATE_FIELD_DEFAULT),
-    states: Optional[str] = Query(None), exclude_states: Optional[str] = Query(None),
+    states: Optional[List[str]] = Query(None), exclude_states: Optional[List[str]] = Query(None),
     with_prev: bool = Query(True), exclude_canceled: bool = Query(True),
     start_time: Optional[str] = Query(None), end_time: Optional[str] = Query(None),
     use_bd: Optional[bool] = Query(None), business_day_start: Optional[str] = Query(None),
     assign_mode: str = Query("smart", pattern="^(smart|business|raw)$"),
     store_accept_until: Optional[str] = Query(None),
+    exclude_canceled: bool = Query(True),
 ):
     tzinfo = tzinfo_of(tz)
 
@@ -577,8 +580,8 @@ async def analytics(
     if end_dt < start_dt:
         raise HTTPException(status_code=400, detail="end < start")
 
-    inc = parse_states_csv(states)
-    exc = parse_states_csv(exclude_states) or set()
+    inc = parse_states_csv(",".join(states) if isinstance(states, (list, tuple, set)) else states)
+    exc = parse_states_csv(",".join(exclude_states) if isinstance(exclude_states, (list, tuple, set)) else exclude_states) or set()
     if exclude_canceled:
         exc |= {"CANCELED"}
 
@@ -642,12 +645,13 @@ def _select_targets(out: List[Dict[str, object]], enrich_day: str, enrich_scope:
 
 async def _list_ids_core(
     start: str, end: str, tz: str, date_field: str,
-    states: Optional[str], exclude_states: Optional[str],
+    states: Optional[List[str]], exclude_states: Optional[List[str]],
     use_bd: Optional[bool], business_day_start: Optional[str],
     limit: int, order: str, grouped: int,
     with_items: int, enrich_scope: str,
     assign_mode: str, store_accept_until: Optional[str],
     progress_cb: Optional[Callable[[str, int, int, str], None]] = None,
+    exclude_canceled: bool = True,
 ) -> Dict[str, object]:
 
     tzinfo = tzinfo_of(tz)
@@ -657,8 +661,10 @@ async def _list_ids_core(
     start_dt = parse_date_local(start, tz)
     end_dt   = parse_date_local(end, tz) + timedelta(days=1) - timedelta(milliseconds=1)
 
-    inc = parse_states_csv(states)
-    exc = parse_states_csv(exclude_states) or set()
+    inc = parse_states_csv(",".join(states) if isinstance(states, (list, tuple, set)) else states)
+    exc = parse_states_csv(",".join(exclude_states) if isinstance(exclude_states, (list, tuple, set)) else exclude_states) or set()
+    if exclude_canceled:
+        exc |= {"CANCELED"}
 
     _, _, _, _, _, out = _collect_range(
         start_dt, end_dt, tz, date_field, inc, exc,
@@ -738,8 +744,8 @@ async def list_ids(
     end: str = Query(...),
     tz: str = Query(DEFAULT_TZ),
     date_field: str = Query(DATE_FIELD_DEFAULT),
-    states: Optional[str] = Query(None),
-    exclude_states: Optional[str] = Query(None),
+    states: Optional[List[str]] = Query(None),
+    exclude_states: Optional[List[str]] = Query(None),
     use_bd: Optional[bool] = Query(None),
     business_day_start: Optional[str] = Query(None),
     limit: int = Query(0, description="0 = без ограничения"),
@@ -749,11 +755,13 @@ async def list_ids(
     enrich_scope: str = Query("last_day", pattern="^(none|last_day|last_week|last_month|all)$"),
     assign_mode: str = Query("smart", pattern="^(smart|business|raw)$"),
     store_accept_until: Optional[str] = Query(None),
+    exclude_canceled: bool = Query(True),
 ):
     return await _list_ids_core(
         start, end, tz, date_field, states, exclude_states,
         use_bd, business_day_start, limit, order, grouped,
-        with_items, enrich_scope, assign_mode, store_accept_until, None
+        with_items, enrich_scope, assign_mode, store_accept_until, None,
+        exclude_canceled=exclude_canceled
     )
 
 # ---------- CSV ----------
@@ -763,20 +771,22 @@ async def list_ids_csv(
     end: str = Query(...),
     tz: str = Query(DEFAULT_TZ),
     date_field: str = Query(DATE_FIELD_DEFAULT),
-    states: Optional[str] = Query(None),
-    exclude_states: Optional[str] = Query(None),
+    states: Optional[List[str]] = Query(None),
+    exclude_states: Optional[List[str]] = Query(None),
     use_bd: Optional[bool] = Query(None),
     business_day_start: Optional[str] = Query(None),
     order: str = Query("asc", pattern="^(asc|desc)$"),
     assign_mode: str = Query("smart", pattern="^(smart|business|raw)$"),
     store_accept_until: Optional[str] = Query(None),
+    exclude_canceled: bool = Query(True),
 ):
     data = await _list_ids_core(
         start, end, tz, date_field, states, exclude_states,
         use_bd, business_day_start,
         limit=100000, order=order, grouped=0,
         with_items=0, enrich_scope="none",
-        assign_mode=assign_mode, store_accept_until=store_accept_until, progress_cb=None
+        assign_mode=assign_mode, store_accept_until=store_accept_until, progress_cb=None,
+        exclude_canceled=exclude_canceled,
     )
     return "\n".join([str(it["number"]) for it in data["items"]])
 
@@ -817,8 +827,8 @@ async def list_ids_async(
     end: str = Query(...),
     tz: str = Query(DEFAULT_TZ),
     date_field: str = Query(DATE_FIELD_DEFAULT),
-    states: Optional[str] = Query(None),
-    exclude_states: Optional[str] = Query(None),
+    states: Optional[List[str]] = Query(None),
+    exclude_states: Optional[List[str]] = Query(None),
     use_bd: Optional[bool] = Query(None),
     business_day_start: Optional[str] = Query(None),
     limit: int = Query(0, description="0 = без ограничения"),
@@ -837,7 +847,8 @@ async def list_ids_async(
                 start, end, tz, date_field, states, exclude_states,
                 use_bd, business_day_start, limit, order, grouped,
                 with_items, enrich_scope, assign_mode, store_accept_until,
-                progress_cb=_job_progress_cb(job_id)
+                progress_cb=_job_progress_cb(job_id),
+                exclude_canceled=exclude_canceled
             )
             if Jobs.get(job_id, {}).get("cancel"):
                 _job_update(job_id, status="canceled", message="canceled by user", result=None)
