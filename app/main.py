@@ -60,8 +60,9 @@ STORE_ACCEPT_UNTIL = os.getenv("STORE_ACCEPT_UNTIL", "17:00")   # HH:MM
 
 ENRICH_CONCURRENCY = int(os.getenv("ENRICH_CONCURRENCY", "6") or 6)
 
-# запас вокруг интервала, чтобы не терять пограничные заказы
-FETCH_MARGIN_MINUTES = int(os.getenv("FETCH_MARGIN_MINUTES", "90") or 0)
+# запас вокруг интервала сбора (днями), чтобы не терять «переехавшие» заказы
+SCAN_FIELD        = os.getenv("SCAN_FIELD", "creationDate")
+SCAN_MARGIN_DAYS  = int(os.getenv("SCAN_MARGIN_DAYS", "2") or 2)
 
 # ---------- FastAPI ----------
 app = FastAPI(title="Kaspi Orders Analytics")
@@ -82,7 +83,7 @@ app.middleware("http")(attach_kaspi_token_middleware)
 # tenant-aware клиент для /orders
 client = TenantKaspiClient(base_url=KASPI_BASE_URL)
 
-# кэш для entries (пока не используем активно, но оставим)
+# кэш для entries (резерв)
 orders_cache = TTLCache(maxsize=512, ttl=CACHE_TTL)
 
 # /ui статика (best-effort)
@@ -318,7 +319,7 @@ async def _first_item_details(order_id: str, timeout_scale: float = 1.0) -> Opti
     }
 
     async with _async_client(scale=timeout_scale) as cli:
-        # быстрый путь — /orderentries
+        # 1) быстрый путь — /orderentries
         try:
             r = await cli.get("/orderentries",
                               params={"filter[order.id]": order_id, "page[size]": "200"},
@@ -345,7 +346,7 @@ async def _first_item_details(order_id: str, timeout_scale: float = 1.0) -> Opti
         except Exception:
             pass
 
-        # запасной путь — /orders/{id}/entries
+        # 2) запасной путь — /orders/{id}/entries
         try:
             r = await cli.get(f"/orders/{order_id}/entries",
                               params={"page[size]": "200"},
@@ -421,6 +422,8 @@ async def meta():
         "use_business_day": USE_BUSINESS_DAY,
         "business_day_start": BUSINESS_DAY_START,
         "store_accept_until": STORE_ACCEPT_UNTIL,
+        "scan_field": SCAN_FIELD,
+        "scan_margin_days": SCAN_MARGIN_DAYS,
     }
 
 # ---------- утилиты состояний ----------
@@ -441,11 +444,15 @@ def _collect_range(
 
     tzinfo = tzinfo_of(tz)
 
+    # расширяем окно сканирования по дням, чтобы не потерять «переехавшие» заказы
+    scan_start = start_dt - timedelta(days=SCAN_MARGIN_DAYS)
+    scan_end   = end_dt   + timedelta(days=SCAN_MARGIN_DAYS)
+
     seen_ids: set[str] = set()
-    day_counts: Dict[str, int]   = {}
+    day_counts: Dict[str, int]    = {}
     day_amounts: Dict[str, float] = {}
-    city_counts: Dict[str, int]  = {}
-    state_counts: Dict[str, int] = {}
+    city_counts: Dict[str, int]   = {}
+    state_counts: Dict[str, int]  = {}
 
     total_orders = 0
     total_amount = 0.0
@@ -453,22 +460,21 @@ def _collect_range(
 
     states_inc = _normalize_states_inc(states_inc, expand_archive=True)
 
-    # период для финальной фильтрации (по операционному дню)
-    range_start_day = start_dt.astimezone(tzinfo).date().isoformat()
-    range_end_day   = end_dt.astimezone(tzinfo).date().isoformat()
+    want_start_day = start_dt.astimezone(tzinfo).date().isoformat()
+    want_end_day   = end_dt.astimezone(tzinfo).date().isoformat()
 
     if client is None:
         raise HTTPException(status_code=500, detail="Kaspi client not configured")
 
-    fetch_margin = timedelta(minutes=FETCH_MARGIN_MINUTES)
-
-    # ВАЖНО: всегда сканируем по creationDate
-    for s, e in iter_chunks(start_dt - fetch_margin, end_dt + fetch_margin, CHUNK_DAYS):
+    # ВСЕГДА сканируем по SCAN_FIELD (обычно creationDate)
+    for s, e in iter_chunks(scan_start, scan_end, CHUNK_DAYS):
         try:
-            for order in client.iter_orders(start=s, end=e, filter_field="creationDate"):
-                oid   = str(order.get("id"))
+            # если магазин не умеет фильтрацию по SCAN_FIELD — считаем это фатальной ошибкой
+            for order in client.iter_orders(start=s, end=e, filter_field=SCAN_FIELD):
+                oid = str(order.get("id"))
                 if oid in seen_ids:
                     continue
+
                 attrs = order.get("attributes", {}) or {}
 
                 st = norm_state(str(attrs.get("state", "")))
@@ -477,31 +483,32 @@ def _collect_range(
                 if st in states_ex:
                     continue
 
-                # сырое время приёма (creationDate)
-                ms_raw = extract_ms(attrs, "creationDate")
-                if ms_raw is None:
+                # Время приёма (accept): всегда creationDate
+                ms_accept = extract_ms(attrs, "creationDate")
+                if ms_accept is None:
                     continue
-                raw_dt  = datetime.fromtimestamp(ms_raw/1000, tz=pytz.UTC).astimezone(tzinfo)
-                raw_day = raw_dt.date().isoformat()
+                dt_accept  = datetime.fromtimestamp(ms_accept / 1000, tz=pytz.UTC).astimezone(tzinfo)
+                day_accept = dt_accept.date().isoformat()
 
-                # pivot — выбранное поле (если есть), иначе creationDate
-                ms_pivot = extract_ms(attrs, date_field) or ms_raw
-                pivot_dt = datetime.fromtimestamp(ms_pivot/1000, tz=pytz.UTC).astimezone(tzinfo)
+                # Pivot (выбранное поле) — для business/диагностики
+                ms_pivot = extract_ms(attrs, date_field) or ms_accept
+                dt_pivot = datetime.fromtimestamp(ms_pivot / 1000, tz=pytz.UTC).astimezone(tzinfo)
 
-                # операционный день
+                # Определяем день принадлежности по режиму
                 if assign_mode == "smart":
                     op_day, reason = _smart_operational_day(attrs, st, tzinfo, store_accept_until, business_day_start)
+                    # для smart фильтруем по дню
+                    if not (want_start_day <= op_day <= want_end_day):
+                        continue
                 elif assign_mode == "business":
-                    op_day, reason = bucket_date(pivot_dt, use_bd=True, bd_start=business_day_start), "business"
+                    op_day, reason = bucket_date(dt_pivot, use_bd=True, bd_start=business_day_start), "business"
+                    if not (want_start_day <= op_day <= want_end_day):
+                        continue
                 else:
-                    op_day, reason = raw_day, "raw"
-
-                # мост: если op_day вне диапазона, но raw_day внутри — считаем по raw_day
-                if not (range_start_day <= op_day <= range_end_day) and (range_start_day <= raw_day <= range_end_day):
-                    op_day, reason = raw_day, "raw_bridge"
-
-                if not (range_start_day <= op_day <= range_end_day):
-                    continue
+                    # RAW: фильтруем по точному времени приёма
+                    if not (start_dt <= dt_accept <= end_dt):
+                        continue
+                    op_day, reason = day_accept, "raw"
 
                 amt  = extract_amount(attrs)
                 city = extract_city(attrs)
@@ -510,7 +517,7 @@ def _collect_range(
                 day_amounts[op_day] = day_amounts.get(op_day, 0.0) + amt
                 if city:
                     city_counts[city] = city_counts.get(city, 0) + 1
-                state_counts[st]   = state_counts.get(st, 0) + 1
+                state_counts[st] = state_counts.get(st, 0) + 1
 
                 total_orders += 1
                 total_amount += amt
@@ -519,9 +526,9 @@ def _collect_range(
                     "id": oid,
                     "number": _guess_number(attrs, oid),
                     "state": st,
-                    "date": raw_dt.isoformat(),      # время приёма
-                    "date_ms": ms_raw,               # сырой штамп мс (приём)
-                    "date_pivot": pivot_dt.isoformat(),  # выбранное поле/поворотный штамп
+                    "date": dt_accept.isoformat(),       # время приёма (accept)
+                    "date_ms": ms_accept,                # сырой штамп мс приёма
+                    "date_pivot": dt_pivot.isoformat(),  # поворотный штамп (для business/диагностики)
                     "op_day": op_day,
                     "op_reason": reason,
                     "amount": round(amt, 2),
@@ -530,10 +537,13 @@ def _collect_range(
 
                 seen_ids.add(oid)
 
+        except HTTPStatusError as ee:
+            # фатально: магазин не умеет фильтрацию по SCAN_FIELD
+            raise HTTPException(status_code=502, detail=f"Scan failed for field '{SCAN_FIELD}': {ee}")
         except RequestError as e:
             raise HTTPException(status_code=502, detail=f"Network: {e}")
 
-    # формирование дневной оси
+    # ось дней
     out_days: List[DayPoint] = []
     cur = start_dt.astimezone(tzinfo).date()
     end_d = end_dt.astimezone(tzinfo).date()
@@ -560,18 +570,19 @@ async def analytics(
 ):
     tzinfo = tzinfo_of(tz)
 
-    eff_use_bd = USE_BUSINESS_DAY if use_bd is None else bool(use_bd)
+    eff_use_bd = USE_BUSINESS_DAY if use_bd is None else bool(use_bd)  # оставлено для метаданных
     eff_bds    = business_day_start or BUSINESS_DAY_START
 
     start_dt = parse_date_local(start, tz)
     end_dt   = parse_date_local(end, tz) + timedelta(days=1) - timedelta(milliseconds=1)
 
-    # фильтр по времени ВСЕГДА относится к окну приёма (creationDate)
-    if start_time:
-        start_dt = apply_hhmm(start_dt, start_time)
-    if end_time:
-        e0 = parse_date_local(end, tz)
-        end_dt = apply_hhmm(e0, end_time)
+    # ВРЕМЯРЕЗ применяем ТОЛЬКО в raw-режиме (по времени приёма)
+    if assign_mode == "raw":
+        if start_time:
+            start_dt = apply_hhmm(start_dt, start_time)
+        if end_time:
+            e0 = parse_date_local(end, tz)
+            end_dt = apply_hhmm(e0, end_time)
 
     if end_dt < start_dt:
         raise HTTPException(status_code=400, detail="end < start")
@@ -644,15 +655,24 @@ async def _list_ids_core(
     limit: int, order: str, grouped: int,
     with_items: int, enrich_scope: str,
     assign_mode: str, store_accept_until: Optional[str],
+    start_time: Optional[str] = None, end_time: Optional[str] = None,
     progress_cb: Optional[Callable[[str, int, int, str], None]] = None,
 ) -> Dict[str, object]:
 
     tzinfo = tzinfo_of(tz)
-    eff_use_bd = USE_BUSINESS_DAY if use_bd is None else bool(use_bd)
+    eff_use_bd = USE_BUSINESS_DAY if use_bd is None else bool(use_bd)  # метаданные
     eff_bds    = business_day_start or BUSINESS_DAY_START
 
     start_dt = parse_date_local(start, tz)
     end_dt   = parse_date_local(end, tz) + timedelta(days=1) - timedelta(milliseconds=1)
+
+    # времярез — только для raw
+    if assign_mode == "raw":
+        if start_time:
+            start_dt = apply_hhmm(start_dt, start_time)
+        if end_time:
+            e0 = parse_date_local(end, tz)
+            end_dt = apply_hhmm(e0, end_time)
 
     inc = parse_states_csv(states)
     exc = parse_states_csv(exclude_states) or set()
@@ -746,11 +766,14 @@ async def list_ids(
     enrich_scope: str = Query("last_day", pattern="^(none|last_day|last_week|last_month|all)$"),
     assign_mode: str = Query("smart", pattern="^(smart|business|raw)$"),
     store_accept_until: Optional[str] = Query(None),
+    start_time: Optional[str] = Query(None),
+    end_time: Optional[str] = Query(None),
 ):
     return await _list_ids_core(
         start, end, tz, date_field, states, exclude_states,
         use_bd, business_day_start, limit, order, grouped,
-        with_items, enrich_scope, assign_mode, store_accept_until, None
+        with_items, enrich_scope, assign_mode, store_accept_until,
+        start_time, end_time, None
     )
 
 # ---------- CSV ----------
@@ -767,13 +790,16 @@ async def list_ids_csv(
     order: str = Query("asc", pattern="^(asc|desc)$"),
     assign_mode: str = Query("smart", pattern="^(smart|business|raw)$"),
     store_accept_until: Optional[str] = Query(None),
+    start_time: Optional[str] = Query(None),
+    end_time: Optional[str] = Query(None),
 ):
     data = await _list_ids_core(
         start, end, tz, date_field, states, exclude_states,
         use_bd, business_day_start,
         limit=100000, order=order, grouped=0,
         with_items=0, enrich_scope="none",
-        assign_mode=assign_mode, store_accept_until=store_accept_until, progress_cb=None
+        assign_mode=assign_mode, store_accept_until=store_accept_until,
+        start_time=start_time, end_time=end_time, progress_cb=None
     )
     return "\n".join([str(it["number"]) for it in data["items"]])
 
@@ -825,6 +851,8 @@ async def list_ids_async(
     enrich_scope: str = Query("last_day", pattern="^(none|last_day|last_week|last_month|all)$"),
     assign_mode: str = Query("smart", pattern="^(smart|business|raw)$"),
     store_accept_until: Optional[str] = Query(None),
+    start_time: Optional[str] = Query(None),
+    end_time: Optional[str] = Query(None),
 ):
     job_id = _new_job()
     async def worker():
@@ -834,6 +862,7 @@ async def list_ids_async(
                 start, end, tz, date_field, states, exclude_states,
                 use_bd, business_day_start, limit, order, grouped,
                 with_items, enrich_scope, assign_mode, store_accept_until,
+                start_time, end_time,
                 progress_cb=_job_progress_cb(job_id)
             )
             if Jobs.get(job_id, {}).get("cancel"):
