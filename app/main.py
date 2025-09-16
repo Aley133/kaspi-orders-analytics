@@ -60,7 +60,7 @@ STORE_ACCEPT_UNTIL = os.getenv("STORE_ACCEPT_UNTIL", "17:00")   # HH:MM
 
 ENRICH_CONCURRENCY = int(os.getenv("ENRICH_CONCURRENCY", "6") or 6)
 
-# ВАЖНО: запас вокруг интервала сбора для защиты от пограничных сдвигов
+# запас вокруг интервала, чтобы не терять пограничные заказы
 FETCH_MARGIN_MINUTES = int(os.getenv("FETCH_MARGIN_MINUTES", "90") or 0)
 
 # ---------- FastAPI ----------
@@ -249,7 +249,6 @@ def _guess_number(attrs: dict, fallback_id: str) -> str:
         v = attrs.get(k)
         if isinstance(v, str) and v.strip():
             return v.strip()
-        # иногда number приходит числом
         try:
             if isinstance(v, (int, float)):
                 return str(v)
@@ -287,17 +286,14 @@ def _smart_operational_day(attrs: dict, state: str, tzinfo: pytz.BaseTzInfo,
     dt_planned  = datetime.fromtimestamp(ms_planned/1000,  tz=pytz.UTC).astimezone(tzinfo) if ms_planned  else None
     dt_ship     = datetime.fromtimestamp(ms_ship/1000,     tz=pytz.UTC).astimezone(tzinfo) if ms_ship     else None
 
-    # доставленные — считаем по бизнес-дню (20:00→20:00)
     if state in _DELIVERED_STATES:
         base = dt_ship or dt_planned or dt_creation or datetime.now(tzinfo)
         shift = timedelta(hours=24) - _bd_delta(business_day_start)
         return (base + shift).date().isoformat(), "delivered_business_day"
 
-    # если есть план — берём плановую дату (дата без времени)
     if dt_planned:
         return dt_planned.date().isoformat(), "planned"
 
-    # приём до HH:MM — после cut-off переносим на завтра
     cutoff_h, cutoff_m = map(int, store_accept_until.split(":"))
     cutoff = time(cutoff_h, cutoff_m, 0)
     if dt_creation:
@@ -308,11 +304,10 @@ def _smart_operational_day(attrs: dict, state: str, tzinfo: pytz.BaseTzInfo,
 
     return datetime.now(tzinfo).date().isoformat(), "fallback_now"
 
-# ---------- обогащение позиций (без 401 при отсутствии токена) ----------
+# ---------- обогащение позиций ----------
 async def _first_item_details(order_id: str, timeout_scale: float = 1.0) -> Optional[Dict[str, object]]:
     token = get_current_kaspi_token()
     if not token:
-        # нет ключа — пропускаем (чтобы не было 401 и не сбивалась сессия)
         return None
 
     headers = {
@@ -323,7 +318,7 @@ async def _first_item_details(order_id: str, timeout_scale: float = 1.0) -> Opti
     }
 
     async with _async_client(scale=timeout_scale) as cli:
-        # 1) быстрый путь — /orderentries
+        # быстрый путь — /orderentries
         try:
             r = await cli.get("/orderentries",
                               params={"filter[order.id]": order_id, "page[size]": "200"},
@@ -350,7 +345,7 @@ async def _first_item_details(order_id: str, timeout_scale: float = 1.0) -> Opti
         except Exception:
             pass
 
-        # 2) запасной путь — /orders/{id}/entries
+        # запасной путь — /orders/{id}/entries
         try:
             r = await cli.get(f"/orders/{order_id}/entries",
                               params={"page[size]": "200"},
@@ -465,81 +460,76 @@ def _collect_range(
     if client is None:
         raise HTTPException(status_code=500, detail="Kaspi client not configured")
 
-    # запас вокруг периода, чтобы не терять пограничные заказы у Kaspi
     fetch_margin = timedelta(minutes=FETCH_MARGIN_MINUTES)
 
+    # ВАЖНО: всегда сканируем по creationDate
     for s, e in iter_chunks(start_dt - fetch_margin, end_dt + fetch_margin, CHUNK_DAYS):
         try:
-            try_field = date_field
-            while True:
-                try:
-                    for order in client.iter_orders(start=s, end=e, filter_field=try_field):
-                        oid   = str(order.get("id"))
-                        if oid in seen_ids:
-                            continue
-                        attrs = order.get("attributes", {}) or {}
+            for order in client.iter_orders(start=s, end=e, filter_field="creationDate"):
+                oid   = str(order.get("id"))
+                if oid in seen_ids:
+                    continue
+                attrs = order.get("attributes", {}) or {}
 
-                        st = norm_state(str(attrs.get("state", "")))
-                        if states_inc and st not in states_inc:
-                            continue
-                        if st in states_ex:
-                            continue
+                st = norm_state(str(attrs.get("state", "")))
+                if states_inc and st not in states_inc:
+                    continue
+                if st in states_ex:
+                    continue
 
-                        # исходный штамп (raw)
-                        ms = extract_ms(attrs, date_field) or extract_ms(attrs, "creationDate")
-                        if ms is None:
-                            continue
+                # сырое время приёма (creationDate)
+                ms_raw = extract_ms(attrs, "creationDate")
+                if ms_raw is None:
+                    continue
+                raw_dt  = datetime.fromtimestamp(ms_raw/1000, tz=pytz.UTC).astimezone(tzinfo)
+                raw_day = raw_dt.date().isoformat()
 
-                        dtt      = datetime.fromtimestamp(ms/1000, tz=pytz.UTC).astimezone(tzinfo)
-                        raw_day  = dtt.date().isoformat()
+                # pivot — выбранное поле (если есть), иначе creationDate
+                ms_pivot = extract_ms(attrs, date_field) or ms_raw
+                pivot_dt = datetime.fromtimestamp(ms_pivot/1000, tz=pytz.UTC).astimezone(tzinfo)
 
-                        # назначение операционного дня
-                        if assign_mode == "smart":
-                            op_day, reason = _smart_operational_day(attrs, st, tzinfo, store_accept_until, business_day_start)
-                        elif assign_mode == "business":
-                            op_day, reason = bucket_date(dtt, use_bd=True, bd_start=business_day_start), "business"
-                        else:
-                            op_day, reason = raw_day, "raw"
+                # операционный день
+                if assign_mode == "smart":
+                    op_day, reason = _smart_operational_day(attrs, st, tzinfo, store_accept_until, business_day_start)
+                elif assign_mode == "business":
+                    op_day, reason = bucket_date(pivot_dt, use_bd=True, bd_start=business_day_start), "business"
+                else:
+                    op_day, reason = raw_day, "raw"
 
-                        # мост: если smart-день выпал за период, но raw попадает — считаем по raw
-                        if not (range_start_day <= op_day <= range_end_day) and (range_start_day <= raw_day <= range_end_day):
-                            op_day, reason = raw_day, "raw_bridge"
+                # мост: если op_day вне диапазона, но raw_day внутри — считаем по raw_day
+                if not (range_start_day <= op_day <= range_end_day) and (range_start_day <= raw_day <= range_end_day):
+                    op_day, reason = raw_day, "raw_bridge"
 
-                        if not (range_start_day <= op_day <= range_end_day):
-                            continue
+                if not (range_start_day <= op_day <= range_end_day):
+                    continue
 
-                        amt  = extract_amount(attrs)
-                        city = extract_city(attrs)
+                amt  = extract_amount(attrs)
+                city = extract_city(attrs)
 
-                        day_counts[op_day]  = day_counts.get(op_day, 0) + 1
-                        day_amounts[op_day] = day_amounts.get(op_day, 0.0) + amt
-                        if city:
-                            city_counts[city] = city_counts.get(city, 0) + 1
-                        state_counts[st]   = state_counts.get(st, 0) + 1
+                day_counts[op_day]  = day_counts.get(op_day, 0) + 1
+                day_amounts[op_day] = day_amounts.get(op_day, 0.0) + amt
+                if city:
+                    city_counts[city] = city_counts.get(city, 0) + 1
+                state_counts[st]   = state_counts.get(st, 0) + 1
 
-                        total_orders += 1
-                        total_amount += amt
+                total_orders += 1
+                total_amount += amt
 
-                        flat_out.append({
-                            "id": oid,
-                            "number": _guess_number(attrs, oid),
-                            "state": st,
-                            "date": dtt.isoformat(),
-                            "date_ms": ms,            # ← точный сырой штамп (мс)
-                            "op_day": op_day,
-                            "op_reason": reason,
-                            "amount": round(amt, 2),
-                            "city": city,
-                        })
+                flat_out.append({
+                    "id": oid,
+                    "number": _guess_number(attrs, oid),
+                    "state": st,
+                    "date": raw_dt.isoformat(),      # время приёма
+                    "date_ms": ms_raw,               # сырой штамп мс (приём)
+                    "date_pivot": pivot_dt.isoformat(),  # выбранное поле/поворотный штамп
+                    "op_day": op_day,
+                    "op_reason": reason,
+                    "amount": round(amt, 2),
+                    "city": city,
+                })
 
-                        seen_ids.add(oid)
-                    break
-                except HTTPStatusError as ee:
-                    # магазин не поддерживает фильтрацию по выбранному полю → откат к creationDate
-                    if ee.response.status_code in (400, 422) and try_field != "creationDate":
-                        try_field = "creationDate"
-                        continue
-                    raise
+                seen_ids.add(oid)
+
         except RequestError as e:
             raise HTTPException(status_code=502, detail=f"Network: {e}")
 
@@ -561,7 +551,7 @@ async def analytics(
     date_field: str = Query(DATE_FIELD_DEFAULT),
     states: Optional[str] = Query(None), exclude_states: Optional[str] = Query(None),
     with_prev: bool = Query(True),
-    # ключевая смена: уважаем UI, по умолчанию НЕ навязываем исключение CANCELED
+    # уважает UI: по умолчанию НЕ исключаем CANCELED
     exclude_canceled: Optional[bool] = Query(None),
     start_time: Optional[str] = Query(None), end_time: Optional[str] = Query(None),
     use_bd: Optional[bool] = Query(None), business_day_start: Optional[str] = Query(None),
@@ -576,20 +566,18 @@ async def analytics(
     start_dt = parse_date_local(start, tz)
     end_dt   = parse_date_local(end, tz) + timedelta(days=1) - timedelta(milliseconds=1)
 
-    # RAW режим позволяет подрезать временем
-    if not eff_use_bd:
-        if start_time:
-            start_dt = apply_hhmm(start_dt, start_time)
-        if end_time:
-            e0 = parse_date_local(end, tz)
-            end_dt = apply_hhmm(e0, end_time).astimezone(tzinfo)
+    # фильтр по времени ВСЕГДА относится к окну приёма (creationDate)
+    if start_time:
+        start_dt = apply_hhmm(start_dt, start_time)
+    if end_time:
+        e0 = parse_date_local(end, tz)
+        end_dt = apply_hhmm(e0, end_time)
 
     if end_dt < start_dt:
         raise HTTPException(status_code=400, detail="end < start")
 
     inc = parse_states_csv(states)
     exc = parse_states_csv(exclude_states) or set()
-    # уважение чекбокса: исключаем CANCELED только если это явно попросили и не задан собственный exclude_states
     if (exclude_canceled is True) and not exclude_states:
         exc |= {"CANCELED"}
 
@@ -638,7 +626,6 @@ def _select_targets(out: List[Dict[str, object]], enrich_day: str, enrich_scope:
         sel = [it for it in out if str(it["op_day"]) == enrich_day]
         return sel if not limit or limit <= 0 else sel[:limit]
     if enrich_scope in ("last_week", "last_month"):
-        # берем за последние 7 / 30 дней относительно последнего видимого дня (строка YYYY-MM-DD)
         try:
             end_d = _date.fromisoformat(enrich_day)
         except Exception:
